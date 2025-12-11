@@ -1,0 +1,67 @@
+acquisition_method: DIA
+
+input_files:
+  - /data1/2024-HAP1/mzml/20231206_HAP1_1ug_30min_DIA_2Th_5e4_3p5ms_rep01.mzML
+  - /data1/2024-HAP1/mzml/20231206_HAP1_1ug_30min_DIA_2Th_5e4_3p5ms_rep02.mzML
+  - /data1/2024-HAP1/mzml/20231206_HAP1_1ug_30min_DIA_2Th_5e4_3p5ms_rep03.mzML
+
+# For processing all files (.raw or .mzML) in a directory, uncomment the following line
+# input_dir: /data1/2024-HAP1/mzml
+
+output_directory: /data1/2024-HAP1/delpi
+
+fasta_file: /data1/FASTA/2022-02-18-reviewed-UP000005640-UP000000625.fas
+
+ms1_mass_tol_in_ppm: 10
+ms2_mass_tol_in_ppm: 10
+
+q_value_cutoff: 0.01
+
+database_directory: /data1/speclib/2022-02-18-reviewed-UP000005640-UP000000625
+
+digest:
+  enzyme: trypsin
+  min_len: 7
+  max_len: 30
+  max_missed_cleavages: 1
+  n_term_methionine_excision: true
+
+modification:
+  max_mods: 2     # max number of variable modifications per peptide
+  mod_param_set:
+  - mod_name: Carbamidomethyl
+    residue: C
+    location: anywhere
+    fixed: true
+  - mod_name: Oxidation
+    residue: M
+    location: anywhere
+    fixed: false
+  - mod_name: Acetyl
+    residue: "*"
+    location: protein_n_term
+    fixed: false
+  # - mod_name: Phospho
+  #   residue: S
+  #   location: anywhere
+  #   fixed: False
+  # - mod_name: Phospho
+  #   residue: T
+  #   location: anywhere
+  #   fixed: False
+  # - mod_name: Phospho
+  #   residue: Y
+  #   location: anywhere
+  #   fixed: False            
+
+precursor:
+  min_charge: 1
+  max_charge: 4
+  min_mz: 300
+  max_mz: 1800
+
+fragment:
+  min_charge: 1
+  max_charge: 2
+  min_mz: 200
+  max_mz: 1800

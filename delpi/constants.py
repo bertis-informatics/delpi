@@ -1,0 +1,21 @@
+LOG_MSG_FORMAT = "[%(asctime)s][%(levelname)s][%(name)s] %(message)s"
+LOG_DATE_FORMAT = "%m-%d-%Y %H:%M:%S"
+
+ELECTRON_MASS = 1.0 / 1822.8885020477
+PROTON_MASS = 1.0072764667710
+NEUTRON_MASS = 1.00866491566
+
+C13C12_MASS_DIFF = 1.00335483
+
+BOLTZMANN = 1.380657e-23
+
+RESCALING_CONSTANT = 0.9995
+RESCALING_CONSTANT_HIGH_PRECISION = 274.335215
+
+# Precursor mass tolerance for isolation window
+# Given an isolation window (I_min, I_max), p
+# I_min - ISOLATION_LOWER_TOL/charge < precursor_mz < I_max + ISOLATION_UPPER_TOL/charge
+ISOLATION_LOWER_TOL = 3.5
+ISOLATION_UPPER_TOL = 1.25
+
+MAX_FRAGMENTS = 16
