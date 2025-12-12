@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "delpi"
-version = "0.1.0"
-description = "DelPi: Deep Learning for Peptide Identification"
+version = "0.9.0"
+description = "DelPi: Deep Learning-based Peptide Identification Software"
 readme = "README.md"
 requires-python = ">=3.12"
 license = {text = "MIT"}
@@ -19,11 +19,11 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
-    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Topic :: Scientific/Engineering :: Proteomics",
 ]
 
 dependencies = [
-    # PyTorch excluded from dependencies - install separately for CUDA support
+    # PyTorch excluded from dependencies - install separately for GPU/MPS support
     # "torch",
     "torchmetrics>=1.4.2", 
     "lightning>=2.5.0",
