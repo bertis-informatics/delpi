@@ -93,8 +93,8 @@ def encode_modification(mod_sites: str, mod_ids: str, out_arr: np.ndarray = None
         out_arr[:] = -1
         return out_arr
 
-    mod_site_arr = parse_mod_string(mod_sites, dtype=np.int16)
-    mod_id_arr = parse_mod_string(mod_ids, dtype=np.int16)
+    mod_site_arr = parse_mod_string(mod_sites)
+    mod_id_arr = parse_mod_string(mod_ids)
 
     for i in range(len(mod_site_arr)):
         site = mod_site_arr[i]
