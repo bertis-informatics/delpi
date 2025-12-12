@@ -488,7 +488,7 @@ class SearchManager:
                 )
             )
             .alias("modified_sequence"),
-        )
+        ).with_columns(posterior_error=1 - (1 / (1 + (-pl.col("score")).exp())))
 
         if target_only:
             pmsm_df = pmsm_df.filter(pl.col("is_decoy") == False)
