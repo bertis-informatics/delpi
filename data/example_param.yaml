@@ -8,16 +8,16 @@ input_files:
 # For processing all files (.raw or .mzML) in a directory, uncomment the following line
 # input_dir: /data1/2024-HAP1/mzml
 
+fasta_file: /data1/FASTA/2022-02-18-reviewed-UP000005640-UP000000625.fas
+
 output_directory: /data1/2024-HAP1/delpi
 
-fasta_file: /data1/FASTA/2022-02-18-reviewed-UP000005640-UP000000625.fas
+database_directory: /data1/speclib/2022-02-18-reviewed-UP000005640-UP000000625
 
 ms1_mass_tol_in_ppm: 10
 ms2_mass_tol_in_ppm: 10
 
 q_value_cutoff: 0.01
-
-database_directory: /data1/speclib/2022-02-18-reviewed-UP000005640-UP000000625
 
 digest:
   enzyme: trypsin
