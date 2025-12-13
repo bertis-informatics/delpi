@@ -69,11 +69,11 @@ Create a YAML parameter file. See the [example configuration](data/example_param
 
 | Field | Description |
 |-------|-------------|
-| `acquisition_method` | Acquisition mode (`DIA` or `DDA`) |
-| `input_files` or `input_dir` | Paths to LC–MS/MS data files. If `input_dir` is specified, all mzML files within the directory will be automatically processed. |
-| `fasta_file` | Protein database in FASTA format |
-| `output_directory` | Directory where search results will be written |
-| `database_directory` | Directory for storing internally generated in silico spectral libraries (if libraries generated using the same FASTA file and search options already exist, they will be reused) |
+| *acquisition_method* | Acquisition mode (`DIA` or `DDA`) |
+| *input_files* or *input_dir* | Paths to LC–MS/MS data files. If *input_dir* is specified, all mzML files within the directory will be automatically processed. |
+| *fasta_file* | Protein database in FASTA format |
+| *output_directory* | Directory where search results will be written |
+| *database_directory* | Directory for storing internally generated in silico spectral libraries (if libraries generated using the same FASTA file and search options already exist, they will be reused) |
 
 **Optional fields:**
 
@@ -97,24 +97,24 @@ DelPi generates a tab-separated output file (`pmsm_results.tsv`):
 
 | Field name | Description |
 |-----------|-------------|
-| `frame_num` | Scan number corresponding to the center of the Peptide–Multi-Spectra Match (PmSM) |
-| `run_name` | Name of the LC–MS run |
-| `modified_sequence` | Peptide sequence including post-translational modifications |
-| `precursor_charge` | Charge state of the precursor ion |
-| `sequence_length` | Length of the peptide sequence |
-| `is_decoy` | Indicator specifying whether the match originates from a decoy sequence |
-| `predicted_rt` | Predicted retention time of the peptide |
-| `observed_rt` | Observed retention time of the peptide |
-| `score` | Raw PmSM score assigned by the DelPi scoring model |
-| `global_precursor_q_value` | Global precursor-level q-value across all runs |
-| `global_peptide_q_value` | Global peptide-level q-value across all runs |
-| `global_protein_group_q_value` | Global protein group-level q-value across all runs |
-| `protein_group` | Protein group inferred according to the parsimony principle |
-| `precursor_q_value` | Run-specific precursor-level q-value |
-| `peptide_q_value` | Run-specific peptide-level q-value |
-| `protein_group_q_value` | Run-specific protein group-level q-value |
-| `ms1_area` | Integrated area under the precursor ion chromatogram in MS1 spectra |
-| `ms2_area` | *(DIA only, optional)* Precursor abundance quantified from fragment-level signals |
+| *frame_num* | Scan number corresponding to the center of the Peptide–Multi-Spectra Match (PmSM) |
+| *run_name* | Name of the LC–MS run |
+| *modified_sequence* | Peptide sequence including post-translational modifications |
+| *precursor_charge* | Charge state of the precursor ion |
+| *sequence_length* | Length of the peptide sequence |
+| *is_decoy* | Indicator specifying whether the match originates from a decoy sequence |
+| *predicted_rt* | Predicted retention time of the peptide |
+| *observed_rt* | Observed retention time of the peptide |
+| *score* | Raw PmSM score assigned by the DelPi scoring model |
+| *global_precursor_q_value* | Global precursor-level q-value across all runs |
+| *global_peptide_q_value* | Global peptide-level q-value across all runs |
+| *global_protein_group_q_value* | Global protein group-level q-value across all runs |
+| *protein_group* | Protein group inferred according to the parsimony principle |
+| *precursor_q_value* | Run-specific precursor-level q-value |
+| *peptide_q_value* | Run-specific peptide-level q-value |
+| *protein_group_q_value* | Run-specific protein group-level q-value |
+| *ms1_area* | Integrated area under the precursor ion chromatogram in MS1 spectra |
+| *ms2_area* | *(DIA only, optional)* Precursor abundance quantified from fragment-level signals |
 
 </details>
 
