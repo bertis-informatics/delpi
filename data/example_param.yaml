@@ -1,13 +1,12 @@
 acquisition_method: DIA
 
-##  for quick testing, only one file is used
 input_files:
   - /data1/MassSpecData/DIA-QE/DIA/collinsb_X1803_171-A.mzML
-  # - /data1/MassSpecData/DIA-QE/DIA/collinsb_X1803_172-B.mzML
-  # - /data1/MassSpecData/DIA-QE/DIA/collinsb_X1803_173-A.mzML
-  # - /data1/MassSpecData/DIA-QE/DIA/collinsb_X1803_174-B.mzML
-  # - /data1/MassSpecData/DIA-QE/DIA/collinsb_X1803_175-A.mzML
-  # - /data1/MassSpecData/DIA-QE/DIA/collinsb_X1803_176-B.mzML
+  - /data1/MassSpecData/DIA-QE/DIA/collinsb_X1803_172-B.mzML
+  - /data1/MassSpecData/DIA-QE/DIA/collinsb_X1803_173-A.mzML
+  - /data1/MassSpecData/DIA-QE/DIA/collinsb_X1803_174-B.mzML
+  - /data1/MassSpecData/DIA-QE/DIA/collinsb_X1803_175-A.mzML
+  - /data1/MassSpecData/DIA-QE/DIA/collinsb_X1803_176-B.mzML
 
 fasta_file: /data1/MassSpecData/DIA-QE/DIA/target_protein_sequences.fasta
 
