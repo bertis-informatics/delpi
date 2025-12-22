@@ -9,30 +9,37 @@ DelPi is an open-source peptide identification tool for mass spectrometry–base
 - **GPU-accelerated inference:** Designed for practical performance on consumer-grade GPUs via PyTorch/CUDA.
 - **Experiment-adaptive workflow:** Employs a two-stage search with experiment-level transfer learning to adapt to instrument and chromatographic conditions.
 
-## System requirements
-- Memory: ≥ 32 GB RAM
-- Compute:
-    - NVIDIA GPU with CUDA support (recommended)
-    - Apple Silicon with MPS support
-    - **CPU-only execution**: Supported, but significantly slower than GPU execution.
-- Memory consideration:
-    - DelPi processes input files **one run at a time**.
-    - Peak memory usage therefore depends on the size of an **individual raw/mzML file**, not on the total number of runs.
-    - As a rule of thumb, available system memory should be
-    **(single run file size + ~16 GB)** to accommodate intermediate data structures, model execution, and operating system overhead.
+## System Requirements
+
+**Memory:** ≥ 32 GB RAM
+
+**Compute:**
+- NVIDIA GPU with CUDA support (recommended)
+- Apple Silicon with MPS support
+- CPU-only execution (supported, but significantly slower)
+
+**Memory Considerations:**
+- DelPi processes input files **one run at a time**
+- Peak memory usage depends on the size of an individual raw/mzML file being processed
+- Recommended available memory: **(single run file size + ~16 GB)** to accommodate intermediate data structures, model execution, and OS overhead
+
+**Runtime:**
+- For a 25 min DIA gradient (human sample, Astral Orbitrap), DelPi completes peptide identification in approximately 20 minutes on a single NVIDIA RTX 4090 GPU
     
-## Runtime     
-- For a 25 min DIA gradient (human sample, Astral Orbitrap), DelPi completes peptide identification in approximately 20 minutes on a single NVIDIA RTX 4090 GPU.
 
 ## Installation
 
 We recommend using [uv](https://github.com/astral-sh/uv), a fast Python package manager. If you prefer pip, simply replace `uv` commands with `pip` equivalents noted below.
 
-### Step 1: Create a Virtual Environment
+### Step 1: Clone the Repository
+```bash
+git clone https://github.com/bertis-informatics/delpi.git
+```
 
+### Step 2: Set Up Virtual Environment
 ```bash
 # Navigate to the DelPi directory
-cd /path/to/delpi
+cd delpi
 
 # Create a virtual environment with Python 3.12
 uv venv delpi_env --python 3.12
@@ -45,7 +52,7 @@ delpi_env\Scripts\activate
 source delpi_env/bin/activate
 ```
 
-### Step 2: Install PyTorch
+### Step 3: Install PyTorch
 
 Visit the [PyTorch official website](https://pytorch.org/get-started/locally/) to obtain the appropriate installation command for your system.
 
@@ -55,30 +62,64 @@ uv pip install torch --index-url https://download.pytorch.org/whl/cu128
 # If using pip: pip install torch --index-url https://download.pytorch.org/whl/cu128
 ```
 
-### Step 3: Install DelPi
+### Step 4: Install DelPi
 
 ```bash
-uv pip install -e .
-# If using pip: pip install -e .
+uv pip install .
+# If using pip: pip install .
 ```
 
-### Step 4: Verify Installation
+### Step 5: Verify Installation
 
 ```bash
 delpi --help
 python -c "import delpi; print('DelPi installed successfully!')"
 ```
 
+## Quick Test
+
+Verify your DelPi installation using publicly available DIA data from the [Skyline tutorial](https://skyline.ms/tutorials/DIA-QE.zip).
+
+1. **Download and extract the DIA test dataset:**
+   ```bash
+   wget https://skyline.ms/tutorials/DIA-QE.zip
+   unzip DIA-QE.zip
+   ```
+
+2. **Configure search parameters:**
+   
+   Copy the example configuration file:
+   ```bash
+   cp data/example_param.yaml my_config.yaml
+   ```
+   
+   Edit `my_config.yaml` to specify paths for `input_files`, `fasta_file`, `output_directory`, and `database_directory`.
+
+3. **Run the search:**
+   ```bash
+   delpi my_config.yaml
+   ```
+
+4. **Verify output:**
+   
+   DelPi generates the following files in your specified `output_directory`:
+   
+   - **`delpi.log`**: Detailed execution log ([example](/examples/output/delpi.log))
+   - **`pmsm_results.tsv`**: Peptide-spectrum matches with q-values ([example](/examples/output/pmsm_results.tsv))
+   - **`protein_group_maxlfq_results.tsv`**: MaxLFQ protein quantification ([example](/examples/output/protein_group_maxlfq_results.tsv))
+   
+   Compare your results with the provided examples to verify correct installation.
+
 ## Getting Started
 
 ### 1. Prepare LC-MS/MS Data
 
-DelPi requires LC-MS/MS data files in **mzML format** (DIA or DDA mode). Vendor raw files can be converted using [ProteoWizard MSConvert](https://proteowizard.sourceforge.io). Support for vendor-specific raw formats will be added in future releases.
+DelPi requires LC-MS/MS data in **mzML format** (DIA or DDA mode). Convert vendor raw files using [ProteoWizard MSConvert](https://proteowizard.sourceforge.io). Native vendor format support will be added in future releases.
 
 
 ### 2. Configure Search Parameters
 
-Create a YAML parameter file. See the [example configuration](data/example_param.yaml) for reference.
+Create a YAML configuration file based on the [example template](data/example_param.yaml).
 
 **Required fields:**
 
@@ -105,7 +146,7 @@ delpi /path/to/your/config.yaml
 
 ### 4. Output Files
 
-DelPi generates a tab-separated output file (`pmsm_results.tsv`):
+DelPi generates tab-separated output files including `pmsm_results.tsv`:
 
 <details>
 <summary>Click to expand output fields</summary>
@@ -147,7 +188,5 @@ DelPi is freely available under the [MIT License](LICENSE.txt).
 
 ## Contact
 
-For questions, bug reports, feature requests, or suggestions, please contact:
+For questions, bug reports, or feature requests, please contact **Jungkap Park** at jungkap.park@bertis.com
 
-**Jungkap Park**  
-Email: jungkap.park@bertis.com
