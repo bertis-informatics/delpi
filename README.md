@@ -9,6 +9,21 @@ DelPi is an open-source peptide identification tool for mass spectrometry–base
 - **GPU-accelerated inference:** Designed for practical performance on consumer-grade GPUs via PyTorch/CUDA.
 - **Experiment-adaptive workflow:** Employs a two-stage search with experiment-level transfer learning to adapt to instrument and chromatographic conditions.
 
+## System requirements
+- Memory: ≥ 32 GB RAM
+- Compute:
+    - NVIDIA GPU with CUDA support (recommended)
+    - Apple Silicon with MPS support
+    - **CPU-only execution**: Supported, but significantly slower than GPU execution.
+- Memory consideration:
+    - DelPi processes input files **one run at a time**.
+    - Peak memory usage therefore depends on the size of an **individual raw/mzML file**, not on the total number of runs.
+    - As a rule of thumb, available system memory should be
+    **(single run file size + ~16 GB)** to accommodate intermediate data structures, model execution, and operating system overhead.
+    
+## Runtime     
+- For a 25 min DIA gradient (human sample, Astral Orbitrap), DelPi completes peptide identification in approximately 20 minutes on a single NVIDIA RTX 4090 GPU.
+
 ## Installation
 
 We recommend using [uv](https://github.com/astral-sh/uv), a fast Python package manager. If you prefer pip, simply replace `uv` commands with `pip` equivalents noted below.

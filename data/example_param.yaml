@@ -1,18 +1,19 @@
 acquisition_method: DIA
 
+##  for quick testing, only one file is used
 input_files:
-  - /data1/2024-HAP1/mzml/20231206_HAP1_1ug_30min_DIA_2Th_5e4_3p5ms_rep01.mzML
-  - /data1/2024-HAP1/mzml/20231206_HAP1_1ug_30min_DIA_2Th_5e4_3p5ms_rep02.mzML
-  - /data1/2024-HAP1/mzml/20231206_HAP1_1ug_30min_DIA_2Th_5e4_3p5ms_rep03.mzML
+  - /data1/MassSpecData/DIA-QE/DIA/collinsb_X1803_171-A.mzML
+  # - /data1/MassSpecData/DIA-QE/DIA/collinsb_X1803_172-B.mzML
+  # - /data1/MassSpecData/DIA-QE/DIA/collinsb_X1803_173-A.mzML
+  # - /data1/MassSpecData/DIA-QE/DIA/collinsb_X1803_174-B.mzML
+  # - /data1/MassSpecData/DIA-QE/DIA/collinsb_X1803_175-A.mzML
+  # - /data1/MassSpecData/DIA-QE/DIA/collinsb_X1803_176-B.mzML
 
-# For processing all files (.raw or .mzML) in a directory, uncomment the following line
-# input_dir: /data1/2024-HAP1/mzml
+fasta_file: /data1/MassSpecData/DIA-QE/DIA/target_protein_sequences.fasta
 
-fasta_file: /data1/FASTA/2022-02-18-reviewed-UP000005640-UP000000625.fas
+output_directory: /data1/MassSpecData/DIA-QE/DIA/delpi
 
-output_directory: /data1/2024-HAP1/delpi
-
-database_directory: /data1/speclib/2022-02-18-reviewed-UP000005640-UP000000625
+database_directory: /data1/MassSpecData/DIA-QE/DIA/delpi/speclib
 
 ms1_mass_tol_in_ppm: 10
 ms2_mass_tol_in_ppm: 10

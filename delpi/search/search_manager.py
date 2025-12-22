@@ -463,11 +463,26 @@ class SearchManager:
             quant_df, on=["run_index", "precursor_index"], how="left"
         )
 
-        # maxlfq_df = maxlfq(pmsm_df, intensity_col="ms2_area", min_peptides_per_protein=1)
+        ## run MaxLFQ
+        if self.search_config.config.get("acquisition_method", "DDA").upper() == "DIA":
+            df = (
+                pmsm_df.filter(pl.col("is_decoy") == False)
+                .filter(pl.col("global_protein_group_q_value") <= 0.01)
+                .filter(pl.col("ms2_area").is_not_null() & (pl.col("ms2_area") > 0))
+                .group_by(["protein_group", "peptide_index", "run_name"])
+                .agg(
+                    pl.col("ms2_area").median().alias("peptide_abundance"),
+                )
+            )
+            pg_quant_df = maxlfq(df, run_col="run_name", min_peptides_per_protein=1)
+        else:
+            pg_quant_df = None
 
-        return pmsm_df
+        return pmsm_df, pg_quant_df
 
-    def save_pmsm_df(self, pmsm_df: pl.DataFrame, target_only: bool = True) -> None:
+    def save_pmsm_df(
+        self, pmsm_df: pl.DataFrame, pg_quant_df: pl.DataFrame, target_only: bool = True
+    ) -> None:
 
         format = self.search_config.config.get("report_format", "tsv").lower()
 
@@ -497,12 +512,22 @@ class SearchManager:
             pmsm_df.write_parquet(
                 self.search_config.output_dir / "pmsm_results.parquet"
             )
+            if pg_quant_df is not None:
+                pg_quant_df.write_parquet(
+                    self.search_config.output_dir
+                    / "protein_group_maxlfq_results.parquet"
+                )
         else:
             pmsm_df.with_columns(
                 pl.col("protein_index").cast(pl.List(pl.String)).list.join(";")
             ).write_csv(
                 self.search_config.output_dir / "pmsm_results.tsv", separator="\t"
             )
+            if pg_quant_df is not None:
+                pg_quant_df.write_csv(
+                    self.search_config.output_dir / "protein_group_maxlfq_results.tsv",
+                    separator="\t",
+                )
 
         self.state = SearchState.DONE
 
@@ -544,10 +569,10 @@ class SearchManager:
         #     .join(result_aggregator.get_run_df(), on="run_index", how="left")
         # )
 
-        pmsm_df = self.perform_quantification(pmsm_df)
+        pmsm_df, pg_quant_df = self.perform_quantification(pmsm_df)
 
         # Save final results
-        self.save_pmsm_df(pmsm_df, target_only=True)
+        self.save_pmsm_df(pmsm_df, pg_quant_df, target_only=True)
 
         logger.info("DelPi workflow completed successfully")
 
