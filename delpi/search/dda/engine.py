@@ -17,7 +17,7 @@ import numpy as np
 import polars as pl
 
 from delpi.lcms.reader.base import MassSpecData
-from delpi.model.delpi_model import DelPiModel
+from delpi.model.classifier import DelPiModel
 from delpi.lcms.dda_run import DDARun
 from delpi.lcms.ms2_spectra import MS2Spectra
 from delpi.lcms.data_container import PeakContainer, MetaContainer

@@ -22,7 +22,7 @@ from delpi.database.spec_lib_reader import SpectralLibReader
 from delpi.database.numba.spec_lib_container import SpectralLibContainer
 from delpi.search.config import SearchConfig
 from delpi.search.base_engine import BaseSearchEngine
-from delpi.model.delpi_model import DelPiModel
+from delpi.model.classifier import DelPiModel
 from delpi.lcms.data_container import PeakContainer
 from delpi.search.result_manager import ResultManager
 from delpi.model.rt_calibrator import RetentionTimeCalibrator

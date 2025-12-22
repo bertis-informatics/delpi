@@ -16,7 +16,7 @@ import numpy as np
 
 from delpi.lcms.dda_run import DDARun
 from delpi.lcms.dia_run import DIARun
-from delpi.model.delpi_model import DelPiModel
+from delpi.model.classifier import DelPiModel
 from delpi.search.config import SearchConfig
 from delpi.lcms.reader.base import MassSpecData
 from delpi.lcms.reader.factory import ReaderFactory
