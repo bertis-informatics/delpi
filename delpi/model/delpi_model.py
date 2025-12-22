@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from delpi.model.mae import Encoder
+from delpi.model.mae_encoder import Encoder
 
 
 class DelPiModel(nn.Module):
