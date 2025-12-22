@@ -124,7 +124,7 @@ class DIARun:
 
     @classmethod
     def determine_dia_scheme(cls, meta_df: pl.DataFrame):
-        # meta_df = _get_test_meta_df(staggered=True , overlapped=False)
+        # [TODO] more sophisticated implementation needed for handling staggered or overlapped windows
         ms2_win_df = (
             meta_df.filter(pl.col("ms_level") == 2)
             .select(pl.col("frame_num", "isolation_min_mz", "isolation_max_mz"))
@@ -165,7 +165,13 @@ class DIARun:
         is_overlapped, is_staggered = (
             iso_win_df[1:-1]
             .select(
-                is_overlapped=pl.col("overlapped").is_between(0.3, 1.5).all(),
+                is_overlapped=(
+                    (pl.col("overlapped") > 0.3)
+                    & (
+                        (pl.col("overlapped") < pl.col("win_width") * 0.3)
+                        | (pl.col("overlapped") < 1.5)
+                    )
+                ),
                 is_staggered=(pl.col("overlapped") > pl.col("win_width") * 0.4).all(),
             )
             .row(0)
