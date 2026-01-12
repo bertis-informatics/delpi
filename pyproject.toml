@@ -49,6 +49,7 @@ dependencies = [
     "grpcio>=1.44.0",
     "grpcio-tools>=1.44.0",
     "protobuf>=4.21",
+    "pythonnet==3.0.5; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
