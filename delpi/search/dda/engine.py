@@ -10,8 +10,6 @@ from collections import defaultdict
 from typing import Dict
 
 import torch
-from torch.amp import autocast
-from torch.nn.attention import SDPBackend, sdpa_kernel
 from tqdm import tqdm
 import numpy as np
 import polars as pl
@@ -31,6 +29,7 @@ from delpi.search.dda.peak_group import find_peak_groups
 from delpi.search.dda.batch_generator import count_total_batches, generate_batches
 from delpi.search.clustering import cluster_matches
 from delpi.search.dia.lfq_utils import get_ms1_area_dda
+from delpi.utils.device_ctx import make_inference_contexts
 from delpi.constants import ISOLATION_LOWER_TOL, ISOLATION_UPPER_TOL
 from delpi.model.input import THEORETICAL_PEAK, EXPERIMENTAL_PEAK
 
@@ -216,9 +215,8 @@ class DDASearchEngine(BaseSearchEngine):
             device=self.device,
         )
 
-        with torch.inference_mode(), autocast(
-            dtype=torch.float16, device_type=self.device.type
-        ), sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION):
+        ctx = make_inference_contexts(self.device)
+        with ctx.inference, ctx.amp, ctx.sdpa:
             cluster_count = 0
             for _, ms2_map in tqdm(
                 run.ms2_maps.items(), position=0, desc="Isolation-Window", leave=True

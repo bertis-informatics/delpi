@@ -12,8 +12,6 @@ import time
 import polars as pl
 import numpy as np
 import torch
-from torch.amp import autocast
-from torch.nn.attention import SDPBackend, sdpa_kernel
 from tqdm import tqdm
 
 from delpi.lcms.reader.base import MassSpecData
@@ -32,6 +30,7 @@ from delpi.search.dia.peak_group import find_peak_groups
 from delpi.search.dia.batch_generator import count_total_batches, generate_batches
 from delpi.search.dia.lfq_utils import get_ms1_area
 from delpi.search.clustering import cluster_matches
+from delpi.utils.device_ctx import make_inference_contexts
 from delpi.model.input import THEORETICAL_PEAK, EXPERIMENTAL_PEAK
 from delpi.search.dia.peak_token import QUANT_THEO_IDX, QUANT_AB_IDX, QUANT_TIME_IDX
 
@@ -204,9 +203,8 @@ class DIASearchEngine(BaseSearchEngine):
             device=self.device,
         )
 
-        with torch.inference_mode(), autocast(
-            dtype=torch.float16, device_type=self.device.type
-        ), sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION):
+        ctx = make_inference_contexts(self.device)
+        with ctx.inference, ctx.amp, ctx.sdpa:
             cluster_count = 0
             for win_idx, dia_win in tqdm(
                 run.windows.items(), position=0, desc="Isolation-Window", leave=True

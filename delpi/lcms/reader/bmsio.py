@@ -68,7 +68,7 @@ def start_bmsio_server():
     if not executable.exists():
         print(f"Error: Server executable not found at {executable}", file=sys.stderr)
         print(f"Expected platform: {platform.system()}", file=sys.stderr)
-        sys.exit(1)
+        return None
 
     # 🔒 Critical: Ensure executable permissions at runtime
     if not ensure_executable_permissions(executable):
@@ -76,7 +76,7 @@ def start_bmsio_server():
             f"Error: Could not set executable permissions for {executable}",
             file=sys.stderr,
         )
-        sys.exit(1)
+        return None
 
     # Verify permissions worked
     if not os.access(executable, os.X_OK):
@@ -84,7 +84,7 @@ def start_bmsio_server():
             f"Error: Executable {executable} is not executable after permission setting",
             file=sys.stderr,
         )
-        sys.exit(1)
+        return None
 
     bmsio_server = BmsioGrpcService(executable)
     bmsio_server.start()
