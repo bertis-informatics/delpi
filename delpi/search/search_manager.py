@@ -41,7 +41,7 @@ from delpi.utils.mp import get_multiprocessing_context
 from delpi.database.utils import get_modified_sequence
 
 
-SUPPORTED_DEVICES = ["cuda", "mps", "cpu"]
+SUPPORTED_DEVICES = ["cuda", "mps"]
 
 logger = logging.getLogger(__name__)
 

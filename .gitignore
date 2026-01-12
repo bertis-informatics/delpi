@@ -130,7 +130,7 @@ dmypy.json
 .pyre/
 
 # temporary directories and files
-
+dev/
 
 # visual studio workspace settings
 *.code-workspace

@@ -19,6 +19,11 @@ def init_bmsio(search_config: SearchConfig):
 
         logging.getLogger("bmsio").setLevel(logging.INFO)
         bmsio_grpc_svc = start_bmsio_server()
+
+        if bmsio_grpc_svc is None:
+            logger.info("Failed to start BMSIO GRPC service")
+            return None
+
         search_config.set_bmsio_server(server_addr=bmsio_grpc_svc.server_address)
         logging.getLogger("bmsio").setLevel(logging.ERROR)
     except ImportError:
@@ -43,7 +48,7 @@ def parse_arguments():
         "--device",
         type=str,
         default="auto",
-        help="Device to use for computation (e.g., 'auto', 'cuda', 'cuda:0', 'mps', 'cpu')",
+        help="Device to use for computation (e.g., 'auto', 'cuda', 'cuda:0', 'mps')",
     )
 
     parser.add_argument(
