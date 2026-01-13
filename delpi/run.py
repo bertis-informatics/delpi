@@ -47,8 +47,8 @@ def parse_arguments():
     parser.add_argument(
         "--device",
         type=str,
-        default="auto",
-        help="Device to use for computation (e.g., 'auto', 'cuda', 'cuda:0', 'mps')",
+        default="cuda",
+        help="Device to use for computation (e.g., 'cuda', 'cuda:0', 'cuda:1')",
     )
 
     parser.add_argument(

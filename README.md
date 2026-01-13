@@ -14,9 +14,10 @@ DelPi is an open-source peptide identification tool for mass spectrometry–base
 **Memory:** ≥ 32 GB RAM
 
 **Compute:**
-- NVIDIA GPU with CUDA support
-- Apple Silicon with MPS support *(support landing soon; current builds may be unstable)*
-- CPU-only execution *(currently unsupported)*
+- **NVIDIA GPU with CUDA support required**
+- Supported OS: **Linux, Windows**
+- macOS (including Apple Silicon/MPS) and CPU-only execution are not supported
+
 
 **Memory Considerations:**
 - DelPi processes input files **one run at a time**
