@@ -153,7 +153,7 @@ class LabelFreeQuantifier:
                 data_keys=["precursor_index", "ms1_area"],
             )
             quant_df = pl.DataFrame(quant_dict).with_columns(
-                pl.lit(run_index).cast(pl.Int32).alias("run_index")
+                pl.lit(run_index).cast(pl.UInt32).alias("run_index")
             )
             dfs.append(quant_df)
 
@@ -210,7 +210,7 @@ class LabelFreeQuantifier:
                     "ms1_area": quant_dict["ms1_area"],
                     "ms2_area": areas,
                 }
-            ).with_columns(pl.lit(run_index).cast(pl.Int32).alias("run_index"))
+            ).with_columns(pl.lit(run_index).cast(pl.UInt32).alias("run_index"))
 
             dfs.append(quant_df)
             # result_mgr.write_dict(group_key, {"ms2_area": areas})
