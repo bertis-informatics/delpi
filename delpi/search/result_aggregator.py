@@ -121,7 +121,7 @@ class ResultsAggregator:
 
         run_df = pl.DataFrame(
             run_info_dict,
-            schema={"run_index": pl.Int32, "run_name": pl.String},
+            schema={"run_index": pl.UInt32, "run_name": pl.String},
         )
         return run_df
 
