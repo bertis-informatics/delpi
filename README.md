@@ -70,6 +70,32 @@ uv pip install .
 # If using pip: pip install .
 ```
 
+### (Optional) Provide the Thermo DLLs (only needed for Thermo RAW)
+
+- **Linux only**: ensure Mono is installed (required by pythonnet). Use the helper script:
+
+  ```bash
+  ./install_mono.sh
+  ```
+
+1. Download (or `git clone`) RawFileReader: https://github.com/thermofisherlsms/RawFileReader
+2. Copy the two DLLs from `RawFileReader/Libs/Net471/`:
+   - `ThermoFisher.CommonCore.Data.dll`
+   - `ThermoFisher.CommonCore.RawFileReader.dll`
+3. Make the DLLs discoverable:
+   - **Set up an environment variable** `PYMSIO_THERMO_DLL_DIR`
+     - Windows example:
+       ```powershell
+       setx PYMSIO_THERMO_DLL_DIR "<path-to-your-dll-folder>"
+       ```
+     - Linux example:
+       ```bash
+       export PYMSIO_THERMO_DLL_DIR="<path-to-your-dll-folder>"
+       ```
+       *(Add the export line to `~/.bashrc` to keep it persistent.)*
+     - Copy the DLLs into the folder referenced by the variable.
+
+
 ### Step 5: Verify Installation
 
 ```bash
