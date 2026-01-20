@@ -49,6 +49,7 @@ dependencies = [
     "grpcio>=1.44.0",
     "grpcio-tools>=1.44.0",
     "protobuf>=4.21",
+    "pymsio>=0.1.7",
 ]
 
 [project.optional-dependencies]
