@@ -338,17 +338,19 @@ def find_peak_groups(
             continue
 
         ## cluster peak groups with ad-hoc peak group scoring
-        comb_count_arr = xic_peak_count_arr + spec_peak_count_arr
-        peak_group_score1_arr = (
-            0.25 * comb_count_arr[peak_group_arr - 1]
-            + 0.5 * comb_count_arr[peak_group_arr]
-            + 0.25 * comb_count_arr[peak_group_arr + 1]
-        )
-        # peak_group_weights = (
-        #     xic_peak_count_arr[peak_group_arr] + spec_peak_count_arr[peak_group_arr]
-        # )
+        apex_median_intensity = np.empty(len(peak_group_arr), dtype=np.float32)
+        for i, t_ in enumerate(peak_group_arr):
+            apex_intensity = xic_arr[:, t_]
+            apex_median_intensity[i] = np.median(apex_intensity[apex_intensity > 0])
+
+        peak_group_weights = (
+            0.25 * spec_peak_count_arr[peak_group_arr - 1]
+            + 0.5 * spec_peak_count_arr[peak_group_arr]
+            + 0.25 * spec_peak_count_arr[peak_group_arr + 1]
+        ) * apex_median_intensity
+
         peak_group_arr = cluster_peaks_with_weights(
-            peak_group_arr, peak_group_score1_arr, dist_cutoff=2, min_cluster_size=1
+            peak_group_arr, peak_group_weights, dist_cutoff=2, min_cluster_size=1
         )
         mask = (peak_group_arr >= peak_lb) & (peak_group_arr <= peak_ub)
         peak_group_arr = peak_group_arr[mask]
