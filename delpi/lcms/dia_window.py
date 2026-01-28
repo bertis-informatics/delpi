@@ -13,6 +13,8 @@ class DIAWindow(BaseSpectra):
     def __init__(
         self,
         window_index: int,
+        isolation_min_mz: float,
+        isolation_max_mz: float,
         meta_df: pl.DataFrame,
         frame_num_arr: np.ndarray,
         mz_arr: np.ndarray,
@@ -53,12 +55,13 @@ class DIAWindow(BaseSpectra):
         self.window_index = window_index
         self.ms1_meta_df = ms1_meta_df
         self.frame_num_to_index = frame_num_to_index
+        self.isolation_mz_range = (isolation_min_mz, isolation_max_mz)
 
-    @property
-    def isolation_mz_range(self):
-        return self.meta_df.item(0, "isolation_min_mz"), self.meta_df.item(
-            0, "isolation_max_mz"
-        )
+    # @property
+    # def isolation_mz_range(self):
+    #     return self.meta_df.item(0, "isolation_min_mz"), self.meta_df.item(
+    #         0, "isolation_max_mz"
+    #     )
 
     def get_frame_num_map(self):
         return DIAWindowFrameNumMap(

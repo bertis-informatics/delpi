@@ -116,8 +116,20 @@ class DIARun:
             ms2_frame_nums
         )
 
+        win_df = self.dia_scheme_df.filter(
+            pl.col("isolation_win_idx") == isolation_win_idx
+        )
+        isolation_min_mz = win_df.item(0, "isolation_min_mz")
+        isolation_max_mz = win_df.item(0, "isolation_max_mz")
         dia_win = DIAWindow(
-            isolation_win_idx, self.meta_df, frame_num_arr, mz_arr, ab_arr, z_arr
+            isolation_win_idx,
+            isolation_min_mz,
+            isolation_max_mz,
+            self.meta_df,
+            frame_num_arr,
+            mz_arr,
+            ab_arr,
+            z_arr,
         )
 
         return dia_win
