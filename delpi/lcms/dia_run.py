@@ -2,12 +2,12 @@ import gc
 from typing import Optional
 
 import tqdm
-import numpy as np
 import polars as pl
 
 from delpi.lcms.reader.base import MassSpecData
 from delpi.lcms.dia_window import DIAWindow
 from delpi.lcms.ms1_spectra import MS1Spectra
+from delpi.lcms.dia_scheme import determine_dia_scheme
 
 
 class DIARun:
@@ -22,11 +22,8 @@ class DIARun:
 
     def _init_meta(self):
         meta_df = self.ms_data.meta_df
-        dia_scheme_df = self.determine_dia_scheme(meta_df)
-        # num_spectra_per_window = dia_scheme_df.select(
-        #     pl.col("frame_num").list.len()
-        # ).unique()
-        # assert num_spectra_per_window.shape[0] == 1
+        scheme_type, dia_scheme_df = determine_dia_scheme(meta_df)
+
         meta_df = meta_df.join(
             dia_scheme_df.select(pl.col("isolation_win_idx", "frame_num")).explode(
                 "frame_num"
@@ -36,6 +33,7 @@ class DIARun:
         )
         self.meta_df = meta_df
         self.dia_scheme_df = dia_scheme_df
+        self.scheme_type = scheme_type
 
     def load_windows(
         self,
@@ -136,139 +134,7 @@ class DIARun:
 
     @classmethod
     def determine_dia_scheme(cls, meta_df: pl.DataFrame):
-        # [TODO] more sophisticated implementation needed for handling staggered or overlapped windows
-        ms2_win_df = (
-            meta_df.filter(pl.col("ms_level") == 2)
-            .select(pl.col("frame_num", "isolation_min_mz", "isolation_max_mz"))
-            .with_columns(
-                pl.col("isolation_min_mz").cast(pl.Float64).round(1).alias("win_lb"),
-                pl.col("isolation_max_mz").cast(pl.Float64).round(1).alias("win_ub"),
-            )
-        )
-        iso_win_df = (
-            ms2_win_df.group_by(["win_lb", "win_ub"])
-            .agg(
-                pl.col("isolation_min_mz").min(),
-                pl.col("isolation_max_mz").max(),
-                pl.len().alias("num_frames"),
-            )
-            .sort("win_lb")
-        ).with_row_index("index")
-
-        if iso_win_df["num_frames"].n_unique() > 5:
-            raise ValueError(
-                "The number of spectra per regular window significantly varies"
-            )
-
-        ms2_win_df = ms2_win_df.join(
-            iso_win_df.select(pl.col("index", "win_lb", "win_ub")),
-            on=["win_lb", "win_ub"],
-            how="left",
-        ).drop(["win_lb", "win_ub"])
-        iso_win_df = iso_win_df.drop(["win_lb", "win_ub"])
-
-        get_win_width = (pl.col("isolation_max_mz") - pl.col("isolation_min_mz")).alias(
-            "win_width"
-        )
-        get_overlapped = (
-            pl.col("isolation_max_mz").shift(1) - pl.col("isolation_min_mz")
-        ).alias("overlapped")
-        iso_win_df = iso_win_df.with_columns(get_win_width, get_overlapped)
-        is_overlapped, is_staggered = (
-            iso_win_df[1:-1]
-            .select(
-                is_overlapped=(
-                    (pl.col("overlapped") > 0.3)
-                    & (
-                        (pl.col("overlapped") < pl.col("win_width") * 0.3)
-                        | (pl.col("overlapped") < 1.5)
-                    )
-                ),
-                is_staggered=(pl.col("overlapped") > pl.col("win_width") * 0.4).all(),
-            )
-            .row(0)
-        )
-
-        if is_staggered:
-            idx, min_mz, max_mz = iso_win_df.select(
-                pl.col("index", "isolation_min_mz", "isolation_max_mz")
-            ).row(0)
-            staggered_iso_wins = [[[idx], min_mz, max_mz]]
-            prev_max_mz = max_mz
-
-            for i in range(1, iso_win_df.shape[0] - 1):
-                staggered_win_df = iso_win_df[i : i + 2]
-                min_mz, max_mz = prev_max_mz, staggered_win_df.item(
-                    0, "isolation_max_mz"
-                )
-                staggered_iso_wins.append(
-                    [staggered_win_df["index"].to_list(), min_mz, max_mz]
-                )
-                prev_max_mz = max_mz
-
-            idx = iso_win_df.item(-1, "index")
-            min_mz, max_mz = prev_max_mz, iso_win_df.item(-1, "isolation_max_mz")
-            staggered_iso_wins.append([[idx], min_mz, max_mz])
-            iso_win_df = pl.DataFrame(
-                staggered_iso_wins,
-                schema={
-                    "index": pl.List(pl.UInt32),
-                    "isolation_min_mz": pl.Float32,
-                    "isolation_max_mz": pl.Float32,
-                },
-                orient="row",
-            ).with_row_index("isolation_win_idx")
-
-            dia_scheme_df = (
-                iso_win_df.explode("index")
-                .join(
-                    ms2_win_df.select(pl.col("index", "frame_num")),
-                    on="index",
-                    how="left",
-                )
-                .group_by("isolation_win_idx")
-                .agg(
-                    pl.col("isolation_min_mz").first(),
-                    pl.col("isolation_max_mz").first(),
-                    pl.col("frame_num"),
-                )
-            )
-        else:
-
-            if is_overlapped:
-                overlapped_mz = iso_win_df["overlapped"].to_numpy()
-                min_mz = iso_win_df["isolation_min_mz"].to_numpy().copy()
-                max_mz = iso_win_df["isolation_max_mz"].to_numpy().copy()
-
-                max_mz[:-1] = max_mz[:-1] - overlapped_mz[1:] * 0.5
-                min_mz[1:] = min_mz[1:] + overlapped_mz[1:] * 0.5
-
-                iso_win_df = iso_win_df.select(pl.col("index")).with_columns(
-                    isolation_min_mz=min_mz, isolation_max_mz=max_mz
-                )
-            else:
-                overlapped_mz = iso_win_df["overlapped"].to_numpy()
-                if np.any(overlapped_mz[1:] > 0.1):
-                    raise ValueError("Cannot determine DIA scheme")
-
-                iso_win_df = iso_win_df.select(
-                    pl.col("index", "isolation_min_mz", "isolation_max_mz")
-                )
-
-            dia_scheme_df = (
-                iso_win_df.join(
-                    ms2_win_df.select(pl.col("index", "frame_num")),
-                    on="index",
-                    how="left",
-                )
-                .group_by("index")
-                .agg(
-                    pl.col("isolation_min_mz").first(),
-                    pl.col("isolation_max_mz").first(),
-                    pl.col("frame_num"),
-                )
-            ).rename({"index": "isolation_win_idx"})
-
+        scheme_type, dia_scheme_df = determine_dia_scheme(meta_df)
         return dia_scheme_df
 
     @classmethod
@@ -279,27 +145,3 @@ class DIARun:
             return False
 
         return True
-
-
-def get_test_meta_df(staggered=False, overlapped=False):
-
-    win_width = 8 if staggered else 4
-    if not staggered and overlapped:
-        win_width += 1
-
-    i = 0
-    meta_list = []
-    for _ in range(100):
-        for st in range(300, 900, 4):
-            meta_list.append([i, st, st + win_width])
-            i += 1
-    meta_df = pl.DataFrame(
-        meta_list,
-        orient="row",
-        schema={
-            "frame_num": pl.UInt32,
-            "isolation_min_mz": pl.Float32,
-            "isolation_max_mz": pl.Float32,
-        },
-    ).with_columns(ms_level=pl.lit(2))
-    return meta_df
