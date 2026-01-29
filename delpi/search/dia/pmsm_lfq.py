@@ -2,6 +2,7 @@ import numpy as np
 import numba as nb
 
 from delpi.utils.numeric import rowwise_pearsonr
+from delpi.search.dia.pmsm_align import align_peptide_multi_spectra_matches
 
 
 @nb.njit(nogil=True, fastmath=True)
@@ -146,11 +147,11 @@ def select_quantifiable_fragments(xic_arrays, min_fragments=3, corr_thresh=0.8):
     return selected_indices
 
 
-@nb.njit(nogil=True, fastmath=True)
+@nb.njit(nogil=True, fastmath=True, cache=True)
 def quantify_fragments(
     xic_arrays: np.ndarray,
     min_fragments: int = 3,
-    corr_thresh: float = 0.8,
+    corr_thresh: float = 0.7,
 ) -> np.ndarray:
     """Select quantifiable fragments based on co-elution similarity.
 
@@ -174,3 +175,63 @@ def quantify_fragments(
         quantified_abundance[run_idx] = np.trapz(xic)
 
     return quantified_abundance
+
+
+@nb.njit(parallel=True, cache=True)
+def perform_lfq(
+    num_runs: int,
+    all_run_index_arr: np.ndarray,
+    # all_precursor_index_arr: np.ndarray,
+    all_rt_arr: np.ndarray,
+    all_xic_arrays: np.ndarray,
+    all_ms1_area_arr: np.ndarray,
+    precursor_indices: np.ndarray,
+    ref_run_indices: np.ndarray,
+    run_stop_indices: np.ndarray,
+    pmsm_stop_indices: np.ndarray,
+) -> np.ndarray:
+
+    # n = all_run_index_arr.shape[0]
+    n = run_stop_indices[-1]
+    quant_precursor_index_arr = np.empty(n, dtype=np.uint32)
+    quant_run_index_arr = np.empty(n, dtype=np.uint32)
+    quant_rt_arr = np.empty(n, dtype=np.float32)
+    quant_ab_arr = np.empty(n, dtype=np.float32)
+    quant_ms1_ab_arr = np.empty(n, dtype=np.float32)
+
+    for i in nb.prange(len(precursor_indices)):
+        precursor_index = precursor_indices[i]
+        ref_run_index = ref_run_indices[i]
+        st = 0 if i == 0 else pmsm_stop_indices[i - 1]
+        ed = pmsm_stop_indices[i]
+
+        run_index_arr = all_run_index_arr[st:ed]
+        rt_arr = all_rt_arr[st:ed]
+        xic_arr = all_xic_arrays[st:ed]
+        ms1_area_arr = all_ms1_area_arr[st:ed]
+        indices, similarities = align_peptide_multi_spectra_matches(
+            num_runs, ref_run_index, run_index_arr, rt_arr, xic_arr
+        )
+
+        run_index_arr_ = run_index_arr[indices]
+        xic_arr_ = xic_arr[indices]
+        rt_arr_ = rt_arr[indices]
+        ms1_area_arr_ = ms1_area_arr[indices]
+        ab_arr_ = quantify_fragments(xic_arr_, min_fragments=3, corr_thresh=0.7)
+
+        st_ = 0 if i == 0 else run_stop_indices[i - 1]
+        ed_ = run_stop_indices[i]
+
+        quant_precursor_index_arr[st_:ed_] = precursor_index
+        quant_run_index_arr[st_:ed_] = run_index_arr_
+        quant_rt_arr[st_:ed_] = rt_arr_
+        quant_ab_arr[st_:ed_] = ab_arr_
+        quant_ms1_ab_arr[st_:ed_] = ms1_area_arr_
+
+    return (
+        quant_precursor_index_arr,
+        quant_run_index_arr,
+        quant_rt_arr,
+        quant_ab_arr,
+        quant_ms1_ab_arr,
+    )

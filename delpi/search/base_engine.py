@@ -178,8 +178,6 @@ class BaseSearchEngine(ABC):
     def perform_tda(self, result_manager: ResultManager) -> pl.DataFrame:
 
         logger.info("Target-decoy analysis started")
-        is_dia = self.get_acquisition_method().lower() == "dia"
-        pmsm_sel_col = "apex_median_intensity" if is_dia else "score"
 
         # Extract parameters from config
         q_value_cutoff = self.search_config.config["q_value_cutoff"]
@@ -191,7 +189,7 @@ class BaseSearchEngine(ABC):
         ).add_result_manager(0, result_manager)
 
         pmsm_df, data_dict = result_aggregator.get_search_results(
-            group_key, load_features=True, estimate_apex_intensity=is_dia
+            group_key, load_features=True
         )
 
         num_decoys = pmsm_df["is_decoy"].sum()
@@ -233,7 +231,7 @@ class BaseSearchEngine(ABC):
         ## Use apex_median_intensity instead of score to avoid PMSMs in XIC tails
 
         pmsm_df = pmsm_df.group_by(["precursor_index"]).agg(
-            pl.all().sort_by(pmsm_sel_col).last()
+            pl.all().sort_by("score").last()
         )
 
         logger.debug(

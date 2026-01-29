@@ -33,12 +33,9 @@ from delpi.search.tda.fdr_analyzer import FDRAnalyzer
 from delpi.search.tda.trainer import TargetDecoyTrainer
 from delpi.search.search_state import SearchState
 from delpi.search.dia.max_lfq import maxlfq
-from delpi.search.rt_align import (
-    align_retention_times,
-    estimate_representative_retention_time,
-)
 from delpi.utils.mp import get_multiprocessing_context
 from delpi.database.utils import get_modified_sequence
+from delpi.constants import DEFAULT_Q_VALUE_CUTOFF
 
 
 SUPPORTED_DEVICES = ["cuda"]
@@ -290,18 +287,16 @@ class SearchManager:
         logger.info("Performing global target-decoy analysis")
 
         search_config = self.search_config
-        is_dia = search_config.config.get("acquisition_method", "DIA") == "DIA"
-        pmsm_sel_col = "apex_median_intensity" if is_dia else "score"
-
         group_key = self.get_results_group_key()
-        q_value_cutoff = search_config.config["q_value_cutoff"]
+        q_value_cutoff = search_config.config.get(
+            "q_value_cutoff", DEFAULT_Q_VALUE_CUTOFF
+        )
 
         result_aggregator = ResultsAggregator(
             db_dir=self.get_db_dir(), search_config=search_config
         )
 
         hdf_files = result_aggregator.get_hdf_files()
-        num_runs = len(result_aggregator._results_dict)
 
         # [TODO] load features conditionally based on num_runs and available memory
         total_hdf_size = sum(f.stat().st_size for f in hdf_files)
@@ -315,7 +310,7 @@ class SearchManager:
         )
 
         pmsm_df, data_dict = result_aggregator.get_search_results(
-            group_key, load_features=load_features, estimate_apex_intensity=is_dia
+            group_key, load_features=load_features
         )
 
         num_decoys = pmsm_df["is_decoy"].sum()
@@ -326,22 +321,31 @@ class SearchManager:
 
         # Train classifier and rescore PMSMs
         splitter = DatasetSplitter()
-        train_df, test_df = splitter.split_by_peptide(pmsm_df)
+        train_df, test_df = splitter.split_by_peptide(
+            pmsm_df.select(
+                pl.col(
+                    "run_index",
+                    "pmsm_index",
+                    "peptide_index",
+                    "is_decoy",
+                    "observed_rt",
+                    "predicted_rt",
+                )
+            )
+        )
 
-        if load_features:
-            train_dataset = PMSMDataset.create_tensor_dataset(train_df, data_dict)
-            test_dataset = PMSMDataset.create_tensor_dataset(test_df, data_dict)
-        else:
-            train_dataset = PMSMDataset(
-                pmsm_df=train_df,
-                hdf_files=hdf_files,
-                hdf_group_key=group_key,
-            )
-            test_dataset = PMSMDataset(
-                pmsm_df=test_df,
-                hdf_files=hdf_files,
-                hdf_group_key=group_key,
-            )
+        train_dataset = PMSMDataset(
+            pmsm_df=train_df,
+            hdf_files=hdf_files,
+            hdf_group_key=group_key,
+            data_dict=data_dict,
+        )
+        test_dataset = PMSMDataset(
+            pmsm_df=test_df,
+            hdf_files=hdf_files,
+            hdf_group_key=group_key,
+            data_dict=data_dict,
+        )
 
         trainer = TargetDecoyTrainer()
         test_score_arr = trainer.train(
@@ -355,90 +359,45 @@ class SearchManager:
         # Cleanup (make sure hdf files are closed)
         del test_dataset
         del train_dataset
+        data_dict = None
 
-        ## select best-scoring PMSM per cluster of each run
         pmsm_df = (
-            test_df.with_columns(score=test_score_arr)
+            test_df.select(
+                pl.col("run_index", "pmsm_index"),
+                pl.Series(values=test_score_arr, name="score"),
+            )
+            .join(
+                pmsm_df,
+                how="left",
+                on=["run_index", "pmsm_index"],
+            )
             .group_by(["run_index", "cluster"])
             .agg(pl.all().sort_by("score").last())
         )
+
+        ## select best-scoring PMSM per cluster of each run
+        # pmsm_df = (
+        #     test_df.with_columns(score=test_score_arr)
+        #     .group_by(["run_index", "cluster"])
+        #     .agg(pl.all().sort_by("score").last())
+        # )
         logger.info(
             f"Selected {pmsm_df.shape[0]} non-redundant PMSMs (one per cluster) from {test_df.shape[0]} PMSMs"
         )
 
-        ## align retention times and estimate representative RTs
-        logger.info("Aligning retention times across runs")
-        xic_peak_interval = result_aggregator.get_xic_peak_interval()
-
-        aligned_rt_df = align_retention_times(
-            pmsm_df,
-            rt_column="observed_rt",
-            aligned_rt_column="aligned_rt",
-            pmsm_sel_col=pmsm_sel_col,
-        )
-        rep_rt_df = estimate_representative_retention_time(
-            aligned_rt_df,
-            weight_column="score",
-            aligned_rt_column="aligned_rt",
-            xic_peak_interval=xic_peak_interval,
-            rep_rt_column="representative_rt",
-        )
-
-        ## select PMSM for each precursor based on aligned RT
-        logger.info("Selecting best PMSM per precursor based on aligned RT")
-        precursor_rt_df = (
-            aligned_rt_df.join(rep_rt_df, on="precursor_index", how="left")
-            .with_columns(
-                (pl.col("aligned_rt") - pl.col("representative_rt"))
-                .abs()
-                .alias("delta_rt")
-            )
-            .group_by(["run_index", "precursor_index"])
-            .agg(pl.all().sort_by("delta_rt").first())
-        )
-        pmsm_df = pmsm_df.join(
-            precursor_rt_df.select(pl.col("run_index", "pmsm_index")),
-            on=["run_index", "pmsm_index"],
-            how="inner",
-        )
-
-        ## update precursor score with the best PMSM score
-        # precursor_score_df = pmsm_df.group_by(["run_index", "precursor_index"]).agg(
-        #     pl.col("score").max()
-        # )
-        # pmsm_df = (
-        #     pmsm_df.select(pl.exclude("score"))
-        #     .join(
-        #         precursor_rt_df.select(pl.col("run_index", "pmsm_index")),
-        #         on=["run_index", "pmsm_index"],
-        #         how="inner",
-        #     )
-        #     .join(precursor_score_df, on=["run_index", "precursor_index"], how="left")
-        # )
-        logger.debug(
-            f"Selected {pmsm_df.shape[0]} best-scoring PMSMs (one per Precursor)"
-        )
-
+        ## Perform global and run-specific FDR analysis
         fdr_analyzer = FDRAnalyzer(
             q_value_cutoff=q_value_cutoff, db_dir=search_config.db_dir
         )
         pmsm_df = fdr_analyzer.perform_global_analysis(pmsm_df)
         pmsm_df = fdr_analyzer.batch_run_specific_analysis(pmsm_df)
-        pmsm_df.write_parquet(self.search_config.output_dir / "pmsm.bak.parquet")
-        # pmsm_df = pl.read_parquet(self.search_config.output_dir / "pmsm.bak.parquet")
 
-        pmsm_df = pmsm_df.filter(
-            (pl.col("precursor_q_value") <= q_value_cutoff)
-            | (pl.col("global_precursor_q_value") <= q_value_cutoff)
-        ).join(result_aggregator.get_run_df(), on="run_index", how="left")
-        # for hdf_file_path in result_aggregator.get_hdf_files():
-        #     with h5py.File(hdf_file_path, mode="a") as hdf_file:
-        #         if "filtered_results" in hdf_file:
-        #             del hdf_file["filtered_results"]
-
-        result_aggregator.save_filtered_results(
-            pmsm_df, src_group_key=group_key, dst_group_key="filtered_results"
+        ## add auxiliary columns
+        pmsm_df = fdr_analyzer.add_fasta_id_column(pmsm_df)
+        pmsm_df = pmsm_df.join(
+            result_aggregator.get_run_df(), on="run_index", how="left"
         )
+
         self.log_id_statistics_table(pmsm_df, q_value_cutoff)
 
         return pmsm_df
@@ -447,44 +406,60 @@ class SearchManager:
 
         logger.info("Performing cross-run quantification")
         self.state = SearchState.QUANTIFICATION
+        q_value_cutoff = self.search_config.config.get(
+            "q_value_cutoff", DEFAULT_Q_VALUE_CUTOFF
+        )
 
         result_aggregator = ResultsAggregator(
             db_dir=self.get_db_dir(), search_config=self.search_config
         )
 
         lfq = LabelFreeQuantifier(
+            pmsm_df,
             result_aggregator,
-            group_key="filtered_results",
+            group_key="second_results",
             acq_method=self.search_config.config.get("acquisition_method", "DDA"),
-            select_topk_fragments=6,
+            q_value_cutoff=q_value_cutoff,
         )
         quant_df = lfq.perform_quantification()
-        pmsm_df = pmsm_df.select(pl.exclude("ms1_area", "ms2_area")).join(
-            quant_df, on=["run_index", "precursor_index"], how="left"
+
+        pmsm_df = (
+            pmsm_df.select(pl.exclude("ms1_area", "ms2_area"))
+            .group_by(["run_index", "precursor_index"])
+            .agg(pl.all().sort_by("score").last())
+            .join(quant_df, on=["run_index", "precursor_index"], how="left")
         )
 
         ## run MaxLFQ
         if self.search_config.config.get("acquisition_method", "DDA").upper() == "DIA":
             df = (
                 pmsm_df.filter(pl.col("is_decoy") == False)
-                .filter(pl.col("global_protein_group_q_value") <= 0.01)
+                .filter(pl.col("global_protein_group_q_value") <= q_value_cutoff)
                 .filter(pl.col("ms2_area").is_not_null() & (pl.col("ms2_area") > 0))
-                .group_by(["protein_group", "peptide_index", "run_name"])
+                .group_by(["protein_group", "peptide_index", "run_index"])
                 .agg(
                     pl.col("ms2_area").median().alias("peptide_abundance"),
                 )
             )
-            pg_quant_df = maxlfq(df, run_col="run_name", min_peptides_per_protein=1)
+            pg_quant_df = maxlfq(df, min_peptides_per_protein=1)
         else:
             pg_quant_df = None
 
         return pmsm_df, pg_quant_df
 
-    def save_pmsm_df(
-        self, pmsm_df: pl.DataFrame, pg_quant_df: pl.DataFrame, target_only: bool = True
-    ) -> None:
+    def save_pmsm_df(self, pmsm_df: pl.DataFrame, pg_quant_df: pl.DataFrame) -> None:
 
-        format = self.search_config.config.get("report_format", "tsv").lower()
+        format = self.search_config.config.get("output_format", "tsv").lower()
+        output_decoy = self.search_config.config.get("output_decoy", True)
+        q_value_cutoff = self.search_config.config.get(
+            "q_value_cutoff", DEFAULT_Q_VALUE_CUTOFF
+        )
+
+        # filter by q-value and add run information
+        pmsm_df = pmsm_df.filter(
+            (pl.col("precursor_q_value") <= q_value_cutoff)
+            | (pl.col("global_precursor_q_value") <= q_value_cutoff)
+        )
 
         ## Add modified sequence column
         pmsm_df = pmsm_df.with_columns(
@@ -505,7 +480,7 @@ class SearchManager:
             .alias("modified_sequence"),
         ).with_columns(posterior_error=1 - (1 / (1 + (-pl.col("score")).exp())))
 
-        if target_only:
+        if not output_decoy:
             pmsm_df = pmsm_df.filter(pl.col("is_decoy") == False)
 
         if format == "parquet":
@@ -572,7 +547,7 @@ class SearchManager:
         pmsm_df, pg_quant_df = self.perform_quantification(pmsm_df)
 
         # Save final results
-        self.save_pmsm_df(pmsm_df, pg_quant_df, target_only=True)
+        self.save_pmsm_df(pmsm_df, pg_quant_df)
 
         logger.info("DelPi workflow completed successfully")
 

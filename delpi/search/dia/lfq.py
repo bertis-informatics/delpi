@@ -15,18 +15,9 @@ import numpy as np
 import polars as pl
 
 from delpi.search.result_aggregator import ResultsAggregator
-from delpi.search.dia.lfq_utils import (
-    quant_fragment_xics,
-    score_fragment_xics,
-    find_quantitative_fragments,
-)
-from delpi.search.dia.peak_token import QUANT_FRAGMENTS
+from delpi.search.dia.pmsm_lfq import perform_lfq
 
 logger = logging.getLogger(__name__)
-
-# Constants
-MAX_THEO_INDEX = 15
-XIC_LEN = 7
 
 
 class LabelFreeQuantifier:
@@ -42,35 +33,17 @@ class LabelFreeQuantifier:
 
     def __init__(
         self,
+        pmsm_df: pl.DataFrame,
         result_aggregator: ResultsAggregator,
+        q_value_cutoff: float,
         acq_method: str,
-        group_key: str = "filtered_results",
-        select_topk_fragments: int = 3,
-        beta: float = 0.0,
+        group_key: str = "second_results",
     ):
-        self.select_topk_fragments = select_topk_fragments
+        self.pmsm_df = pmsm_df
         self.result_aggregator = result_aggregator
+        self.q_value_cutoff = q_value_cutoff
         self.group_key = group_key
         self.acq_method = acq_method.upper()
-        self.beta = beta
-
-        unique_precursor_index_arr = None
-        for run_index, result_mgr in result_aggregator._results_dict.items():
-            data_dict = result_mgr.read_dict(
-                group_key,
-                data_keys=[
-                    "precursor_index",
-                ],
-            )
-            unique_precursor_index_arr = (
-                np.union1d(data_dict["precursor_index"], unique_precursor_index_arr)
-                if unique_precursor_index_arr is not None
-                else data_dict["precursor_index"]
-            )
-
-        self.unique_precursor_df = pl.DataFrame(
-            {"precursor_index": unique_precursor_index_arr.astype(np.uint32)}
-        ).with_row_index("_index")
 
     def perform_quantification(self) -> pl.DataFrame:
         """
@@ -82,63 +55,13 @@ class LabelFreeQuantifier:
         logger.debug("Starting label-free quantification")
 
         if self.acq_method == "DIA":
-            selected_fragments, scores = self._select_quantitative_fragments()
-            quant_df = self._calculate_ms2_areas(selected_fragments, scores)
+            quant_df = self._calculate_ms2_areas()
         elif self.acq_method == "DDA":
             quant_df = self._calculate_ms1_areas()
         else:
             raise NotImplementedError()
 
         return quant_df
-
-    def _select_quantitative_fragments(self) -> None:
-        """Score fragment XICs for each run to assess fragment quality."""
-        logger.debug("Scoring fragment XICs")
-
-        result_aggregator = self.result_aggregator
-        group_key = self.group_key
-        topk_fragments = self.select_topk_fragments
-
-        unique_precursor_df = self.unique_precursor_df
-        n_precursors = unique_precursor_df.shape[0]
-        n_runs = len(result_aggregator._results_dict)
-
-        score_matrix = np.full(
-            (n_precursors, n_runs, QUANT_FRAGMENTS), np.nan, dtype=np.float32
-        )
-        intensity_matrix = np.zeros(
-            (n_precursors, n_runs, QUANT_FRAGMENTS), dtype=np.float32
-        )
-
-        for run_index, result_mgr in result_aggregator._results_dict.items():
-            data_dict = result_mgr.read_dict(
-                group_key,
-                data_keys=[
-                    "precursor_index",
-                    "quant_ab",
-                    "quant_theo_index",
-                    "quant_time_index",
-                ],
-            )
-
-            frag_score_arr, frag_intensity_arr = score_fragment_xics(
-                quant_ab_arr=data_dict["quant_ab"],
-                quant_theo_arr=data_dict["quant_theo_index"],
-                quant_time_arr=data_dict["quant_time_index"],
-            )
-
-            ii = pl.DataFrame({"precursor_index": data_dict["precursor_index"]}).join(
-                unique_precursor_df, on="precursor_index", how="left"
-            )["_index"]
-
-            score_matrix[ii, run_index, :] = frag_score_arr
-            intensity_matrix[ii, run_index, :] = frag_intensity_arr
-
-        topk_index_arr, score_arr = find_quantitative_fragments(
-            score_matrix, intensity_matrix, topk=topk_fragments, beta=self.beta
-        )
-
-        return topk_index_arr, score_arr
 
     def _calculate_ms1_areas(self) -> pl.DataFrame:
         """Calculate MS2 peak areas using selected fragments."""
@@ -159,64 +82,81 @@ class LabelFreeQuantifier:
 
         return pl.concat(dfs, how="vertical")
 
-    def _calculate_ms2_areas(
-        self, selected_fragments: np.ndarray, scores: np.ndarray
-    ) -> pl.DataFrame:
+    def _calculate_ms2_areas(self) -> pl.DataFrame:
         """Calculate MS2 peak areas using selected fragments."""
         logger.debug("Calculating MS2 areas")
 
         result_aggregator = self.result_aggregator
-        group_key = self.group_key
-        unique_precursor_df = self.unique_precursor_df
+        pmsm_df = self.pmsm_df
+        q_value_cutoff = self.q_value_cutoff
 
-        dfs = []
-        for run_index, result_mgr in result_aggregator._results_dict.items():
-            run_name = result_mgr.run_name
-            # Load RT mapping
-            meta_df = result_mgr.read_df("meta_df").cast(
-                {"isolation_win_idx": pl.UInt32}
+        target_pmsm_df = pmsm_df.filter(
+            (pl.col("is_decoy") == False)
+            & (
+                pl.col("global_precursor_q_value").min().over("precursor_index")
+                <= q_value_cutoff
             )
-            quant_dict = result_mgr.read_dict(
-                group_key,
-                data_keys=[
-                    "precursor_index",
-                    "ms1_area",
-                    "quant_ab",
-                    "quant_theo_index",
-                    "quant_time_index",
-                    "frame_index",
-                    "search_group",
-                ],
+        ).sort(pl.col("precursor_index", "run_index", "pmsm_index"))
+
+        all_xic_arrays, all_ms1_area_arr = result_aggregator.get_xic_arrays(
+            target_pmsm_df, group_key=self.group_key
+        )
+
+        ## find reference run for each precursor
+        ref_run_df = (
+            target_pmsm_df.group_by(
+                ["precursor_index", "run_index"], maintain_order=True
             )
-
-            frame_to_rt_map = self.get_frame_index_to_retention_time_map(meta_df)
-            ii = pl.DataFrame({"precursor_index": quant_dict["precursor_index"]}).join(
-                unique_precursor_df, on="precursor_index", how="left"
-            )["_index"]
-
-            areas = quant_fragment_xics(
-                frame_to_rt_map_arr=frame_to_rt_map,
-                quant_ab_arr=quant_dict["quant_ab"],
-                quant_theo_arr=quant_dict["quant_theo_index"],
-                quant_time_arr=quant_dict["quant_time_index"],
-                selected_index_arr=selected_fragments[ii, :],
-                frag_score_arr=scores[ii, :],
-                frame_index_arr=quant_dict["frame_index"],
-                win_index_arr=quant_dict["search_group"],
+            .agg(pl.len(), pl.col("logit").sum())
+            .group_by("precursor_index", maintain_order=True)
+            .agg(
+                pl.col("run_index").sort_by(["len", "logit"]).last(),
+                pl.col("run_index").n_unique().alias("run_count"),
+                pl.col("len").sum().alias("pmsm_count"),
             )
-            quant_df = pl.DataFrame(
-                {
-                    "precursor_index": quant_dict["precursor_index"],
-                    "ms1_area": quant_dict["ms1_area"],
-                    "ms2_area": areas,
-                }
-            ).with_columns(pl.lit(run_index).cast(pl.UInt32).alias("run_index"))
+            .with_columns(
+                pl.col("pmsm_count").cum_sum().alias("pmsm_stop"),
+                pl.col("run_count").cum_sum(),
+            )
+        )
 
-            dfs.append(quant_df)
-            # result_mgr.write_dict(group_key, {"ms2_area": areas})
-            logger.debug(f"Calculated MS2 areas for {run_name}")
+        all_run_index_arr = target_pmsm_df["run_index"].to_numpy()
+        all_rt_arr = target_pmsm_df["observed_rt"].to_numpy()
 
-        return pl.concat(dfs, how="vertical")
+        precursor_indices = ref_run_df["precursor_index"].to_numpy()
+        ref_run_indices = ref_run_df["run_index"].to_numpy()
+        run_stop_indices = ref_run_df["run_count"].to_numpy()
+        pmsm_stop_indices = ref_run_df["pmsm_stop"].to_numpy()
+
+        (
+            quant_precursor_index_arr,
+            quant_run_index_arr,
+            quant_rt_arr,
+            quant_ab_arr,
+            quant_ms1_ab_arr,
+        ) = perform_lfq(
+            num_runs=len(result_aggregator._results_dict),
+            all_run_index_arr=all_run_index_arr,
+            all_rt_arr=all_rt_arr,
+            all_xic_arrays=all_xic_arrays,
+            all_ms1_area_arr=all_ms1_area_arr,
+            precursor_indices=precursor_indices,
+            ref_run_indices=ref_run_indices,
+            run_stop_indices=run_stop_indices,
+            pmsm_stop_indices=pmsm_stop_indices,
+        )
+
+        quant_df = pl.DataFrame(
+            {
+                "run_index": quant_run_index_arr,
+                "precursor_index": quant_precursor_index_arr,
+                "quantification_rt": quant_rt_arr,
+                "ms1_area": quant_ms1_ab_arr,
+                "ms2_area": quant_ab_arr,
+            },
+            nan_to_null=True,
+        )
+        return quant_df
 
     @staticmethod
     def get_frame_index_to_retention_time_map(meta_df) -> np.ndarray:

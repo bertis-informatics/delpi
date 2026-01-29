@@ -171,35 +171,18 @@ class FDRAnalyzer:
             df.select(pl.col(*group_keys, out_column)), on=group_keys, how="left"
         )
 
+    def add_fasta_id_column(self, pmsm_df):
+        # add fasta ID columns
+        tmp_df = (
+            pmsm_df.select(pl.col("precursor_index", "protein_index"))
+            .unique(["precursor_index"], keep="first")
+            .explode("protein_index")
+            .join(self.fasta_id_df, on="protein_index", how="left")
+            .group_by("precursor_index")
+            .agg(pl.col("fasta_id"))
+            .with_columns(pl.col("fasta_id").list.sort().list.join(";"))
+        )
 
-def test():
-
-    fdr_workflow = FDRWorkflow(
-        q_value_cutoff=0.01,
-        db_dir=Path(r"D:/DelPi_Data/speclib/2021-03-23-reviewed-contam-UP000005640"),
-    )
-    self = fdr_workflow
-
-    pmsm_df_ = pl.read_parquet("./temp/pmsm_df.parquet")
-
-    pmsm_df = pmsm_df_.filter(pl.col("run_index") == 0)
-
-    output_df = fdr_workflow.perform_run_specific_analysis(
-        pmsm_df, protein_inference=True
-    )
-    output_df.filter(pl.col("is_decoy") == False).filter(
-        pl.col("peptide_q_value") <= 0.01
-    )["peptidoform_index"].n_unique()
-
-    pmsm_df = pmsm_df_
-    output_df = fdr_workflow.perform_global_analysis(pmsm_df)
-
-    output_df.filter(pl.col("is_decoy") == False).filter(
-        pl.col("global_peptide_q_value") <= 0.01
-    ).filter(pl.col("run_index") == 0)["peptidoform_index"].n_unique()
-
-    output_df2 = fdr_workflow.batch_run_specific_analysis(output_df)
-
-    output_df2.filter(pl.col("is_decoy") == False).filter(
-        pl.col("peptide_q_value") <= 0.01
-    ).filter(pl.col("run_index") == 0)["peptidoform_index"].n_unique()
+        return pmsm_df.select(pl.exclude("fasta_id")).join(
+            tmp_df, on="precursor_index", how="left"
+        )

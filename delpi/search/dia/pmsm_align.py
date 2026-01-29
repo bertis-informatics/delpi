@@ -1,30 +1,10 @@
 import numpy as np
 import numba as nb
 
-from delpi.search.dia.lfq_utils import get_xic_arr
 from delpi.utils.numeric import pearsonr
-from delpi.search.dia.lfq_utils import QUANT_FRAGMENTS, XIC_LEN
 
 
-@nb.njit(nogil=True, fastmath=True)
-def make_xic_arrays(
-    quant_ab_arr: np.ndarray,
-    quant_theo_index_arr: np.ndarray,
-    quant_time_index_arr: np.ndarray,
-):
-    xic_arr = np.empty(
-        (quant_ab_arr.shape[0], QUANT_FRAGMENTS, XIC_LEN), dtype=np.float32
-    )
-    for i in range(quant_ab_arr.shape[0]):
-        ab_arr = quant_ab_arr[i]
-        theo_arr = quant_theo_index_arr[i]
-        time_arr = quant_time_index_arr[i]
-        xic_arr[i] = get_xic_arr(ab_arr, theo_arr, time_arr)
-
-    return xic_arr
-
-
-@nb.njit(nogil=True, fastmath=True)
+@nb.njit(nogil=True, fastmath=True, cache=True)
 def _build_similarity_matrix(ref_indices, run_indices, xic_arrays):
     """
     Compute similarity matrix (ref x run).
@@ -50,7 +30,7 @@ def _build_similarity_matrix(ref_indices, run_indices, xic_arrays):
     return sim
 
 
-@nb.njit(nogil=True, fastmath=True)
+@nb.njit(nogil=True, fastmath=True, cache=True)
 def _order_constrained_dp(sim_matrix, min_score=0.5, adapt_ratio=0.6):
     """
     Order-constrained DP with an adaptive per-row threshold.
@@ -124,17 +104,21 @@ def _order_constrained_dp(sim_matrix, min_score=0.5, adapt_ratio=0.6):
     return match_run_idx, match_score
 
 
-@nb.njit(nogil=True, fastmath=True)
+@nb.njit(nogil=True, fastmath=True, cache=True)
 def align_peptide_multi_spectra_matches(
     num_runs: int,
     ref_run_index: int,
     run_index_arr: np.ndarray,
     rt_arr: np.ndarray,
-    xic_arrays: np.ndarray,
+    xic_arr: np.ndarray,
 ):
     """
     Main function: RT-aware alignment and Voting
     """
+    if run_index_arr.size == 1:
+        # Only one PmSM available
+        return (np.array([0], dtype=np.int32), np.array([1.0], dtype=np.float32))
+
     # 1. Prepare Reference PmSMs (Sorted by RT)
     ref_mask = run_index_arr == ref_run_index
     ref_indices = np.where(ref_mask)[0]
@@ -156,6 +140,9 @@ def align_peptide_multi_spectra_matches(
     # per_run_match_to_ref[run_id, ref_pmsm_idx] = matched_run_pmsm_idx
     per_run_match_to_ref = np.full((num_runs, m), -1, dtype=np.int32)
     per_run_match_score = np.zeros((num_runs, m), dtype=np.float32)
+    # Fallback: best-scoring PmSM per run/ref even when DP prunes the match
+    per_run_best_to_ref = np.full((num_runs, m), -1, dtype=np.int32)
+    per_run_best_score = np.full((num_runs, m), -1.0, dtype=np.float32)
 
     # 3. Align Each Run to Reference
     for run_id in range(num_runs):
@@ -171,9 +158,21 @@ def align_peptide_multi_spectra_matches(
         run_indices_sorted = run_indices_local[run_order]
 
         # Build Similarity Matrix
-        sim_matrix = _build_similarity_matrix(
-            ref_indices, run_indices_sorted, xic_arrays
-        )
+        sim_matrix = _build_similarity_matrix(ref_indices, run_indices_sorted, xic_arr)
+
+        # Track the highest similarity per ref PmSM in this run for fallback
+        for j in range(m):
+            best_rel = -1
+            best_val = -1.0
+            for i in range(sim_matrix.shape[1]):
+                val = sim_matrix[j, i]
+                if val > best_val:
+                    best_val = val
+                    best_rel = i
+
+            if best_rel >= 0:
+                per_run_best_to_ref[run_id, j] = run_indices_sorted[best_rel]
+                per_run_best_score[run_id, j] = best_val
 
         # Run DP Alignment (adaptive threshold keeps strong matches)
         matched_run_rel_idx, matched_scores = _order_constrained_dp(
@@ -216,20 +215,25 @@ def align_peptide_multi_spectra_matches(
     selected_indices = np.full(num_runs, -1, dtype=np.int32)
     selected_similarity = np.full(num_runs, -1.0, dtype=np.float32)
 
-    if best_rep_idx != -1:
-        # Set Reference Run Selection
-        selected_indices[ref_run_index] = ref_indices[best_rep_idx]
-        selected_similarity[ref_run_index] = 1.0
+    # Set Reference Run Selection
+    selected_indices[ref_run_index] = ref_indices[best_rep_idx]
+    selected_similarity[ref_run_index] = 1.0
 
-        # Set Other Runs Selection
-        for run_id in range(num_runs):
-            if run_id == ref_run_index:
-                continue
+    # Set Other Runs Selection
+    for run_id in range(num_runs):
+        if run_id == ref_run_index:
+            continue
 
-            matched_idx = per_run_match_to_ref[run_id, best_rep_idx]
-            if matched_idx != -1:
-                selected_indices[run_id] = matched_idx
-                selected_similarity[run_id] = per_run_match_score[run_id, best_rep_idx]
+        matched_idx = per_run_match_to_ref[run_id, best_rep_idx]
+        if matched_idx != -1:
+            selected_indices[run_id] = matched_idx
+            selected_similarity[run_id] = per_run_match_score[run_id, best_rep_idx]
+        else:
+            # No DP match; fall back to the best-correlated PmSM in this run
+            fallback_idx = per_run_best_to_ref[run_id, best_rep_idx]
+            if fallback_idx != -1:
+                selected_indices[run_id] = fallback_idx
+                selected_similarity[run_id] = per_run_best_score[run_id, best_rep_idx]
 
     mask = selected_indices >= 0
     return (selected_indices[mask], selected_similarity[mask])

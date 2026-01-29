@@ -2,7 +2,7 @@ import numpy as np
 import numba as nb
 
 
-from delpi.utils.numeric import corrcoef, rowwise_pearsonr
+from delpi.utils.numeric import rowwise_pearsonr
 from delpi.search.dia.peak_token import (
     EXP_IS_PRECURSOR_IDX,
     EXP_ISOTOPE_INDEX_IDX,
@@ -10,11 +10,9 @@ from delpi.search.dia.peak_token import (
     EXP_TIME_INDEX_IDX,
     EXP_AB_IDX,
 )
-from delpi.search.dia.peak_token import QUANT_FRAGMENTS
+from delpi.constants import QUANT_FRAGMENTS, QUANT_XIC_LEN, MAX_FRAGMENTS
 
-# Constants
-MAX_THEO_INDEX = 15
-XIC_LEN = 7
+MAX_THEO_INDEX = MAX_FRAGMENTS - 1
 
 
 @nb.njit(cache=True, parallel=True)
@@ -40,7 +38,7 @@ def get_ms1_area(
     x_exp: np.ndarray,
     ms1_scale_arr: np.ndarray,
 ):
-    xic_half_len = XIC_LEN // 2
+    xic_half_len = QUANT_XIC_LEN // 2
     N, M = x_exp.shape[:2]
     quant_arr = np.full(N, np.nan, dtype=np.float32)
 
@@ -52,7 +50,7 @@ def get_ms1_area(
             continue
 
         has_ms1_peak = False
-        y = np.zeros(XIC_LEN, dtype=np.float32)
+        y = np.zeros(QUANT_XIC_LEN, dtype=np.float32)
         for j in range(M):
             t = nb.int8(x_arr[j, EXP_TIME_INDEX_IDX])
             if (
@@ -73,14 +71,37 @@ def get_ms1_area(
 
 
 @nb.njit(inline="always")
-def get_xic_arr(ab_arr, theo_arr, time_arr):
+def get_xic_arr(ab_arr, theo_arr, time_arr, out_arr=None):
     # time index is in [1, 7]
-    out_arr = np.zeros((QUANT_FRAGMENTS, XIC_LEN), dtype=np.float32)
+    if out_arr is None:
+        out_arr = np.zeros((QUANT_FRAGMENTS, QUANT_XIC_LEN), dtype=np.float32)
+    else:
+        out_arr.fill(0.0)
+
     for i, t, ab in zip(theo_arr, time_arr, ab_arr):
         if i < 0:
             break
         out_arr[MAX_THEO_INDEX - i, t - 1] = max(out_arr[MAX_THEO_INDEX - i, t - 1], ab)
     return out_arr
+
+
+@nb.njit(nogil=True, fastmath=True, cache=True)
+def make_xic_arrays(
+    quant_ab_arr: np.ndarray,
+    quant_theo_index_arr: np.ndarray,
+    quant_time_index_arr: np.ndarray,
+):
+    out_xic_arrays = np.zeros(
+        (quant_ab_arr.shape[0], QUANT_FRAGMENTS, QUANT_XIC_LEN), dtype=np.float32
+    )
+
+    for i in range(quant_ab_arr.shape[0]):
+        ab_arr = quant_ab_arr[i]
+        theo_arr = quant_theo_index_arr[i]
+        time_arr = quant_time_index_arr[i]
+        _ = get_xic_arr(ab_arr, theo_arr, time_arr, out_xic_arrays[i])
+
+    return out_xic_arrays
 
 
 @nb.njit(cache=True)
@@ -199,7 +220,7 @@ def quant_fragment_xics(
     frame_index_arr,
     win_index_arr,
 ):
-    xic_half_len = XIC_LEN // 2
+    xic_half_len = QUANT_XIC_LEN // 2
     N = selected_index_arr.shape[0]
     quant_arr = np.zeros(N, dtype=np.float32)
 
@@ -223,7 +244,7 @@ def quant_fragment_xics(
         w /= ws
         # y = (w[:, None] * xic_arr[selected_indices, :]).sum(axis=0)
         # y = xic_arr[selected_indices, :].sum(axis=0)
-        y = np.zeros(XIC_LEN, dtype=np.float32)
+        y = np.zeros(QUANT_XIC_LEN, dtype=np.float32)
         for j, k in enumerate(selected_indices):
             y[:] += w[j] * xic_arr[k]
 
@@ -249,7 +270,7 @@ def get_ms1_area_dda(x_exp: np.ndarray, ms1_scale_arr: np.ndarray):
             continue
         # frame_idx = frame_index_arr[i]
         has_ms1_peak = False
-        y = np.zeros(XIC_LEN, dtype=np.float32)
+        y = np.zeros(QUANT_XIC_LEN, dtype=np.float32)
 
         for j in range(M):
             t = nb.int8(x_arr[j, EXP_TIME_INDEX_IDX])
