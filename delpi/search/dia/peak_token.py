@@ -4,8 +4,9 @@ import numba as nb
 from delpi.lcms.data_container import DIAWindowFrameNumMap, PeakContainer
 from delpi.database.numba.spec_lib_container import TheoreticalPeakContainer
 from delpi.model.input import TheoPeakInput, ExpPeakInput
-from delpi.search.dia.peak_group import PeakIndexContainer, QUANT_FRAGMENTS
+from delpi.search.dia.peak_group import PeakIndexContainer
 from delpi.utils.peak import find_peak_index
+from delpi.constants import QUANT_FRAGMENTS, RT_WINDOW_LEN, RT_WINDOW_RADIUS
 
 
 MAX_EXP_PEAK_TOKENS = 512
@@ -33,10 +34,6 @@ EXP_MS_LEVEL_IDX = ExpPeakInput.MS_LEVEL.index
 EXP_CLEAVAGE_INDEX_IDX = ExpPeakInput.CLEAVAGE_INDEX.index
 EXP_REV_CLEAVAGE_INDEX_IDX = ExpPeakInput.REV_CLEAVAGE_INDEX.index
 EXP_TIME_INDEX_IDX = ExpPeakInput.TIME_INDEX.index
-
-QUANT_AB_IDX = 0
-QUANT_THEO_IDX = 1
-QUANT_TIME_IDX = 2
 
 
 @nb.njit(nogil=True, cache=True)
@@ -103,7 +100,7 @@ def _set_x_exp(
     seq_len = theo_peaks.sequence_length
     start_counter = counter
     ind_count = 0
-    quant_peak_count = 0
+    # quant_peak_count = 0
     max_ab = 0.0
     for theo_i_, (st, ed) in enumerate(zip(st_indices, ed_indices)):
         theo_mz = mz_arr[theo_i_]
@@ -145,20 +142,18 @@ def _set_x_exp(
                 x_exp[counter, EXP_REV_CLEAVAGE_INDEX_IDX] = theo_rev_cleavage_index
                 x_exp[counter, EXP_TIME_INDEX_IDX] = time_index
 
+                ##  xic_arr for quantification
                 if (
                     (x_quant is not None)
-                    and (fi > min_frame_index)
-                    and (fi < max_frame_index)
+                    and (is_precursor == False)
                     and (theo_isotope_index == 0)
-                    and (
-                        theo_i > (num_fragments - QUANT_FRAGMENTS - 1)
-                    )  # skip first n fragments because fragments are sorted by increasing intensity
-                    and (quant_peak_count < x_quant.shape[0])
                 ):
-                    x_quant[quant_peak_count, QUANT_AB_IDX] = ab
-                    x_quant[quant_peak_count, QUANT_THEO_IDX] = theo_i
-                    x_quant[quant_peak_count, QUANT_TIME_IDX] = time_index
-                    quant_peak_count += 1
+                    theo_rank = num_fragments - theo_i - 1
+                    if (
+                        theo_rank < QUANT_FRAGMENTS
+                        and x_quant[theo_rank, time_index] < ab
+                    ):
+                        x_quant[theo_rank, time_index] = ab
 
                 # save matched peak indices at the RT center
                 if (
@@ -186,7 +181,7 @@ def get_x_exp(
     ms1_peak_df: PeakContainer,
     ms2_peak_df: PeakContainer,
     frame_num_map: DIAWindowFrameNumMap,
-    rt_window_radius: int = 4,
+    rt_window_radius: int = RT_WINDOW_RADIUS,
     peak_index_container: PeakIndexContainer = None,
     ms1_mass_tol: float = 10,
     ms2_mass_tol: float = 10,

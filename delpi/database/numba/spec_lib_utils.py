@@ -29,10 +29,12 @@ def get_frame_index_range(
     rt_ub = speclib_container.mod_rt_ub_arr[peptidoform_index]
 
     if np.isnan(rt_lb) or np.isnan(rt_lb):
-        return np.uint32(0), np.uint32(ms2_rt_arr.shape[0])
+        return np.uint32(0), np.uint32(ms2_rt_arr.shape[0] - 1)
 
     min_frame_index = np.searchsorted(ms2_rt_arr, rt_lb, side="left")
-    max_frame_index = np.searchsorted(ms2_rt_arr, rt_ub, side="right")
+    max_frame_index = min(
+        np.searchsorted(ms2_rt_arr, rt_ub, side="right"), ms2_rt_arr.shape[0] - 1
+    )
 
     return np.uint32(min_frame_index), np.uint32(max_frame_index)
 

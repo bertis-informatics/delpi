@@ -32,7 +32,6 @@ from delpi.search.dia.lfq_utils import get_ms1_area
 from delpi.search.clustering import cluster_matches
 from delpi.utils.device_ctx import make_inference_contexts
 from delpi.model.input import THEORETICAL_PEAK, EXPERIMENTAL_PEAK
-from delpi.search.dia.peak_token import QUANT_THEO_IDX, QUANT_AB_IDX, QUANT_TIME_IDX
 
 
 logger = logging.getLogger(__name__)
@@ -73,6 +72,7 @@ class DIASearchEngine(BaseSearchEngine):
         batch_size: int = 512,
         peak_group_topk: int = 10,
         logit_cutoff: float = LOGIT_CUTOFF,
+        save_quant: bool = False,
     ) -> Dict[str, np.ndarray]:
         """Search DIA spectra for a specific isolation window."""
         ms1_tol = search_config["ms1_mass_tol_in_ppm"]
@@ -136,9 +136,7 @@ class DIASearchEngine(BaseSearchEngine):
             frame_index_arr = dia_win.frame_num_to_index[frame_num_arr]
             x_ind = x_ind[mask]
             x_quant = x_quant[mask]
-            ms1_area_arr = get_ms1_area(
-                ms1_rt_arr, frame_index_arr, x_exp[mask], ms1_scale_arr[mask]
-            )
+            ms1_area_arr = get_ms1_area(x_exp[mask], ms1_scale_arr[mask])
 
             observed_rt = frame_num_map.ms2_rt_arr[
                 frame_num_map.frame_num_to_index_arr[frame_num_arr]
@@ -152,16 +150,9 @@ class DIASearchEngine(BaseSearchEngine):
                 results["features"].append(x_feature)
                 results["observed_rt"].append(observed_rt)
                 results["peak_indices"].append(x_ind)
-                results["ms1_area"].append(ms1_area_arr)
-                results["quant_ab"].append(
-                    x_quant[..., QUANT_AB_IDX].astype(np.float32)
-                )
-                results["quant_theo_index"].append(
-                    x_quant[..., QUANT_THEO_IDX].astype(np.int8)
-                )
-                results["quant_time_index"].append(
-                    x_quant[..., QUANT_TIME_IDX].astype(np.int8)
-                )
+                if save_quant:
+                    results["ms1_area"].append(ms1_area_arr)
+                    results["xic_array"].append(x_quant)
 
         results = {k: np.concatenate(v) for k, v in results.items()}
         if len(results) > 0:
@@ -179,6 +170,7 @@ class DIASearchEngine(BaseSearchEngine):
         rt_calibrator: RetentionTimeCalibrator,
         batch_size: int = 512,
         logit_cutoff: float = LOGIT_CUTOFF,
+        save_quant: bool = False,
     ) -> ResultManager:
         """Perform the complete DIA search workflow."""
 
@@ -228,6 +220,7 @@ class DIASearchEngine(BaseSearchEngine):
                     batch_size,
                     peak_group_topk=TOPK_PER_PRECURSOR,
                     logit_cutoff=logit_cutoff,
+                    save_quant=save_quant,
                 )
 
                 # Cluster matches sharing peaks
@@ -282,13 +275,19 @@ class DIASearchEngine(BaseSearchEngine):
         # Full search
         st_t = time.perf_counter()
         logger.info("Search started")
-        logit_cutoff = (
-            LOGIT_CUTOFF
-            if self.state < SearchState.SECOND_SEARCH
-            else (LOGIT_CUTOFF - 2.0)
-        )
+        if self.state < SearchState.SECOND_SEARCH:
+            logit_cutoff = LOGIT_CUTOFF
+            save_quant = False
+        else:
+            logit_cutoff = LOGIT_CUTOFF - 2.0
+            save_quant = True
+
         result_manager = self._perform_full_search(
-            run, rt_calibrator, batch_size=512, logit_cutoff=logit_cutoff
+            run,
+            rt_calibrator,
+            batch_size=512,
+            logit_cutoff=logit_cutoff,
+            save_quant=save_quant,
         )
         elapsed = time.perf_counter() - st_t
         logger.info(f"Search completed. Elapsed: {elapsed:.1f} s")

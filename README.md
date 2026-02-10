@@ -132,7 +132,7 @@ Verify your DelPi installation using publicly available DIA data from the [Skyli
    DelPi generates the following files in your specified `output_directory`:
    
    - **`delpi.log`**: Detailed execution log ([example](/examples/output/delpi.log))
-   - **`pmsm_results.tsv`**: Peptide-spectrum matches with q-values ([example](/examples/output/pmsm_results.tsv))
+   - **`pmsm_results.<tsv|parquet>`**: Peptide-spectrum matches with q-values (format depends on configuration; [example](/examples/output/pmsm_results.tsv))
    - **`protein_group_maxlfq_results.tsv`**: MaxLFQ protein quantification ([example](/examples/output/protein_group_maxlfq_results.tsv))
    
    Compare your results with the provided examples to verify correct installation.
@@ -173,7 +173,9 @@ delpi /path/to/your/config.yaml
 
 ### 4. Output Files
 
-DelPi generates tab-separated output files including `pmsm_results.tsv`:
+DelPi generates the following output files:
+
+#### Main results report, `pmsm_results.<tsv|parquet>`
 
 <details>
 <summary>Click to expand output fields</summary>
@@ -192,12 +194,26 @@ DelPi generates tab-separated output files including `pmsm_results.tsv`:
 | *global_precursor_q_value* | Global precursor-level q-value across all runs |
 | *global_peptide_q_value* | Global peptide-level q-value across all runs |
 | *global_protein_group_q_value* | Global protein group-level q-value across all runs |
-| *protein_group* | Protein group inferred according to the parsimony principle |
+| *protein_group* | Protein group inferred according to the parsimony principle (FASTA IDs separated by semicolons) |
+| *fasta_id* | FASTA IDs associated with the peptide, separated by semicolons |
 | *precursor_q_value* | Run-specific precursor-level q-value |
 | *peptide_q_value* | Run-specific peptide-level q-value |
 | *protein_group_q_value* | Run-specific protein group-level q-value |
 | *ms1_area* | Integrated area under the precursor ion chromatogram in MS1 spectra |
 | *ms2_area* | *(DIA only, optional)* Precursor abundance quantified from fragment-level signals |
+
+</details>
+
+#### Protein-level quantification results report (DIA only, optional) `protein_group_maxlfq_results.<tsv|parquet>`
+
+<details>
+<summary>Click to expand output fields</summary>
+
+| Field name | Description |
+|-----------|-------------|
+| *run_name* | Name of the LC–MS run |
+| *protein_group* | Protein group inferred according to the parsimony principle (FASTA IDs separated by semicolons) |
+| *abundance* | Protein abundance calculated using the MaxLFQ algorithm (Cox et al., 2014) |
 
 </details>
 
@@ -207,7 +223,9 @@ DelPi generates tab-separated output files including `pmsm_results.tsv`:
 
 If you use DelPi in your research, please cite:
 
-*Citation information will be updated upon publication.*
+Park, J., Kim, K., Kang, U.-B., & Kim, S. *DelPi Learns Generalizable Peptide–Signal Correspondence for Mass Spectrometry-Based Proteomics.* bioRxiv (2026). https://doi.org/10.64898/2026.01.06.697814
+
+Preprint: https://www.biorxiv.org/content/10.64898/2026.01.06.697814v1
 
 ## License
 
