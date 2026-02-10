@@ -9,7 +9,7 @@ import numpy as np
 from delpi.database.peptide_database import PeptideDatabase
 from delpi.search.result_manager import ResultManager, TL_DATA_GROUP
 from delpi.search.config import SearchConfig
-from delpi.search.dia.lfq_utils import get_apex_median_intensity
+from delpi.constants import QUANT_FRAGMENTS, RT_WINDOW_LEN
 
 
 class ResultsAggregator:
@@ -125,50 +125,10 @@ class ResultsAggregator:
         )
         return run_df
 
-    def save_filtered_results(
-        self,
-        pmsm_df: pl.DataFrame,
-        src_group_key: str = "second_results",
-        dst_group_key: str = "filtered_results",
-    ):
-        data_keys_for_quant = [
-            "precursor_index",
-            "frame_num",
-            "frame_index",
-            "search_group",
-            "ms1_area",
-            "quant_ab",
-            "quant_theo_index",
-            "quant_time_index",
-        ]
-
-        for run_index, result_manager in self._results_dict.items():
-            results_dict = result_manager.read_dict(
-                src_group_key,
-                data_keys=data_keys_for_quant,
-            )
-            df = pl.DataFrame(
-                {
-                    "precursor_index": results_dict["precursor_index"],
-                    "frame_num": results_dict["frame_num"],
-                }
-            ).join(
-                pmsm_df.filter(pl.col("run_index") == run_index)
-                .select(pl.col("precursor_index", "frame_num"))
-                .with_columns(pl.lit(True).alias("present")),
-                on=["precursor_index", "frame_num"],
-                how="left",
-            )
-            mask = df["present"].is_not_null().to_numpy()
-            result_manager.write_dict(
-                dst_group_key, {k: v[mask] for k, v in results_dict.items()}
-            )
-
     def get_search_results(
         self,
         group_key: str,
         load_features: bool = True,
-        estimate_apex_intensity: bool = False,
     ) -> tuple[pl.DataFrame, Dict[int, np.ndarray]]:
 
         assert group_key in ["first_results", "second_results"]
@@ -182,8 +142,6 @@ class ResultsAggregator:
             "observed_rt",
             "logit",
         ]
-        if estimate_apex_intensity:
-            data_keys.extend(["quant_ab", "quant_time_index"])
 
         if load_features:
             data_keys.append("features")
@@ -206,13 +164,6 @@ class ResultsAggregator:
                     features_arr = run_results_dict.pop("features")
                     data_dict[run_index] = features_arr
 
-                if estimate_apex_intensity:
-                    quant_ab_arr = run_results_dict.pop("quant_ab")
-                    quant_time_index_arr = run_results_dict.pop("quant_time_index")
-                    run_results_dict["apex_median_intensity"] = (
-                        get_apex_median_intensity(quant_ab_arr, quant_time_index_arr)
-                    )
-
                 for k, v in run_results_dict.items():
                     results_dict[k].append(v)
 
@@ -229,3 +180,28 @@ class ResultsAggregator:
         )
 
         return pmsm_df, data_dict
+
+    def get_xic_arrays(
+        self, target_pmsm_df: pl.DataFrame, group_key: str = "second_results"
+    ) -> np.ndarray:
+        xic_arrays = np.empty(
+            (target_pmsm_df.shape[0], QUANT_FRAGMENTS, RT_WINDOW_LEN), dtype=np.float32
+        )
+        ms1_area_arr = np.empty(target_pmsm_df.shape[0], dtype=np.float32)
+
+        for grp, sub_df in target_pmsm_df.with_row_index("index_").group_by(
+            "run_index"
+        ):
+            run_index = grp[0]
+            jj = sub_df["index_"]
+            ii = sub_df["pmsm_index"]
+            result_mgr = self.get_result_manager(run_index)
+
+            with h5py.File(result_mgr.hdf_file_path, mode="r") as hdf_file:
+                group_data = hdf_file[group_key]
+                ms1_area = group_data["ms1_area"][:]
+                ms1_area_arr[jj] = ms1_area[ii]
+                xic_arr = group_data["xic_array"][:]
+                xic_arrays[jj] = xic_arr[ii]
+
+        return xic_arrays, ms1_area_arr

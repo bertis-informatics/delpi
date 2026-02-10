@@ -181,7 +181,9 @@ DelPi generates tab-separated output files including `pmsm_results.tsv`:
 
 If you use DelPi in your research, please cite:
 
-*Citation information will be updated upon publication.*
+Park, J., Kim, K., Kang, U.-B., & Kim, S. *DelPi Learns Generalizable Peptide–Signal Correspondence for Mass Spectrometry-Based Proteomics.* bioRxiv (2026). https://doi.org/10.64898/2026.01.06.697814
+
+Preprint: https://www.biorxiv.org/content/10.64898/2026.01.06.697814v1
 
 ## License
 

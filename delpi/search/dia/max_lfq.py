@@ -26,18 +26,19 @@ def _maxlfq_one_protein(
     runs : run identifier list (in fixed order)
     x : np.ndarray
     """
-    # 이 protein에서 관측된 run들의 리스트 (반환 순서 유지)
+    # List of runs observed in this protein (maintain order)
     runs = df_p[run_col].unique().to_list()
     n_runs = len(runs)
     if n_runs == 0:
         return [], np.array([], dtype=float)
     if n_runs == 1:
-        # run 하나 뿐이면 ratio를 만들 수 없으므로, 0으로 놓고 나중에 상수 더해도 됨
-        return runs, np.zeros(1, dtype=float)
+        # If only one run, cannot compute ratios, so use mean log-intensity of that run
+        mean_log = df_p[log_col].mean()
+        return runs, np.array([mean_log], dtype=float)
 
-    # 매핑: run -> 0..n_runs-1
+    # Mapping: run -> 0..n_runs-1
     run_to_idx = {r: i for i, r in enumerate(runs)}
-    # 매핑: peptide -> 0..n_pep-1
+    # Mapping: peptide -> 0..n_pep-1
     pep_vals = df_p[peptide_col].to_list()
     pep_to_idx = {}
     pep_idx_list = []
@@ -57,7 +58,7 @@ def _maxlfq_one_protein(
     pep_idx_arr = np.array(pep_idx_list, dtype=np.int64)
     logI_arr = np.array(df_p[log_col].to_list(), dtype=np.float64)
 
-    # peptide별로 연속되도록 정렬 (numba에서 그룹 경계 스캔)
+    # Sort by peptide index for consecutive grouping (for numba group boundary scan)
     order = np.argsort(pep_idx_arr, kind="mergesort")  # stable sort
     pep_idx_sorted = pep_idx_arr[order]
     run_idx_sorted = run_idx_arr[order]
@@ -71,7 +72,7 @@ def _maxlfq_one_protein(
     L[0, 0] = 1.0
     b[0] = 0.0
 
-    # 선형 시스템 풀기 (가능하면 solve, 안 되면 lstsq)
+    # Solve linear system (use solve if possible, otherwise lstsq)
     try:
         x = np.linalg.solve(L, b)
     except np.linalg.LinAlgError:
@@ -85,16 +86,16 @@ def maxlfq(
     protein_col: str = "protein_group",
     peptide_col: str = "peptide_index",
     run_col: str = "run_index",
-    intensity_col: str = "peptide_abundance",  # ms2_area 같은 값
+    intensity_col: str = "peptide_abundance",  # ms2_area-like value
     min_peptides_per_protein: int = 2,
 ) -> pl.DataFrame:
     """
-    Cox et al. 2014 MaxLFQ 알고리즘(쌍별 log-ratio + 최소제곱)을
-    polars DataFrame 기반으로 구현한 버전.
+    Implementation of Cox et al. 2014 MaxLFQ algorithm (pairwise log-ratio + least squares)
+    based on polars DataFrame.
 
-    - protein별로 MaxLFQ를 수행해 run별 protein log-abundance를 추정
-    - 전체 데이터의 log(intensity) global median을 기준으로 스케일을 맞춰
-      최종적으로는 원래 intensity(ms2_area)와 비슷한 범위의 protein intensity를 반환.
+    - Performs MaxLFQ per protein to estimate run-wise protein log-abundance
+    - Scales based on the global median of log(intensity) from the entire dataset,
+      finally returning protein intensities in a range similar to the original intensity (ms2_area).
 
     Parameters
     ----------
@@ -104,7 +105,7 @@ def maxlfq(
         Column names.
     min_peptides_per_protein : int
         Require at least this many distinct peptides per protein
-        (너무 작은 protein은 MaxLFQ에 부적합하므로 제외하거나 NaN 처리하는 게 좋음).
+        (small proteins with too few peptides are unsuitable for MaxLFQ and should be excluded or set to NaN).
 
     Returns
     -------
@@ -112,27 +113,27 @@ def maxlfq(
         Wide-format protein intensity matrix:
         rows = protein, columns = runs (MaxLFQ-based protein_abundance).
     """
-    # 0) intensity > 0, NaN 제거
+    # 0) Filter out intensity <= 0 and NaN
     df = df.filter(pl.col(intensity_col).is_not_null() & (pl.col(intensity_col) > 0))
 
     if df.height == 0:
         return pl.DataFrame({protein_col: [], run_col: [], "protein_abundance": []})
 
-    # 1) log-intensity 추가
+    # 1) Add log-intensity
     df_log = df.with_columns(pl.col(intensity_col).log().alias("logI"))
 
-    # 전체 데이터에서 log-intensity global median (절대 스케일 기준)
+    # Global log-intensity median from entire dataset (for absolute scale reference)
     global_log_median = float(df_log.select(pl.col("logI").median()).item())
 
-    # 2) protein 단위로 MaxLFQ 수행
+    # 2) Perform MaxLFQ per protein
     records: list[tuple] = []
 
     for prot, df_p in df_log.group_by(protein_col, maintain_order=False):
-        # protein 당 peptide 수 필터링
+        # Filter by peptide count per protein
         n_pep = df_p.select(pl.col(peptide_col).n_unique()).item()
         if n_pep < min_peptides_per_protein:
-            # peptide가 너무 적으면 MaxLFQ로 안정적인 추정이 어렵다고 보고 스킵하거나
-            # 그대로 simple sum/mean을 쓰는 옵션을 나중에 추가할 수 있음.
+            # If too few peptides, stable estimation via MaxLFQ is difficult.
+            # Could skip or use simple sum/mean as an option (can be added later).
             continue
 
         runs, x = _maxlfq_one_protein(
@@ -145,12 +146,19 @@ def maxlfq(
         if len(runs) == 0:
             continue
 
-        # x는 run별 log-abundance (relative, gauge x[0]=0).
-        # protein 내 평균이 0이 되도록 한 번 더 센터링한 뒤,
-        # 전체 데이터 global_log_median을 더해서 스케일을 맞춘다.
+        # x is run-wise log-abundance (relative, gauge x[0]=0).
         x = np.asarray(x, dtype=float)
-        x_centered = x - np.nanmean(x)
-        log_protein = x_centered + global_log_median
+
+        if len(runs) == 1:
+            # For single run, x already contains the mean log-intensity of peptides
+            # No need to center (would result in 0), just use it directly
+            log_protein = x
+        else:
+            # For multiple runs, center so that protein-level mean is 0,
+            # then add global_log_median to match scale
+            x_centered = x - np.nanmean(x)
+            log_protein = x_centered + global_log_median
+
         protein_intensity = np.exp(log_protein)
 
         for run, val in zip(runs, protein_intensity):
@@ -165,7 +173,7 @@ def maxlfq(
 
     return df_prot_long
 
-    # 3) protein × run wide matrix로 pivot
+    # 3) Pivot to protein × run wide matrix
     # protein_matrix = (
     #     df_prot_long
     #     .pivot(

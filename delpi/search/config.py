@@ -26,7 +26,8 @@ class SearchConfig:
                 input_files.extend(input_dir.glob(f"*{ext}", case_sensitive=False))
             if len(input_files) < 1:
                 raise ValueError(f"Cannot find any input files from {input_dir}")
-
+            # Make sure the input files are ordered consistently
+            input_files = sorted(input_files)
         elif "input_files" in self.config:
             for input_file in self.config["input_files"]:
                 if input_file.lower().endswith(SUPPORTED_FILE_TYPES):

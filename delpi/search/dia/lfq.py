@@ -1,12 +1,5 @@
 """
 Label-Free Quantification (LFQ) Module for DelPi DIA Search
-
-This module provides functionality for performing label-free quantification across
-multiple DIA runs, including:
-- Fragment scoring and selection
-- MS1 and MS2 area calculations
-- Cross-run quantification matrix generation
-- Integration with ResultManager for data handling
 """
 
 import logging
@@ -15,18 +8,9 @@ import numpy as np
 import polars as pl
 
 from delpi.search.result_aggregator import ResultsAggregator
-from delpi.search.dia.lfq_utils import (
-    quant_fragment_xics,
-    score_fragment_xics,
-    find_quantitative_fragments,
-)
-from delpi.search.dia.peak_token import QUANT_FRAGMENTS
+from delpi.search.dia.lfq_utils import perform_lfq
 
 logger = logging.getLogger(__name__)
-
-# Constants
-MAX_THEO_INDEX = 15
-XIC_LEN = 7
 
 
 class LabelFreeQuantifier:
@@ -43,36 +27,16 @@ class LabelFreeQuantifier:
     def __init__(
         self,
         result_aggregator: ResultsAggregator,
+        q_value_cutoff: float,
         acq_method: str,
-        group_key: str = "filtered_results",
-        select_topk_fragments: int = 3,
-        beta: float = 0.0,
+        group_key: str = "second_results",
     ):
-        self.select_topk_fragments = select_topk_fragments
         self.result_aggregator = result_aggregator
+        self.q_value_cutoff = q_value_cutoff
         self.group_key = group_key
         self.acq_method = acq_method.upper()
-        self.beta = beta
 
-        unique_precursor_index_arr = None
-        for run_index, result_mgr in result_aggregator._results_dict.items():
-            data_dict = result_mgr.read_dict(
-                group_key,
-                data_keys=[
-                    "precursor_index",
-                ],
-            )
-            unique_precursor_index_arr = (
-                np.union1d(data_dict["precursor_index"], unique_precursor_index_arr)
-                if unique_precursor_index_arr is not None
-                else data_dict["precursor_index"]
-            )
-
-        self.unique_precursor_df = pl.DataFrame(
-            {"precursor_index": unique_precursor_index_arr.astype(np.uint32)}
-        ).with_row_index("_index")
-
-    def perform_quantification(self) -> pl.DataFrame:
+    def perform_quantification(self, pmsm_df: pl.DataFrame) -> pl.DataFrame:
         """
         Perform complete label-free quantification workflow.
 
@@ -82,67 +46,18 @@ class LabelFreeQuantifier:
         logger.debug("Starting label-free quantification")
 
         if self.acq_method == "DIA":
-            selected_fragments, scores = self._select_quantitative_fragments()
-            quant_df = self._calculate_ms2_areas(selected_fragments, scores)
+            quant_df = self._quantify_dia(pmsm_df)
+            # quant_df = self._normalize_ms2_area(quant_df)
         elif self.acq_method == "DDA":
-            quant_df = self._calculate_ms1_areas()
+            quant_df = self._quantify_dda()
         else:
             raise NotImplementedError()
 
         return quant_df
 
-    def _select_quantitative_fragments(self) -> None:
-        """Score fragment XICs for each run to assess fragment quality."""
-        logger.debug("Scoring fragment XICs")
+    def _quantify_dda(self) -> pl.DataFrame:
 
-        result_aggregator = self.result_aggregator
-        group_key = self.group_key
-        topk_fragments = self.select_topk_fragments
-
-        unique_precursor_df = self.unique_precursor_df
-        n_precursors = unique_precursor_df.shape[0]
-        n_runs = len(result_aggregator._results_dict)
-
-        score_matrix = np.full(
-            (n_precursors, n_runs, QUANT_FRAGMENTS), np.nan, dtype=np.float32
-        )
-        intensity_matrix = np.zeros(
-            (n_precursors, n_runs, QUANT_FRAGMENTS), dtype=np.float32
-        )
-
-        for run_index, result_mgr in result_aggregator._results_dict.items():
-            data_dict = result_mgr.read_dict(
-                group_key,
-                data_keys=[
-                    "precursor_index",
-                    "quant_ab",
-                    "quant_theo_index",
-                    "quant_time_index",
-                ],
-            )
-
-            frag_score_arr, frag_intensity_arr = score_fragment_xics(
-                quant_ab_arr=data_dict["quant_ab"],
-                quant_theo_arr=data_dict["quant_theo_index"],
-                quant_time_arr=data_dict["quant_time_index"],
-            )
-
-            ii = pl.DataFrame({"precursor_index": data_dict["precursor_index"]}).join(
-                unique_precursor_df, on="precursor_index", how="left"
-            )["_index"]
-
-            score_matrix[ii, run_index, :] = frag_score_arr
-            intensity_matrix[ii, run_index, :] = frag_intensity_arr
-
-        topk_index_arr, score_arr = find_quantitative_fragments(
-            score_matrix, intensity_matrix, topk=topk_fragments, beta=self.beta
-        )
-
-        return topk_index_arr, score_arr
-
-    def _calculate_ms1_areas(self) -> pl.DataFrame:
-        """Calculate MS2 peak areas using selected fragments."""
-        logger.debug("Calculating MS2 areas")
+        logger.debug("Calculating MS1 areas")
         result_aggregator = self.result_aggregator
         group_key = self.group_key
 
@@ -152,90 +67,216 @@ class LabelFreeQuantifier:
                 group_key,
                 data_keys=["precursor_index", "ms1_area"],
             )
-            quant_df = pl.DataFrame(quant_dict).with_columns(
+            quant_df = pl.DataFrame(quant_dict, nan_to_null=True).with_columns(
                 pl.lit(run_index).cast(pl.UInt32).alias("run_index")
             )
             dfs.append(quant_df)
 
         return pl.concat(dfs, how="vertical")
 
-    def _calculate_ms2_areas(
-        self, selected_fragments: np.ndarray, scores: np.ndarray
-    ) -> pl.DataFrame:
+    def _quantify_dia(self, pmsm_df: pl.DataFrame) -> pl.DataFrame:
         """Calculate MS2 peak areas using selected fragments."""
-        logger.debug("Calculating MS2 areas")
+        logger.debug("Calculating MS1 and MS2 areas")
 
         result_aggregator = self.result_aggregator
-        group_key = self.group_key
-        unique_precursor_df = self.unique_precursor_df
+        q_value_cutoff = self.q_value_cutoff
 
-        dfs = []
-        for run_index, result_mgr in result_aggregator._results_dict.items():
-            run_name = result_mgr.run_name
-            # Load RT mapping
-            meta_df = result_mgr.read_df("meta_df").cast(
-                {"isolation_win_idx": pl.UInt32}
+        target_pmsm_df = (
+            pmsm_df.filter(
+                (pl.col("is_decoy") == False)
+                & (pl.col("global_precursor_q_value") <= q_value_cutoff)
+                & (pl.col("precursor_q_value") <= q_value_cutoff)
             )
-            quant_dict = result_mgr.read_dict(
-                group_key,
-                data_keys=[
-                    "precursor_index",
-                    "ms1_area",
-                    "quant_ab",
-                    "quant_theo_index",
-                    "quant_time_index",
-                    "frame_index",
-                    "search_group",
-                ],
+            .with_columns(
+                pl.col("score")
+                .max()
+                .over(["precursor_index", "run_index"])
+                .alias("max_precursor_score"),
             )
-
-            frame_to_rt_map = self.get_frame_index_to_retention_time_map(meta_df)
-            ii = pl.DataFrame({"precursor_index": quant_dict["precursor_index"]}).join(
-                unique_precursor_df, on="precursor_index", how="left"
-            )["_index"]
-
-            areas = quant_fragment_xics(
-                frame_to_rt_map_arr=frame_to_rt_map,
-                quant_ab_arr=quant_dict["quant_ab"],
-                quant_theo_arr=quant_dict["quant_theo_index"],
-                quant_time_arr=quant_dict["quant_time_index"],
-                selected_index_arr=selected_fragments[ii, :],
-                frag_score_arr=scores[ii, :],
-                frame_index_arr=quant_dict["frame_index"],
-                win_index_arr=quant_dict["search_group"],
+            .filter(
+                # filter out low confidence PmSMs
+                (pl.col("score") / pl.col("max_precursor_score") > 0.5)
+                | (pl.col("max_precursor_score") - pl.col("score") < 1.0)
             )
-            quant_df = pl.DataFrame(
-                {
-                    "precursor_index": quant_dict["precursor_index"],
-                    "ms1_area": quant_dict["ms1_area"],
-                    "ms2_area": areas,
-                }
-            ).with_columns(pl.lit(run_index).cast(pl.UInt32).alias("run_index"))
+            .sort(pl.col("precursor_index", "run_index"))
+        )
 
-            dfs.append(quant_df)
-            # result_mgr.write_dict(group_key, {"ms2_area": areas})
-            logger.debug(f"Calculated MS2 areas for {run_name}")
+        all_xic_arrays, all_ms1_area_arr = result_aggregator.get_xic_arrays(
+            target_pmsm_df, group_key=self.group_key
+        )
 
-        return pl.concat(dfs, how="vertical")
+        ## compute median intensity at apex time point
+        med_intensity = np.median(
+            all_xic_arrays[:, :, all_xic_arrays.shape[-1] // 2], axis=1
+        )
+        target_pmsm_df = target_pmsm_df.with_columns(
+            pl.Series(name="med_intensity", values=med_intensity)
+        ).with_row_index("index_")
 
-    @staticmethod
-    def get_frame_index_to_retention_time_map(meta_df) -> np.ndarray:
-        """Generate RT mapping from metadata.
-        returns rt_array of [#windows, #frames]
+        ## select a PmSM for each precursor based on the median intensity
+        selected_pmsm_df = target_pmsm_df.group_by(
+            ["precursor_index", "run_index"], maintain_order=True
+        ).agg(
+            pl.all().sort_by("med_intensity").last(),
+        )
+
+        ## estimate RT deviation median for each precursor
+        rt_diff_df = (
+            selected_pmsm_df.select(
+                pl.col("precursor_index"),
+                (pl.col("observed_rt") - pl.col("predicted_rt")).abs().alias("rt_diff"),
+            )
+            .group_by("precursor_index")
+            .agg(pl.col("rt_diff").median().alias("median_rt_diff"))
+        )
+
+        ## re-select PmSMs considering RT deviation
+        selected_pmsm_df = (
+            target_pmsm_df.join(
+                rt_diff_df,
+                on="precursor_index",
+                how="left",
+            )
+            .with_columns(
+                rt_match=(pl.col("observed_rt") - pl.col("predicted_rt")).abs()
+                < pl.col("median_rt_diff") * 3
+            )
+            .group_by(["precursor_index", "run_index"], maintain_order=True)
+            .agg(
+                pl.all().sort_by("rt_match", "med_intensity").last(),
+            )
+        )
+
+        ## perform LFQ using selected PmSMs
+        idx_df = (
+            selected_pmsm_df.group_by(["precursor_index"], maintain_order=True)
+            .agg(
+                pl.len(),
+            )
+            .with_columns(pl.col("len").cum_sum().alias("precursor_stop"))
+        )
+        stop_index_arr = idx_df["precursor_stop"].to_numpy()
+        precursor_index_arr = idx_df["precursor_index"].to_numpy()
+        all_xic_arr = all_xic_arrays[selected_pmsm_df["index_"]]
+        all_ms1_ab_arr = all_ms1_area_arr[selected_pmsm_df["index_"]]
+        all_ms2_ab_arr = perform_lfq(
+            precursor_index_arr,
+            stop_index_arr,
+            all_xic_arr,
+            min_fragments=6,
+            max_fragments=9,
+            corr_thresh=0.9,
+        )
+
+        quant_df = selected_pmsm_df.select(
+            pl.col("run_index", "precursor_index"),
+            pl.col("observed_rt").alias("quantification_rt"),
+            pl.Series(name="ms1_area", values=all_ms1_ab_arr, nan_to_null=True),
+            pl.Series(name="ms2_area", values=all_ms2_ab_arr, nan_to_null=True),
+        )
+
+        return quant_df
+
+    def _normalize_ms2_area(
+        self,
+        quant_df: pl.DataFrame,
+        p: float = 0.25,  # housekeeping fraction (0~1)
+        # use_median_ref: bool = True,  # reference = median(sum_hk) else mean
+        eps: float = 1e-9,
+    ) -> tuple[pl.DataFrame, pl.DataFrame]:
         """
-        max_win_idx, max_frame_count = (
-            meta_df.filter(pl.col("isolation_win_idx").is_not_null())
-            .group_by("isolation_win_idx")
-            .agg(pl.len())
-            .select(pl.col("isolation_win_idx").max(), pl.col("len").max())
-        ).row(0)
+        Return:
+        - quant_df with new columns: ms2_area_norm, run_scaling_factor
+        - hk_summary: precursor CV table (for debugging / inspection)
 
-        rt_map_arr = np.empty((max_win_idx + 1, max_frame_count), dtype=np.float32)
+        Housekeeping selection:
+        - compute per-precursor CV across runs using area_col
+        - keep precursors with enough non-null runs
+        - pick lowest-CV top p fraction
+        Scaling:
+        - per run: sum areas over housekeeping precursors -> sum_hk[run]
+        - scaling_factor[run] = sum_hk[run] / reference(sum_hk)
+        - normalized_area = area / scaling_factor
+        """
 
-        for win_idx_, sub_df in meta_df.filter(
-            pl.col("isolation_win_idx").is_not_null()
-        ).group_by("isolation_win_idx"):
-            rt_arr = sub_df["time_in_seconds"].to_numpy()
-            rt_map_arr[win_idx_[0], : rt_arr.shape[0]] = rt_arr
+        num_runs = len(self.result_aggregator._results_dict)
 
-        return rt_map_arr
+        if num_runs < 2:
+            return quant_df.with_columns(
+                pl.col("ms2_area").alias("normalized_ms2_area")
+            )
+
+        min_nonnull_runs = max(2, int(round(num_runs * 0.5)))
+
+        # 1) precursor-level stats across runs (nonnull only)
+        prec_stats = (
+            quant_df.filter(pl.col("ms2_area").is_not_null() & (pl.col("ms2_area") > 0))
+            .group_by("precursor_index")
+            .agg(
+                [
+                    pl.col("run_index").n_unique().alias("n_runs_nonnull"),
+                    pl.col("ms2_area").mean().alias("mean_area"),
+                    pl.col("ms2_area").std(ddof=1).alias("std_area"),
+                ]
+            )
+            .filter(pl.col("n_runs_nonnull") > 1)
+            .with_columns(
+                (pl.col("std_area") / (pl.col("mean_area") + eps)).alias("cv"),
+            )
+            .filter(pl.col("n_runs_nonnull") >= min_nonnull_runs)
+            .sort("cv")
+        )
+
+        if prec_stats.height == 0:
+            # raise ValueError(
+            #     "No precursors eligible for housekeeping selection. "
+            #     "Try lowering min_nonnull_runs or check ms2_area null/zero distribution."
+            # )
+            return quant_df
+
+        # 2) pick housekeeping precursors = lowest CV top p fraction
+        k = max(1, int(round(prec_stats.height * p)))
+        hk_precursors = prec_stats.head(k).select("precursor_index")
+
+        # 3) compute run-wise sum over housekeeping precursors
+        run_scale_df = (
+            quant_df.join(hk_precursors, on="precursor_index", how="inner")
+            .filter(pl.col("ms2_area").is_not_null() & (pl.col("ms2_area") > 0))
+            .group_by("run_index")
+            .agg(pl.col("ms2_area").sum().alias("sum_hk"))
+            .sort("run_index")
+        )
+
+        if run_scale_df.height == 0:
+            run_scale_df = (
+                quant_df.filter(
+                    pl.col("ms2_area").is_not_null() & (pl.col("ms2_area") > 0)
+                )
+                .group_by("run_index")
+                .agg(pl.col("ms2_area").sum().alias("sum"))
+                .sort("run_index")
+            )
+
+        # scaling_factor
+        run_scale_df = run_scale_df.with_columns(
+            (pl.col("sum_hk") / (pl.col("sum_hk").median() + eps)).alias(
+                "run_scaling_factor"
+            )
+        )
+
+        # 4) apply normalization
+        quant_df = (
+            quant_df.join(
+                run_scale_df.select(["run_index", "run_scaling_factor"]),
+                on="run_index",
+                how="left",
+            )
+            .with_columns(
+                (pl.col("ms2_area") / (pl.col("run_scaling_factor") + eps)).alias(
+                    f"normalized_ms2_area"
+                )
+            )
+            .drop("run_scaling_factor")
+        )
+
+        return quant_df

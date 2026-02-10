@@ -1,8 +1,7 @@
 import numpy as np
 import numba as nb
 
-
-from delpi.utils.numeric import corrcoef, rowwise_pearsonr
+from delpi.utils.numeric import rowwise_pearsonr, pearsonr
 from delpi.search.dia.peak_token import (
     EXP_IS_PRECURSOR_IDX,
     EXP_ISOTOPE_INDEX_IDX,
@@ -10,229 +9,36 @@ from delpi.search.dia.peak_token import (
     EXP_TIME_INDEX_IDX,
     EXP_AB_IDX,
 )
-from delpi.search.dia.peak_token import QUANT_FRAGMENTS
+from delpi.constants import RT_WINDOW_LEN, MAX_FRAGMENTS
 
-# Constants
-MAX_THEO_INDEX = 15
-XIC_LEN = 7
-
-
-@nb.njit(cache=True, parallel=True)
-def get_apex_median_intensity(quant_ab_arr, quant_time_index_arr) -> np.ndarray:
-    n = quant_ab_arr.shape[0]
-    apex_median_intensity_arr = np.empty(n, dtype=np.float32)
-    for i in nb.prange(n):
-        ab_arr = quant_ab_arr[i]
-        time_arr = quant_time_index_arr[i]
-        mask = (time_arr >= 3) & (time_arr <= 5) & (ab_arr > 0)
-        apex_ab_arr = ab_arr[mask]
-        apex_median_intensity_arr[i] = (
-            np.median(apex_ab_arr) if len(apex_ab_arr) > 0 else 0.0
-        )
-
-    return apex_median_intensity_arr
+MAX_THEO_INDEX = MAX_FRAGMENTS - 1
 
 
 @nb.njit(parallel=True, cache=True)
-def get_ms1_area(
-    ms1_rt_arr: np.ndarray,
-    frame_index_arr: np.ndarray,
-    x_exp: np.ndarray,
-    ms1_scale_arr: np.ndarray,
-):
-    xic_half_len = XIC_LEN // 2
+def get_ms1_area(x_exp: np.ndarray, ms1_scale_arr: np.ndarray):
+
     N, M = x_exp.shape[:2]
     quant_arr = np.full(N, np.nan, dtype=np.float32)
 
-    for i in nb.prange(x_exp.shape[0]):
+    for i in nb.prange(N):
         x_arr = x_exp[i]
         scale = ms1_scale_arr[i]
-        frame_idx = frame_index_arr[i]
         if scale <= 0:
             continue
-
         has_ms1_peak = False
-        y = np.zeros(XIC_LEN, dtype=np.float32)
+        y = np.zeros(RT_WINDOW_LEN, dtype=np.float32)
         for j in range(M):
             t = nb.int8(x_arr[j, EXP_TIME_INDEX_IDX])
-            if (
-                (x_arr[j, EXP_IS_PRECURSOR_IDX] > 0)
-                and (x_arr[j, EXP_MS_LEVEL_IDX] == 1)
-                and (t > 0)
-                and (t < 8)
+            if (x_arr[j, EXP_IS_PRECURSOR_IDX] > 0) and (
+                x_arr[j, EXP_MS_LEVEL_IDX] == 1
             ):
-                y[t - 1] += x_arr[j, EXP_AB_IDX]
+                y[t] += x_arr[j, EXP_AB_IDX]
                 has_ms1_peak = True
 
         if has_ms1_peak:
             y *= scale
-            x = ms1_rt_arr[frame_idx - xic_half_len : frame_idx + xic_half_len + 1]
-            quant_arr[i] = np.trapz(y, x)
-
-    return quant_arr
-
-
-@nb.njit(inline="always")
-def get_xic_arr(ab_arr, theo_arr, time_arr):
-    # time index is in [1, 7]
-    out_arr = np.zeros((QUANT_FRAGMENTS, XIC_LEN), dtype=np.float32)
-    for i, t, ab in zip(theo_arr, time_arr, ab_arr):
-        if i < 0:
-            break
-        out_arr[MAX_THEO_INDEX - i, t - 1] = max(out_arr[MAX_THEO_INDEX - i, t - 1], ab)
-    return out_arr
-
-
-@nb.njit(cache=True)
-def percentile_numba(arr, q):
-    """Numba-friendly percentile for 2D array (row-wise)."""
-    m, n = arr.shape
-    out = np.empty(m, dtype=np.float32)
-    q_index = (q / 100.0) * (n - 1)
-    for i in range(m):
-        row = np.sort(arr[i])
-        k = int(q_index)
-        f = q_index - k
-        if k + 1 < n:
-            out[i] = row[k] * (1 - f) + row[k + 1] * f
-        else:
-            out[i] = row[k]
-    return out
-
-
-@nb.njit(cache=True)
-def get_rep_xic(xic_arr):
-    """
-    xic_arr: [n_frag, n_time]
-    return: reference XIC (mean of normalized fragments)
-    """
-    n_frag, n_time = xic_arr.shape
-
-    # 1) 유효 fragment (모든 intensity가 0인 fragment 제외)
-    valid_mask = np.zeros(n_frag, dtype=np.bool_)
-    for i in range(n_frag):
-        if np.sum(xic_arr[i, :]) > 0.0:
-            valid_mask[i] = True
-    m = np.sum(valid_mask)
-
-    if m == 0:
-        # 모든 fragment가 0이면 0 벡터 반환
-        return np.zeros(n_time, dtype=np.float32)
-
-    valid_idx = np.empty(m, dtype=np.int32)
-    idx = 0
-    for i in range(n_frag):
-        if valid_mask[i]:
-            valid_idx[idx] = i
-            idx += 1
-
-    x_valid = xic_arr[valid_idx, :]  # [m, n_time]
-
-    # 2) 95th percentile scaling
-    scale = percentile_numba(x_valid, 95.0)  # [m]
-    for i in range(m):
-        if scale[i] < 1e-9:
-            scale[i] = 1e-9
-
-    # 3) normalize & mean
-    ref = np.zeros(n_time, dtype=np.float32)
-    for i in range(m):
-        for t in range(n_time):
-            ref[t] += x_valid[i, t] / scale[i]
-    ref /= m
-
-    return ref
-
-
-@nb.njit(inline="always")
-def snr(x):
-    base = np.mean(np.partition(x, int(0.2 * len(x)))[: int(0.2 * len(x))]) + 1e-9
-    return float(np.max(x) / base)
-
-
-@nb.njit(parallel=True, cache=True)
-def score_fragment_xics(quant_ab_arr, quant_theo_arr, quant_time_arr, eps=1e-9):
-    frag_score_arr = np.full(
-        (quant_ab_arr.shape[0], QUANT_FRAGMENTS), np.nan, dtype=np.float32
-    )
-    frag_intensity_arr = np.zeros(
-        (quant_ab_arr.shape[0], QUANT_FRAGMENTS), dtype=np.float32
-    )
-
-    for i in nb.prange(frag_score_arr.shape[0]):
-        ab_arr = quant_ab_arr[i]
-        theo_arr = quant_theo_arr[i]
-        time_arr = quant_time_arr[i]
-        xic_arr = get_xic_arr(ab_arr, theo_arr, time_arr)
-        rep_xic = get_rep_xic(xic_arr)
-
-        intensity_arr = xic_arr[:, 2:-2].sum(axis=1)
-        positive = intensity_arr[intensity_arr > 0]
-        if positive.size == 0:
-            continue
-
-        intensity_scale = max(np.median(positive), 1e-9)
-        intensity_arr /= intensity_scale
-        frag_intensity_arr[i, :] = intensity_arr
-
-        ii = np.where(intensity_arr > 0)[0]
-        corr = rowwise_pearsonr(xic_arr[ii], rep_xic)
-        frag_score_arr[i, ii] = corr**3
-
-        # ii = np.where(np.sum(xic_arr, axis=1) > 0)[0]
-        # if len(ii) > 1:
-        #     corr = corrcoef(xic_arr[ii])
-        #     j = np.argmax(np.sum(corr**3, axis=1))
-        #     frag_score_arr[i, ii] = corr[j, :]
-
-    return frag_score_arr, frag_intensity_arr
-
-
-@nb.njit(parallel=True, cache=True)
-def quant_fragment_xics(
-    frame_to_rt_map_arr,
-    quant_ab_arr,
-    quant_theo_arr,
-    quant_time_arr,
-    selected_index_arr,
-    frag_score_arr,
-    frame_index_arr,
-    win_index_arr,
-):
-    xic_half_len = XIC_LEN // 2
-    N = selected_index_arr.shape[0]
-    quant_arr = np.zeros(N, dtype=np.float32)
-
-    for i in nb.prange(N):
-        win_idx = win_index_arr[i]
-        frame_idx = frame_index_arr[i]
-
-        ab_arr = quant_ab_arr[i]
-        theo_arr = quant_theo_arr[i]
-        time_arr = quant_time_arr[i]
-        selected_indices = selected_index_arr[i]
-        xic_arr = get_xic_arr(ab_arr, theo_arr, time_arr)
-
-        w = frag_score_arr[i, selected_indices]
-
-        ws = w.sum()
-        if ws < 1e-9:
-            quant_arr[i] = 0.0
-            continue
-
-        w /= ws
-        # y = (w[:, None] * xic_arr[selected_indices, :]).sum(axis=0)
-        # y = xic_arr[selected_indices, :].sum(axis=0)
-        y = np.zeros(XIC_LEN, dtype=np.float32)
-        for j, k in enumerate(selected_indices):
-            y[:] += w[j] * xic_arr[k]
-
-        x = frame_to_rt_map_arr[
-            win_idx, frame_idx - xic_half_len : frame_idx + xic_half_len + 1
-        ]
-
-        peak_area = np.trapz(y, x)
-        quant_arr[i] = peak_area
+            quant_arr[i] = np.sum(y)
+            # quant_arr[i] = np.trapz(y)
 
     return quant_arr
 
@@ -249,100 +55,23 @@ def get_ms1_area_dda(x_exp: np.ndarray, ms1_scale_arr: np.ndarray):
             continue
         # frame_idx = frame_index_arr[i]
         has_ms1_peak = False
-        y = np.zeros(XIC_LEN, dtype=np.float32)
+        y = np.zeros(RT_WINDOW_LEN, dtype=np.float32)
 
         for j in range(M):
             t = nb.int8(x_arr[j, EXP_TIME_INDEX_IDX])
-            if (
-                (x_arr[j, EXP_IS_PRECURSOR_IDX] > 0)
-                and (x_arr[j, EXP_MS_LEVEL_IDX] == 1)
-                and (t > 0)
-                and (t < 8)
+            if (x_arr[j, EXP_IS_PRECURSOR_IDX] > 0) and (
+                x_arr[j, EXP_MS_LEVEL_IDX] == 1
             ):
-                y[t - 1] += x_arr[j, EXP_AB_IDX]
+                y[t] += x_arr[j, EXP_AB_IDX]
                 has_ms1_peak = True
 
         if has_ms1_peak:
             y *= scale
+            quant_arr[i] = np.sum(y)
             # x = ms1_rt_arr[frame_idx - xic_half_len : frame_idx + xic_half_len + 1]
-            quant_arr[i] = np.trapz(y)  # , x)
+            # quant_arr[i] = np.trapz(y)  # , x)
 
     return quant_arr
-
-
-@nb.njit(cache=True)
-def _mad_log_no_nan_1d(x: np.ndarray, eps: float = 1e-6) -> float:
-    """
-    median(|log(x)-median(log(x))|)
-    """
-    n = x.size
-    cnt = 0
-    for i in range(n):
-        if not np.isnan(x[i]):
-            cnt += 1
-    if cnt == 0:
-        return np.nan
-
-    buf = np.empty(cnt, dtype=np.float64)
-    k = 0
-    for i in range(n):
-        if not np.isnan(x[i]):
-            v = x[i]
-            if v <= 0.0:
-                v = eps
-            buf[k] = np.log(v)
-            k += 1
-
-    med = float(np.median(buf))
-    # |logI - med|
-    for i in range(cnt):
-        buf[i] = abs(buf[i] - med)
-    return float(np.median(buf))
-
-
-@nb.njit(parallel=True, cache=True)
-def find_quantitative_fragments(
-    score_matrix: np.ndarray,  # [P, R, F], correlation (NaN 허용)
-    intensity_matrix: np.ndarray,  # [P, R, F], normalized apex intensity
-    beta: float = 2.0,
-    topk: int = 3,
-):
-    """
-    반환:
-      topk_idx: [P, K]  (precursor별 상위 fragment 인덱스, 내림차순)
-      S       : [P, F]  (fragment 점수)
-    """
-    P, R, F = score_matrix.shape
-    K = topk if topk < F else F
-
-    S = np.zeros((P, F), dtype=np.float32)
-    topk_idx = np.zeros((P, K), dtype=np.uint32)
-
-    for p in nb.prange(P):
-        for f in range(F):
-
-            corr_slice = score_matrix[p, :, f]
-            inten_slice = intensity_matrix[p, :, f]
-
-            if np.all(inten_slice < 1e-6):
-                # intensities are all zero across runs
-                S[p, f] = 0.0
-                continue
-
-            mask = ~np.isnan(corr_slice)
-            med_corr = np.median(corr_slice[mask]) if np.any(mask) else np.nan
-
-            # MAD(log I)
-            mad_logI = _mad_log_no_nan_1d(inten_slice)
-
-            if np.isnan(med_corr) or np.isnan(mad_logI):
-                S[p, f] = 0.0
-            else:
-                S[p, f] = med_corr * np.exp(-beta * mad_logI)
-
-        topk_idx[p, :] = np.argsort(S[p])[-topk:]
-
-    return topk_idx, S
 
 
 @nb.njit(cache=True)
@@ -457,3 +186,268 @@ def _nb_build_L_b(
             p += 1
 
     return L, b
+
+
+@nb.njit(nogil=True, fastmath=True, cache=True)
+def get_consensus_xic(xic_arr):
+    """
+    xic_arr: [n_frag, n_time]
+
+    return: Median consensus XIC after 95th percentile normalization
+    """
+    n_frag, n_time = xic_arr.shape
+    epsilon = 1e-9
+    norm_buf = np.empty((n_frag, n_time), dtype=np.float32)
+    valid_cnt = 0
+
+    for i in range(n_frag):
+        row = xic_arr[i]
+        if np.sum(row) < epsilon:
+            continue
+
+        # 2. 95th Percentile
+        sorted_row = np.sort(row)
+        scale = sorted_row[int(0.95 * (n_time - 1))]
+
+        if scale < epsilon:
+            continue
+
+        # normalization
+        norm_buf[valid_cnt] = row / scale
+        valid_cnt += 1
+
+    if valid_cnt == 0:
+        return np.zeros(n_time, dtype=np.float32)
+
+    # 3. Column-wise median calculation
+    consensus_xic = np.empty(n_time, dtype=np.float32)
+    col_buf = np.empty(valid_cnt, dtype=np.float32)
+
+    mid_idx = valid_cnt // 2
+    is_odd = valid_cnt % 2 == 1
+
+    for t in range(n_time):
+        col_buf[:] = norm_buf[:valid_cnt, t]
+        col_buf.sort()
+
+        if is_odd:
+            consensus_xic[t] = col_buf[mid_idx]
+        else:
+            consensus_xic[t] = 0.5 * (col_buf[mid_idx - 1] + col_buf[mid_idx])
+
+    return consensus_xic
+
+
+@nb.njit(nogil=True, fastmath=True, cache=True)
+def get_representative_xic(xic_arr):
+    """
+    Select the fragment XIC with the highest average correlation to all other fragments.
+    Similar to DIA-NN's approach for finding representative XICs.
+
+    Args:
+        xic_arr: [n_frag, n_time] - Array of fragment XICs
+
+    Returns:
+        numpy.array: Representative XIC [n_time] - the fragment with highest avg correlation
+    """
+    n_frag, n_time = xic_arr.shape
+    epsilon = 1e-9
+
+    # Filter out zero-intensity fragments
+    valid_indices = np.empty(n_frag, dtype=np.int32)
+    valid_cnt = 0
+
+    for i in range(n_frag):
+        if np.sum(xic_arr[i]) > epsilon:
+            valid_indices[valid_cnt] = i
+            valid_cnt += 1
+
+    if valid_cnt == 0:
+        return np.zeros(n_time, dtype=np.float32)
+
+    if valid_cnt == 1:
+        return xic_arr[valid_indices[0]].copy()
+
+    # Calculate average correlation for each valid fragment
+    avg_corr = np.zeros(valid_cnt, dtype=np.float32)
+
+    for i in range(valid_cnt):
+        frag_i = valid_indices[i]
+        xic_i = xic_arr[frag_i]
+        total_corr = 0.0
+
+        for j in range(valid_cnt):
+            if i == j:
+                continue
+            frag_j = valid_indices[j]
+            xic_j = xic_arr[frag_j]
+
+            # Compute Pearson correlation
+            corr = pearsonr(xic_i, xic_j)
+            total_corr += corr**3
+
+        # Average correlation (excluding self)
+        avg_corr[i] = total_corr / (valid_cnt - 1)
+
+    # Find fragment with highest average correlation
+    best_idx = 0
+    best_corr = avg_corr[0]
+
+    for i in range(1, valid_cnt):
+        if avg_corr[i] > best_corr:
+            best_corr = avg_corr[i]
+            best_idx = i
+
+    # Return the representative fragment XIC
+    return xic_arr[valid_indices[best_idx]].copy()
+
+
+@nb.njit(nogil=True, fastmath=True, cache=True)
+def select_quantifiable_fragments_by_avg_corr(
+    xic_arrays,
+    min_fragments=3,
+    max_fragments=9,
+    corr_thresh=0.5,
+    cube_corr=False,
+    rep_type=0,
+):
+    """
+    Select fragments based on average correlation with consensus XIC across runs.
+
+    This approach computes the average Pearson correlation of each fragment
+    with the consensus XIC across all runs, then selects fragments with correlation
+    above threshold, bounded by min and max fragment counts.
+
+    Args:
+        xic_arrays (numpy.array): [n_runs, n_frags, n_time]
+        min_fragments (int, optional): minimum number of fragments to select. Defaults to 3.
+        max_fragments (int, optional): maximum number of fragments to select. Defaults to 6.
+        corr_thresh (float, optional): minimum correlation threshold. Defaults to 0.5.
+        cube_corr (bool, optional): whether to cube correlations. Defaults to False.
+        rep_type (int, optional): 0 for consensus, 1 for representative. Defaults to 0.
+
+    Returns:
+        numpy.array: Indices of selected fragments sorted by average correlation (descending)
+    """
+    n_runs, n_frags, n_time = xic_arrays.shape
+    epsilon = 1e-6
+
+    # 1. Initial Filtering: Remove fragments with near-zero total intensity across all runs
+    total_intensities = np.zeros(n_frags, dtype=np.float32)
+    for frag_idx in range(n_frags):
+        total = 0.0
+        for run_idx in range(n_runs):
+            for t in range(n_time):
+                total += xic_arrays[run_idx, frag_idx, t]
+        total_intensities[frag_idx] = total
+
+    # Collect valid fragment indices
+    valid_indices = np.empty(n_frags, dtype=np.int32)
+    valid_len = 0
+    for frag_idx in range(n_frags):
+        if total_intensities[frag_idx] > epsilon:
+            valid_indices[valid_len] = frag_idx
+            valid_len += 1
+
+    # Return early if not enough valid fragments
+    if valid_len == 0:
+        # logically this should not happen
+        return np.arange(n_frags, dtype=np.int32)
+
+    if valid_len <= min_fragments:
+        return valid_indices[:valid_len]
+
+    # 2. Calculate average correlation for each valid fragment across all runs
+    avg_correlations = np.zeros(valid_len, dtype=np.float32)
+
+    for run_idx in range(n_runs):
+        # Get XICs for valid fragments in current run
+        current_xics = xic_arrays[run_idx, valid_indices[:valid_len], :]
+
+        # Build consensus XIC from current run
+        if rep_type == 0:
+            consensus = get_consensus_xic(current_xics)
+        else:
+            consensus = get_representative_xic(current_xics)
+
+        # Compute correlations between each fragment and the consensus
+        run_corrs = rowwise_pearsonr(current_xics, consensus)
+
+        # Apply penalty to negative correlations and optional cubing
+        for i in range(valid_len):
+            corr = run_corrs[i]
+            # Apply cubing if requested
+            if cube_corr:
+                if corr < 0:
+                    # Preserve sign when cubing negative values
+                    corr = -((-corr) ** 3)
+                else:
+                    corr = corr**3
+
+            avg_correlations[i] += corr
+
+    # Average across runs
+    for i in range(valid_len):
+        avg_correlations[i] = avg_correlations[i] / n_runs
+
+    # 3. Sort fragments by average correlation (descending)
+    sorted_order = np.argsort(-avg_correlations)  # negative for descending order
+
+    # 4. Select fragments based on correlation threshold and bounds
+    # First, count how many fragments meet the threshold
+    above_threshold_count = 0
+    for i in range(valid_len):
+        if avg_correlations[sorted_order[i]] >= corr_thresh:
+            above_threshold_count += 1
+        else:
+            break  # Since sorted, no more will meet threshold
+
+    if above_threshold_count >= min_fragments:
+        # We have enough fragments above threshold
+        # Select up to max_fragments among those above threshold
+        selected_count = min(above_threshold_count, max_fragments)
+    else:
+        # Not enough fragments above threshold
+        # Select top min_fragments regardless of threshold
+        selected_count = min(min_fragments, valid_len)
+
+    # Build the selected indices array
+    selected_indices = np.empty(selected_count, dtype=np.int32)
+    for i in range(selected_count):
+        selected_indices[i] = valid_indices[sorted_order[i]]
+
+    return selected_indices
+
+
+@nb.njit(nogil=True, fastmath=True, parallel=True, cache=True)
+def perform_lfq(
+    precursor_index_arr,
+    precursor_stop_index_arr,
+    all_xic_arr,
+    min_fragments: int = 6,
+    max_fragments: int = 9,
+    corr_thresh: float = 0.8,
+    rep_type: int = 0,
+    cube_corr: bool = False,
+):
+    all_ab_arr = np.zeros(all_xic_arr.shape[0], dtype=np.float32)
+
+    for i in nb.prange(precursor_index_arr.shape[0]):
+        st = 0 if i == 0 else precursor_stop_index_arr[i - 1]
+        ed = precursor_stop_index_arr[i]
+        sub_xic_arr = all_xic_arr[st:ed]
+
+        selected_indices = select_quantifiable_fragments_by_avg_corr(
+            sub_xic_arr,
+            min_fragments=min_fragments,
+            max_fragments=max_fragments,
+            corr_thresh=corr_thresh,
+            cube_corr=cube_corr,
+            rep_type=rep_type,
+        )
+
+        for j in range(sub_xic_arr.shape[0]):
+            for k in selected_indices:
+                all_ab_arr[st + j] += np.sum(sub_xic_arr[j, k, :])
+
+    return all_ab_arr
