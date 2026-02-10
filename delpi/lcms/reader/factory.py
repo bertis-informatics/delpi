@@ -22,7 +22,6 @@ class ReaderFactory:
         filepath: Union[Path, str],
         run_name: str = None,
         # bmsio_server_addr: str = "localhost:5001",
-        acquisition_method: str = None,
     ) -> MassSpecFileReader:
 
         if isinstance(filepath, str):
@@ -40,11 +39,7 @@ class ReaderFactory:
             #         f"Unsupported file type: {file_extension}. Raw file reader is not installed."
             #     )
             # reader = BMSIOReader(filepath, server_addr=bmsio_server_addr)
-            if acquisition_method is None:
-                is_dda = "DIA"
-            else:
-                is_dda = acquisition_method
-            reader = ThermoRawReader(filepath, dda=is_dda=="DDA")
+            reader = ThermoRawReader(filepath)
         elif file_extension in [".mzml", ".mzml.gz"]:
             reader = MzmlFileReader(filepath)
         elif file_extension in [".hdf", ".h5"]:

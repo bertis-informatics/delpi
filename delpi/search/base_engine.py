@@ -145,9 +145,8 @@ class BaseSearchEngine(ABC):
             # reader = ReaderFactory.get_reader(
             #     raw_path, bmsio_server_addr=self.search_config.bmsio_server_addr
             # )
-            reader = ReaderFactory.get_reader(
-                raw_path, acquisition_method=self.get_acquisition_method()
-            )
+            reader = ReaderFactory.get_reader(raw_path)
+            
             lcms_data = reader.load()
             max_rt_time = lcms_data.meta_df.item(-1, "time_in_seconds")
             logger.info(
