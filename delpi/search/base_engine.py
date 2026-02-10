@@ -158,7 +158,6 @@ class BaseSearchEngine(ABC):
             self.next_state()
             if self.state < SearchState.SECOND_SEARCH:
                 pmsm_df = self.perform_tda(result_manager)
-
                 group_key = self.get_results_group_key()
                 result_manager.write_df(pmsm_df, key=f"{group_key}/pmsm_df")
                 self.next_state()
@@ -228,8 +227,6 @@ class BaseSearchEngine(ABC):
         )
 
         ## Now select only one PMSM per precursor
-        ## Use apex_median_intensity instead of score to avoid PMSMs in XIC tails
-
         pmsm_df = pmsm_df.group_by(["precursor_index"]).agg(
             pl.all().sort_by("score").last()
         )

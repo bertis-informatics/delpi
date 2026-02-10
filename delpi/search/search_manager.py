@@ -330,6 +330,7 @@ class SearchManager:
                     "is_decoy",
                     "observed_rt",
                     "predicted_rt",
+                    "cluster",
                 )
             )
         )
@@ -361,28 +362,23 @@ class SearchManager:
         del train_dataset
         data_dict = None
 
+        ## select best-scoring PMSM per cluster of each run
         pmsm_df = (
             test_df.select(
-                pl.col("run_index", "pmsm_index"),
+                pl.col("run_index", "pmsm_index", "cluster"),
                 pl.Series(values=test_score_arr, name="score"),
-            )
-            .join(
-                pmsm_df,
-                how="left",
-                on=["run_index", "pmsm_index"],
             )
             .group_by(["run_index", "cluster"])
             .agg(pl.all().sort_by("score").last())
+            .join(
+                pmsm_df.select(pl.exclude("cluster")),
+                how="left",
+                on=["run_index", "pmsm_index"],
+            )
+            .drop("cluster")
         )
-
-        ## select best-scoring PMSM per cluster of each run
-        # pmsm_df = (
-        #     test_df.with_columns(score=test_score_arr)
-        #     .group_by(["run_index", "cluster"])
-        #     .agg(pl.all().sort_by("score").last())
-        # )
         logger.info(
-            f"Selected {pmsm_df.shape[0]} non-redundant PMSMs (one per cluster) from {test_df.shape[0]} PMSMs"
+            f"Selected {pmsm_df.shape[0]} non-redundant PMSMs (one per cluster) from {len(test_score_arr)} PMSMs"
         )
 
         ## Perform global and run-specific FDR analysis
@@ -415,14 +411,13 @@ class SearchManager:
         )
 
         lfq = LabelFreeQuantifier(
-            pmsm_df,
             result_aggregator,
+            q_value_cutoff=q_value_cutoff,
             group_key="second_results",
             acq_method=self.search_config.config.get("acquisition_method", "DDA"),
-            q_value_cutoff=q_value_cutoff,
         )
-        quant_df = lfq.perform_quantification()
 
+        quant_df = lfq.perform_quantification(pmsm_df)
         pmsm_df = (
             pmsm_df.select(pl.exclude("ms1_area", "ms2_area"))
             .group_by(["run_index", "precursor_index"])
@@ -431,17 +426,22 @@ class SearchManager:
         )
 
         ## run MaxLFQ
+        logger.info("Performing protein quantification with MaxLFQ ")
         if self.search_config.config.get("acquisition_method", "DDA").upper() == "DIA":
             df = (
                 pmsm_df.filter(pl.col("is_decoy") == False)
                 .filter(pl.col("global_protein_group_q_value") <= q_value_cutoff)
                 .filter(pl.col("ms2_area").is_not_null() & (pl.col("ms2_area") > 0))
-                .group_by(["protein_group", "peptide_index", "run_index"])
-                .agg(
-                    pl.col("ms2_area").median().alias("peptide_abundance"),
-                )
             )
-            pg_quant_df = maxlfq(df, min_peptides_per_protein=1)
+            pg_quant_df = maxlfq(
+                df,
+                min_peptides_per_protein=1,
+                peptide_col="precursor_index",
+                intensity_col="ms2_area",
+            )
+            pg_quant_df = pg_quant_df.join(
+                result_aggregator.get_run_df(), on="run_index", how="left"
+            )
         else:
             pg_quant_df = None
 
@@ -532,18 +532,7 @@ class SearchManager:
         # FDR control and quantification
         pmsm_df = self.perform_global_tda()
 
-        # result_aggregator = ResultsAggregator(
-        #     db_dir=self.get_db_dir(), search_config=self.search_config
-        # )
-        # pmsm_df = (
-        #     pl.read_parquet(self.search_config.output_dir / "pmsm.bak.parquet")
-        #     .filter(
-        #         (pl.col("precursor_q_value") <= 0.01)
-        #         | (pl.col("global_precursor_q_value") <= 0.01)
-        #     )
-        #     .join(result_aggregator.get_run_df(), on="run_index", how="left")
-        # )
-
+        # Quantification
         pmsm_df, pg_quant_df = self.perform_quantification(pmsm_df)
 
         # Save final results

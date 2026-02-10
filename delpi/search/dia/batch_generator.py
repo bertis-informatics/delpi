@@ -17,6 +17,7 @@ from delpi.search.dia.peak_token import (
     THEO_TOKEN_DIM,
     MAX_EXP_PEAK_TOKENS,
 )
+from delpi.constants import QUANT_FRAGMENTS, RT_WINDOW_LEN, RT_WINDOW_RADIUS
 
 
 def count_total_batches(peak_counts_arr: np.ndarray, batch_size: int = 512) -> int:
@@ -72,7 +73,7 @@ def _make_batch_in_parallel(
 
     cur_batch_size = batch_indices.shape[0]
     X_indices[:] = -1
-    X_quant[:] = -1
+    X_quant[:] = 0.0
     ms1_scale_arr[:] = -1.0
 
     # for i, k in enumerate(batch_indices):
@@ -90,7 +91,7 @@ def _make_batch_in_parallel(
             ms1_peak_df=ms1_peak_df,
             ms2_peak_df=ms2_peak_df,
             frame_num_map=frame_num_map,
-            rt_window_radius=4,
+            rt_window_radius=RT_WINDOW_RADIUS,
             peak_index_container=peak_index_container,
             ms1_mass_tol=ms1_mass_tol,
             ms2_mass_tol=ms2_mass_tol,
@@ -133,7 +134,7 @@ def generate_batches(
     X_indices = np.empty((batch_size, 128), dtype=np.int32)
 
     # Fragment peak intensities for quantification
-    X_quant = np.empty((batch_size, 128, 3), dtype=np.float32)
+    X_quant = np.empty((batch_size, QUANT_FRAGMENTS, RT_WINDOW_LEN), dtype=np.float32)
 
     frame_num_arr = peak_group_container.frame_num_arr
     # precursor_index0_arr = peak_group_container.precursor_index0_arr

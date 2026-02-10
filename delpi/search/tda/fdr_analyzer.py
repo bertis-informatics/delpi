@@ -35,7 +35,7 @@ class FDRAnalyzer:
                     "score",
                 )
             )
-            .sort(["precursor_index", "score"])
+            .sort(["peptidoform_index", "precursor_index", "score"])
             .unique("precursor_index", keep="last")
         )
 

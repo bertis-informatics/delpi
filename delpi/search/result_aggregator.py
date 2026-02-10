@@ -9,7 +9,7 @@ import numpy as np
 from delpi.database.peptide_database import PeptideDatabase
 from delpi.search.result_manager import ResultManager, TL_DATA_GROUP
 from delpi.search.config import SearchConfig
-from delpi.constants import QUANT_FRAGMENTS, QUANT_XIC_LEN
+from delpi.constants import QUANT_FRAGMENTS, RT_WINDOW_LEN
 
 
 class ResultsAggregator:
@@ -125,45 +125,6 @@ class ResultsAggregator:
         )
         return run_df
 
-    def save_filtered_results(
-        self,
-        pmsm_df: pl.DataFrame,
-        src_group_key: str = "second_results",
-        dst_group_key: str = "filtered_results",
-    ):
-        data_keys_for_quant = [
-            "precursor_index",
-            "frame_num",
-            "frame_index",
-            "search_group",
-            "ms1_area",
-            "quant_ab",
-            "quant_theo_index",
-            "quant_time_index",
-        ]
-
-        for run_index, result_manager in self._results_dict.items():
-            results_dict = result_manager.read_dict(
-                src_group_key,
-                data_keys=data_keys_for_quant,
-            )
-            df = pl.DataFrame(
-                {
-                    "precursor_index": results_dict["precursor_index"],
-                    "frame_num": results_dict["frame_num"],
-                }
-            ).join(
-                pmsm_df.filter(pl.col("run_index") == run_index)
-                .select(pl.col("precursor_index", "frame_num"))
-                .with_columns(pl.lit(True).alias("present")),
-                on=["precursor_index", "frame_num"],
-                how="left",
-            )
-            mask = df["present"].is_not_null().to_numpy()
-            result_manager.write_dict(
-                dst_group_key, {k: v[mask] for k, v in results_dict.items()}
-            )
-
     def get_search_results(
         self,
         group_key: str,
@@ -224,7 +185,7 @@ class ResultsAggregator:
         self, target_pmsm_df: pl.DataFrame, group_key: str = "second_results"
     ) -> np.ndarray:
         xic_arrays = np.empty(
-            (target_pmsm_df.shape[0], QUANT_FRAGMENTS, QUANT_XIC_LEN), dtype=np.float32
+            (target_pmsm_df.shape[0], QUANT_FRAGMENTS, RT_WINDOW_LEN), dtype=np.float32
         )
         ms1_area_arr = np.empty(target_pmsm_df.shape[0], dtype=np.float32)
 

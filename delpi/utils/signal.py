@@ -120,52 +120,64 @@ def cluster_peaks(all_peaks, dist_cutoff: int = 3, min_cluster_size: int = 2):
 
 @nb.njit(nogil=True, fastmath=True, cache=True)
 def cluster_peaks_with_weights(
-    all_peaks: np.ndarray,
-    all_peaks_weights: np.ndarray,
+    peak_groups: np.ndarray,
+    peak_group_weights: np.ndarray,
     dist_cutoff: int = 2,
     min_cluster_size: int = 1,
 ):
+    """
+    Cluster peaks by distance and select the peak with highest weight in each cluster.
 
-    if len(all_peaks) < 2:
-        return all_peaks
+    Args:
+        peak_groups: Array of peak positions
+        peak_group_weights: Array of weights corresponding to each peak
+        dist_cutoff: Maximum distance between peaks in same cluster
+        min_cluster_size: Minimum number of peaks required to form a cluster
 
-    ii = np.argsort(all_peaks)
-    all_peaks = all_peaks[ii]
-    all_peaks_weights = all_peaks_weights[ii]
+    Returns:
+        Array of selected peak positions (one per cluster, with highest weight)
+    """
+    if len(peak_groups) < 2:
+        return peak_groups
 
-    clustered_peaks = np.empty_like(all_peaks)
+    # Sort peaks by position (and align weights accordingly)
+    ii = np.argsort(peak_groups)
+    peak_groups = peak_groups[ii]
+    peak_group_weights = peak_group_weights[ii]
+
+    clustered_peaks = np.empty_like(peak_groups)
     i = 0  # cluster_count
 
-    current_cluster = np.empty_like(all_peaks)
-    current_cluster_weight = np.empty_like(all_peaks_weights)
-
-    current_cluster[0] = all_peaks[0]
-    current_cluster_weight[0] = all_peaks_weights[0]
+    current_cluster = np.empty_like(peak_groups)
+    current_cluster_weight = np.empty_like(peak_group_weights)
+    current_cluster[0] = peak_groups[0]
+    current_cluster_weight[0] = peak_group_weights[0]
     j = 1  # current_count
 
-    for peak, w in zip(all_peaks[1:], all_peaks_weights[1:]):
+    for peak, w in zip(peak_groups[1:], peak_group_weights[1:]):
         if peak - current_cluster[j - 1] <= dist_cutoff:
+            # Add to current cluster
             current_cluster[j] = peak
             current_cluster_weight[j] = w
             j += 1
         else:
+            # Finalize current cluster
             if j >= min_cluster_size:
-                # peak_center = weighted_average(current_cluster[:j], current_cluster_weight[:j])
-                # clustered_peaks[i] = int(np.round(peak_center))
-                ci = np.argmax(current_cluster_weight[:j])
-                clustered_peaks[i] = current_cluster[:j][ci]
+                # Select peak with highest weight in this cluster
+                max_weight_idx = np.argmax(current_cluster_weight[:j])
+                clustered_peaks[i] = current_cluster[max_weight_idx]
                 i += 1
 
+            # Start new cluster
             current_cluster[0] = peak
             current_cluster_weight[0] = w
             j = 1
 
-    ## add last cluster
-    # peak_center = weighted_average(current_cluster[:j], current_cluster_weight[:j])
-    # clustered_peaks[i] = int(np.round(peak_center))
-    ci = np.argmax(current_cluster_weight[:j])
-    clustered_peaks[i] = current_cluster[:j][ci]
-    i += 1
+    # Finalize last cluster
+    if j >= min_cluster_size:
+        max_weight_idx = np.argmax(current_cluster_weight[:j])
+        clustered_peaks[i] = current_cluster[max_weight_idx]
+        i += 1
 
     return clustered_peaks[:i]
 

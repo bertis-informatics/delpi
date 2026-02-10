@@ -82,6 +82,7 @@ class DDASearchEngine(BaseSearchEngine):
         batch_size: int = 512,
         peak_group_topk: int = 10,
         logit_cutoff: float = LOGIT_CUTOFF,
+        save_quant: bool = False,
     ) -> Dict[str, np.ndarray]:
         """Search DDA spectra for a specific isolation window."""
 
@@ -166,7 +167,8 @@ class DDASearchEngine(BaseSearchEngine):
                 results["features"].append(x_feature)
                 results["peak_indices"].append(x_ind)
                 results["observed_rt"].append(observed_rt)
-                results["ms1_area"].append(ms1_area_arr)
+                if save_quant:
+                    results["ms1_area"].append(ms1_area_arr)
 
         results = {k: np.concatenate(v) for k, v in results.items()}
         if len(results) > 0:
@@ -183,6 +185,7 @@ class DDASearchEngine(BaseSearchEngine):
         run: DDARun,
         batch_size: int = 512,
         logit_cutoff: float = LOGIT_CUTOFF,
+        save_quant: bool = False,
     ) -> ResultManager:
         """Perform the complete DDA search workflow."""
 
@@ -244,6 +247,7 @@ class DDASearchEngine(BaseSearchEngine):
                     batch_size=batch_size,
                     peak_group_topk=TOPK_PER_PRECURSOR,
                     logit_cutoff=logit_cutoff,
+                    save_quant=save_quant,
                 )
 
                 # Cluster matches sharing peaks
@@ -287,13 +291,15 @@ class DDASearchEngine(BaseSearchEngine):
 
         st_t = time.perf_counter()
         logger.info("Search started")
-        logit_cutoff = (
-            LOGIT_CUTOFF
-            if self.state < SearchState.SECOND_SEARCH
-            else (LOGIT_CUTOFF - 2.0)
-        )
+        if self.state < SearchState.SECOND_SEARCH:
+            logit_cutoff = LOGIT_CUTOFF
+            save_quant = False
+        else:
+            logit_cutoff = LOGIT_CUTOFF - 2.0
+            save_quant = True
+
         result_manager = self._perform_full_search(
-            run, batch_size=512, logit_cutoff=logit_cutoff
+            run, batch_size=512, logit_cutoff=logit_cutoff, save_quant=save_quant
         )
 
         elapsed = time.perf_counter() - st_t

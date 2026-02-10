@@ -14,8 +14,7 @@ from delpi.database.numba.spec_lib_utils import (
 from delpi.utils.signal import find_local_maxima, cluster_peaks_with_weights
 from delpi.utils.peak import find_peak_index
 from delpi.utils.numeric import corrcoef
-
-QUANT_FRAGMENTS = 12
+from delpi.constants import QUANT_FRAGMENTS
 
 
 class PeakIndexContainer(NamedTuple):
@@ -344,13 +343,14 @@ def find_peak_groups(
             apex_median_intensity[i] = np.median(apex_intensity[apex_intensity > 0])
 
         peak_group_weights = (
-            0.25 * spec_peak_count_arr[peak_group_arr - 1]
-            + 0.5 * spec_peak_count_arr[peak_group_arr]
-            + 0.25 * spec_peak_count_arr[peak_group_arr + 1]
-        ) * apex_median_intensity
-
+            spec_peak_count_arr[peak_group_arr]
+            + xic_peak_count_arr[peak_group_arr]
+            + 2 * np.log2(apex_median_intensity)
+        )
         peak_group_arr = cluster_peaks_with_weights(
-            peak_group_arr, peak_group_weights, dist_cutoff=2, min_cluster_size=1
+            peak_group_arr,
+            peak_group_weights,
+            dist_cutoff=rt_window_radius,
         )
         mask = (peak_group_arr >= peak_lb) & (peak_group_arr <= peak_ub)
         peak_group_arr = peak_group_arr[mask]
