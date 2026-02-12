@@ -22,8 +22,14 @@ class RefinedSpectralLibGenerator(SpectralLibGenerator):
         rt_predictor: RetentionTimePredictor,
         ms2_predictor: Ms2SpectrumPredictor,
         apply_phospho,
-        min_charge: int = 1,
-        max_charge: int = 2,
+        min_fragment_charge: int = 1,
+        max_fragment_charge: int = 2,
+        min_precursor_charge: int = 2,
+        max_precursor_charge: int = 4,
+        min_precursor_mz: float = 300,
+        max_precursor_mz: float = 1800,
+        min_fragment_mz: float = 200,
+        max_fragment_mz: float = 1800,
         prefix_ion_type=BaseIonType.B,
         suffix_ion_type=BaseIonType.Y,
         max_fragments=16,
@@ -34,8 +40,8 @@ class RefinedSpectralLibGenerator(SpectralLibGenerator):
         super().__init__(
             rt_predictor=rt_predictor,
             ms2_predictor=ms2_predictor,
-            min_charge=min_charge,
-            max_charge=max_charge,
+            min_charge=min_fragment_charge,
+            max_charge=max_fragment_charge,
             prefix_ion_type=prefix_ion_type,
             suffix_ion_type=suffix_ion_type,
             max_fragments=max_fragments,
@@ -50,6 +56,13 @@ class RefinedSpectralLibGenerator(SpectralLibGenerator):
         self.precursor_df = None
         self.prefix_mass_container = None
         self.speclib_df = None
+
+        self.min_precursor_charge = min_precursor_charge
+        self.max_precursor_charge = max_precursor_charge
+        self.min_precursor_mz = min_precursor_mz
+        self.max_precursor_mz = max_precursor_mz
+        self.min_fragment_mz = min_fragment_mz
+        self.max_fragment_mz = max_fragment_mz
 
     def _build_database(self, db_dir: Path, precursor_index_arr: np.ndarray):
 
@@ -100,7 +113,12 @@ class RefinedSpectralLibGenerator(SpectralLibGenerator):
             )
         )
 
-        precursor_gen = PrecursorGenerator()
+        precursor_gen = PrecursorGenerator(
+            min_charge=self.min_precursor_charge,
+            max_charge=self.max_precursor_charge,
+            min_mz=self.min_precursor_mz,
+            max_mz=self.max_precursor_mz,
+        )
         precursor_df, modification_df, prefix_mass_container = (
             precursor_gen.generate_precursors(peptide_df, modification_df)
         )
@@ -134,8 +152,6 @@ class RefinedSpectralLibGenerator(SpectralLibGenerator):
         self,
         db_dir: Path,
         precursor_index_arr: np.ndarray,
-        min_fragment_mz: float = 200,
-        max_fragment_mz: float = 1800,
     ):
 
         self._build_database(db_dir, precursor_index_arr)
@@ -152,8 +168,8 @@ class RefinedSpectralLibGenerator(SpectralLibGenerator):
             precursor_df=self.precursor_df,
             prefix_mass_container=self.prefix_mass_container,
             batch_size=512,
-            detectable_min_mz=min_fragment_mz,
-            detectable_max_mz=max_fragment_mz,
+            detectable_min_mz=self.min_fragment_mz,
+            detectable_max_mz=self.max_fragment_mz,
         )
         self.speclib_df = ms2_df
         self.modification_df = self.modification_df.select(pl.exclude("ref_rt")).join(

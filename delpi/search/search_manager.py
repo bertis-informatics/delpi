@@ -269,14 +269,24 @@ class SearchManager:
             precursor_index_arr.append(results_dict["precursor_index"])
 
         precursor_index_arr = np.unique(np.concatenate(precursor_index_arr))
-
         spec_generator = RefinedSpectralLibGenerator(
             apply_phospho=self.search_config.is_phospho_search,
+            min_precursor_charge=search_config["precursor"].get("min_charge", 2),
+            max_precursor_charge=search_config["precursor"].get("max_charge", 4),
+            min_precursor_mz=search_config["precursor"].get("min_mz", 300),
+            max_precursor_mz=search_config["precursor"].get("max_mz", 1800),
+            min_fragment_charge=search_config["fragment"].get("min_charge", 1),
+            max_fragment_charge=search_config["fragment"].get("max_charge", 2),
+            min_fragment_mz=search_config["fragment"].get("min_mz", 200),
+            max_fragment_mz=search_config["fragment"].get("max_mz", 1800),
             ms2_predictor=ms2_predictor,
             rt_predictor=rt_predictor,
         )
 
-        spec_generator.generate_spectral_lib(search_config.db_dir, precursor_index_arr)
+        spec_generator.generate_spectral_lib(
+            search_config.db_dir,
+            precursor_index_arr,
+        )
         spec_generator.save(search_config.refined_db_dir)
 
     def perform_global_tda(self) -> None:
