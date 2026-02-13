@@ -5,7 +5,7 @@ import numpy as np
 import polars as pl
 from scipy.signal import savgol_filter, find_peaks
 
-from delpi.lcms.reader.base import MassSpecData
+from pymsio import MassSpecData
 from delpi.lcms.ms1_spectra import MS1Spectra
 from delpi.lcms.ms2_spectra import MS2Spectra
 from delpi.lcms.data_container import SpectrumContainer
@@ -94,8 +94,6 @@ class DDARun:
                 self.ms2_maps[ms2_map.group_index] = ms2_map
 
         if free_ms_data:
-            self.ms_data.peak_arr = None
-            self.ms_data.z_score_arr = None
             self.ms_data = None
             gc.collect()
 
@@ -106,8 +104,8 @@ class DDARun:
         st, ed = self.ms_data.get_peak_index(frame_num)
         return SpectrumContainer(
             frame_num=frame_num,
-            mz_arr=self.ms_data.peak_arr[st:ed, 0],
-            ab_arr=self.ms_data.peak_arr[st:ed, 1],
+            mz_arr=self.ms_data.peaks.mz[st:ed],
+            ab_arr=self.ms_data.peaks.ab[st:ed],
             z_score_arr=self.ms_data.z_score_arr[st:ed],
         )
 

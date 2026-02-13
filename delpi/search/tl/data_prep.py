@@ -6,9 +6,9 @@ from tqdm import tqdm
 import polars as pl
 import numpy as np
 
+from pymsio import MassSpecData
 from delpi.lcms.fragmentation import Fragmentation
 from delpi.lcms.neutral_loss import NeutralLoss
-from delpi.lcms.reader.base import MassSpecData
 from delpi.database.precursor_generator import PrecursorGenerator
 from delpi.database.numba.prefix_mass_array import PrefixMassArrayContainer
 from delpi.search.tl.numba import get_intensity_arr, get_mz_arr
@@ -211,12 +211,12 @@ class TransferLearningDataPreparator:
             if prev_frame_num == frame_num:
                 peak_arr = prev_peak_arr
             else:
-                peak_arr = lcms_data.get_peaks(frame_num=frame_num)
+                peak_arr = lcms_data.get_frame(frame_num=frame_num)
                 rt_in_seconds = frame_num_to_rt_arr[frame_num]
 
             mz_arr = get_mz_arr(prefix_mass_arr, self.ion_type_container)
             x_intensity[i] = get_intensity_arr(
-                mz_arr, peak_arr, self.config.tolerance_in_ppm
+                mz_arr, peak_arr.mz, peak_arr.ab, self.config.tolerance_in_ppm
             )
             x_rt[i] = rt_in_seconds
 

@@ -33,8 +33,5 @@ def configure_logging(logfile_path: str = None, level: int = logging.INFO):
     # 3. basic config
     logging.basicConfig(level=level, handlers=handlers, force=True)
 
-    # 4. suppress bmsio logs
-    logging.getLogger("bmsio").setLevel(logging.ERROR)
-
-    # 5. ignore false positive warnings from lightning
+    # 4. ignore false positive warnings from lightning
     warnings.filterwarnings("ignore", category=PossibleUserWarning)

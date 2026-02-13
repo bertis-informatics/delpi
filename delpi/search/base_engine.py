@@ -12,14 +12,12 @@ from typing import Union
 
 import torch
 import polars as pl
-import numpy as np
 
+from pymsio import MassSpecData, ReaderFactory
 from delpi.lcms.dda_run import DDARun
 from delpi.lcms.dia_run import DIARun
 from delpi.model.classifier import DelPiModel
 from delpi.search.config import SearchConfig
-from delpi.lcms.reader.base import MassSpecData
-from delpi.lcms.reader.factory import ReaderFactory
 from delpi.search.result_aggregator import ResultsAggregator
 from delpi.search.result_manager import ResultManager
 from delpi.database.peptide_database import PeptideDatabase
@@ -142,9 +140,7 @@ class BaseSearchEngine(ABC):
         try:
             logger.info(f"Loading LC-MS data: {raw_path}")
             # Load raw data
-            reader = ReaderFactory.get_reader(
-                raw_path, bmsio_server_addr=self.search_config.bmsio_server_addr
-            )
+            reader = ReaderFactory.get_reader(raw_path)
             lcms_data = reader.load()
             max_rt_time = lcms_data.meta_df.item(-1, "time_in_seconds")
             logger.info(

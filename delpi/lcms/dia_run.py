@@ -4,7 +4,7 @@ from typing import Optional
 import tqdm
 import polars as pl
 
-from delpi.lcms.reader.base import MassSpecData
+from pymsio import MassSpecData
 from delpi.lcms.dia_window import DIAWindow
 from delpi.lcms.ms1_spectra import MS1Spectra
 from delpi.lcms.dia_scheme import determine_dia_scheme
@@ -64,8 +64,6 @@ class DIARun:
                 pbar.update(1)
 
         if free_ms_data:
-            self.ms_data.peak_arr = None
-            self.ms_data.z_score_arr = None
             self.ms_data = None
             gc.collect()
 

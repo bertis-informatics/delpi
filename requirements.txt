@@ -4,7 +4,7 @@ lightning
 timm==1.0.9
 polars[numpy,pandas]
 numpy
-pandas
+pandas<3
 pyarrow
 scipy
 scikit-learn
@@ -21,10 +21,4 @@ fastaparser
 lxml
 isal
 tabulate 
-
-grpcio >= 1.44.0
-grpcio-tools >= 1.44.0
-protobuf >= 4.21
-
-# conda install pytorch torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvidia
-# conda install lightning torchmetrics -c conda-forge
+pymsio

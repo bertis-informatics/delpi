@@ -1,8 +1,8 @@
 from typing import Union, List
 from pathlib import Path
 
+from pymsio import MassSpecFileReader
 from delpi.chem.modification_param import ModificationParam
-from delpi.lcms.reader.base import MassSpecFileReader
 from delpi.search.result_manager import ResultManager
 from delpi.utils.yaml_file import load_yaml, save_yaml
 
@@ -14,7 +14,6 @@ class SearchConfig:
     def __init__(self, yaml_path: Union[Path, str]):
         self.yaml_path = Path(yaml_path)
         self.config = load_yaml(self.yaml_path)
-        self.bmsio_server_addr = "localhost:5001"
         self.input_files = self._get_input_files()
 
     def _get_input_files(self):
@@ -38,9 +37,6 @@ class SearchConfig:
             raise ValueError("Missing 'input_files' or 'input_dir' in configuration")
 
         return input_files
-
-    def set_bmsio_server(self, server_addr: str):
-        self.bmsio_server_addr = server_addr
 
     def get_param(self, key: str):
         return self.config.get(key)

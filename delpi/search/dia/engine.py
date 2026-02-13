@@ -14,7 +14,8 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from delpi.lcms.reader.base import MassSpecData
+
+from pymsio import MassSpecData
 from delpi.lcms.dia_run import DIARun, DIAWindow
 from delpi.database.spec_lib_reader import SpectralLibReader
 from delpi.database.numba.spec_lib_container import SpectralLibContainer

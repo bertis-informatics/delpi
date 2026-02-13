@@ -30,18 +30,21 @@ def get_mz_arr(prefix_mass_arr: np.ndarray, ion_type_container: IonTypeContainer
 
 @nb.njit(nogil=True, fastmath=True, cache=True)
 def get_intensity_arr(
-    mz_arr: np.ndarray, peak_arr: np.ndarray, tolerance_in_ppm: float
+    mz_arr: np.ndarray,
+    peak_mz: np.ndarray,
+    peak_ab: np.ndarray,
+    tolerance_in_ppm: float,
 ):
 
     start_indices, stop_indices = find_peak_index(
-        peak_arr[:, 0], mz_arr.flatten(), tolerance_in_ppm
+        peak_mz, mz_arr.flatten(), tolerance_in_ppm
     )
 
     intensity_arr = np.empty(start_indices.shape, dtype=np.float32)
     max_intensity = 1e-12
     for i, (st, ed) in enumerate(zip(start_indices, stop_indices)):
         if st < ed:
-            ab = peak_arr[st:ed, 1].max()
+            ab = peak_ab[st:ed].max()
         else:
             ab = 0
         intensity_arr[i] = ab

@@ -116,8 +116,15 @@ def maxlfq(
     # 0) Filter out intensity <= 0 and NaN
     df = df.filter(pl.col(intensity_col).is_not_null() & (pl.col(intensity_col) > 0))
 
+    protein_dtype = df.schema[protein_col]
+    result_schema = {
+        protein_col: protein_dtype,
+        run_col: pl.UInt32,
+        "abundance": pl.Float32,
+    }
+
     if df.height == 0:
-        return pl.DataFrame({protein_col: [], run_col: [], "protein_abundance": []})
+        return pl.DataFrame(schema=result_schema)
 
     # 1) Add log-intensity
     df_log = df.with_columns(pl.col(intensity_col).log().alias("logI"))
@@ -165,11 +172,9 @@ def maxlfq(
             records.append((prot[0], run, float(val)))
 
     if not records:
-        return pl.DataFrame({protein_col: [], run_col: [], "abundance": []})
+        return pl.DataFrame(schema=result_schema)
 
-    df_prot_long = pl.DataFrame(
-        records, schema=[protein_col, run_col, "abundance"], orient="row"
-    )
+    df_prot_long = pl.DataFrame(records, schema=result_schema, orient="row")
 
     return df_prot_long
 

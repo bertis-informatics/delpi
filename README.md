@@ -30,18 +30,20 @@ DelPi is an open-source peptide identification tool for mass spectrometry–base
 
 ## Installation
 
+> **Windows users:** Please use **PowerShell** (not Command Prompt/cmd) for all installation steps. The install scripts (`.ps1`) require PowerShell to run.
+
 We recommend using [uv](https://github.com/astral-sh/uv), a fast Python package manager. If you prefer pip, simply replace `uv` commands with `pip` equivalents noted below.
 
 ### Step 1: Clone the Repository
 ```bash
 git clone https://github.com/bertis-informatics/delpi.git
+cd delpi
 ```
 
 ### Step 2: Set Up Virtual Environment
-```bash
-# Navigate to the DelPi directory
-cd delpi
 
+#### Option A: Using uv (or pip)
+```bash
 # Create a virtual environment with Python 3.12
 uv venv delpi_env --python 3.12
 # If using pip: python -m venv delpi_env
@@ -51,6 +53,15 @@ uv venv delpi_env --python 3.12
 delpi_env\Scripts\activate
 # macOS/Linux:
 source delpi_env/bin/activate
+```
+
+#### Option B: Using conda
+```bash
+# Create a conda environment with Python 3.12
+conda create -n delpi_env python=3.12 -y
+
+# Activate the environment
+conda activate delpi_env
 ```
 
 ### Step 3: Install PyTorch
@@ -63,14 +74,40 @@ uv pip install torch --index-url https://download.pytorch.org/whl/cu128
 # If using pip: pip install torch --index-url https://download.pytorch.org/whl/cu128
 ```
 
-### Step 4: Install DelPi
+### Step 4: Install pymsio
+
+[pymsio](https://github.com/bertis-informatics/pymsio) is required for reading mzML and Thermo RAW files. Run the following script from the `delpi` directory — it clones the pymsio repository, downloads the Thermo RawFileReader DLLs, and installs pymsio in one step.
+
+**Windows PowerShell:**
+```powershell
+.\install_pymsio.ps1
+```
+
+**Linux:**
+```bash
+chmod +x install_pymsio.sh
+./install_pymsio.sh
+```
+
+By default, pymsio is cloned into `delpi/pymsio/`. To specify a different location:
+```bash
+# Linux
+./install_pymsio.sh --install-dir /path/to/pymsio
+
+# Windows PowerShell
+.\install_pymsio.ps1 -InstallDir C:\path\to\pymsio
+```
+
+For manual installation or additional details, see the [pymsio README](https://github.com/bertis-informatics/pymsio).
+
+### Step 5: Install DelPi
 
 ```bash
 uv pip install .
 # If using pip: pip install .
 ```
 
-### Step 5: Verify Installation
+### Step 6: Verify Installation
 
 ```bash
 delpi --help
@@ -115,7 +152,7 @@ Verify your DelPi installation using publicly available DIA data from the [Skyli
 
 ### 1. Prepare LC-MS/MS Data
 
-DelPi requires LC-MS/MS data in **mzML format** (DIA or DDA mode). Convert vendor raw files using [ProteoWizard MSConvert](https://proteowizard.sourceforge.io). Native vendor format support will be added in future releases.
+DelPi supports LC-MS/MS data in **mzML** and **Thermo RAW** formats (DIA or DDA mode). For other vendor formats, files can be converted to mzML using [ProteoWizard MSConvert](https://proteowizard.sourceforge.io). Ion mobility (IM) data (e.g., FAIMS, PASEF) is not currently supported.
 
 
 ### 2. Configure Search Parameters

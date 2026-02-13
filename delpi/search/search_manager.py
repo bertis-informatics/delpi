@@ -17,7 +17,7 @@ import torch
 from lightning.pytorch.accelerators import AcceleratorRegistry
 from tabulate import tabulate
 
-from delpi.lcms.reader.base import MassSpecFileReader
+from pymsio import MassSpecFileReader
 from delpi.search.config import SearchConfig
 from delpi.search.base_engine import BaseSearchEngine
 from delpi.search.dda.engine import DDASearchEngine
@@ -436,8 +436,8 @@ class SearchManager:
         )
 
         ## run MaxLFQ
-        logger.info("Performing protein quantification with MaxLFQ ")
         if self.search_config.config.get("acquisition_method", "DDA").upper() == "DIA":
+            logger.info("Performing protein quantification with MaxLFQ ")
             df = (
                 pmsm_df.filter(pl.col("is_decoy") == False)
                 .filter(pl.col("global_protein_group_q_value") <= q_value_cutoff)
