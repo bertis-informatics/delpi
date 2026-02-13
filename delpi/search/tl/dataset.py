@@ -1,6 +1,5 @@
 from pathlib import Path
 from typing import List, Optional, Dict
-import h5py
 
 import torch
 import polars as pl
@@ -8,9 +7,10 @@ from torch.utils.data import Dataset
 
 from delpi.model.spec_lib.aa_encoder import encode_modification_feature
 from delpi.search.result_manager import TL_DATA_GROUP
+from delpi.utils.hdf import HdfDataset
 
 
-class TransferLearningDataset(Dataset):
+class TransferLearningDataset(HdfDataset):
     """
     Unified Transfer Learning Dataset that automatically decides between memory and file access
     based on dataset size. Uses in-memory storage for datasets with < 1M samples.
@@ -22,35 +22,23 @@ class TransferLearningDataset(Dataset):
         label_df: pl.DataFrame,
         data_dict: Optional[Dict] = None,
     ):
-        if not isinstance(hdf_files, List):
-            hdf_files = [hdf_files]
-
-        self.hdf_files = hdf_files
-        self._hfs = [None] * len(hdf_files)  # For file-based access
+        super().__init__(hdf_files)
         self.label_df = label_df
         self.data_dict = data_dict
         self.use_memory = data_dict is not None
 
+        # Pre-convert to numpy for worker-safe __getitem__ (no polars in workers)
+        self._seq_lens = label_df["seq_len"].to_numpy()
+        self._indices = label_df["index"].to_numpy()
+        self._fids = label_df["hdf_index"].to_numpy()
+
     def __len__(self):
-        return self.label_df.shape[0]
-
-    def __del__(self):
-        if hasattr(self, "_hfs"):
-            for i, hf in enumerate(self._hfs):
-                if hf is not None and isinstance(hf, h5py.File):
-                    hf.close()
-                    self._hfs[i] = None
-
-    def _get_hf(self, hdf_index):
-        """Get HDF5 file handle for file-based access"""
-        if self._hfs[hdf_index] is None:
-            self._hfs[hdf_index] = h5py.File(self.hdf_files[hdf_index], "r")
-        return self._hfs[hdf_index]
+        return len(self._fids)
 
     def __getitem__(self, index):
-        n_tokens = self.label_df.item(index, "seq_len")
-        idx = self.label_df.item(index, "index")
-        fid = self.label_df.item(index, "hdf_index")
+        n_tokens = self._seq_lens[index]
+        idx = self._indices[index]
+        fid = self._fids[index]
 
         if self.use_memory:
             # Get data from pre-loaded numpy arrays (same structure as HDF)
@@ -60,7 +48,7 @@ class TransferLearningDataset(Dataset):
             y_intensity = self.data_dict[fid][n_tokens]["x_intensity"][idx]
         else:
             # Get data from HDF5 files
-            hf = self._get_hf(fid)
+            hf = self.get_hf(fid)
             tl_data_group = hf[TL_DATA_GROUP]
             data_group = tl_data_group[str(n_tokens)]
 
@@ -104,13 +92,18 @@ class TransferLearningDatasetForRT(Dataset):
         self.label_df = label_df
         self.data_dict = data_dict
 
+        # Pre-convert to numpy for worker-safe __getitem__ (no polars in workers)
+        self._seq_lens = label_df["seq_len"].to_numpy()
+        self._indices = label_df["index"].to_numpy()
+        self._fids = label_df["hdf_index"].to_numpy()
+
     def __len__(self):
-        return self.label_df.shape[0]
+        return len(self._fids)
 
     def __getitem__(self, index):
-        n_tokens = self.label_df.item(index, "seq_len")
-        idx = self.label_df.item(index, "index")
-        fid = self.label_df.item(index, "hdf_index")
+        n_tokens = self._seq_lens[index]
+        idx = self._indices[index]
+        fid = self._fids[index]
 
         # Get data from pre-loaded numpy arrays (same structure as HDF)
         x_aa = self.data_dict[fid][n_tokens]["x_aa"][idx]

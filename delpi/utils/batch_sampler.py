@@ -1,13 +1,10 @@
 from typing import List
 
-import polars as pl
 import numpy as np
 
 from torch.utils.data import Dataset
 from torch.utils.data.sampler import BatchSampler
 from torch.utils.data.distributed import DistributedSampler
-
-SAMPLE_ID_COL = "_sample_index"
 
 
 class SeqDataBatchSampler(BatchSampler):
@@ -25,7 +22,9 @@ class SeqDataBatchSampler(BatchSampler):
 
         super().__init__(sampler=None, batch_size=batch_size, drop_last=False)
 
-        self.label_df = dataset.label_df.with_row_index(SAMPLE_ID_COL)
+        labels = dataset.labels
+        self._group_values = labels[batch_grouping_column]
+        self._n_samples = len(labels)
         self.batch_grouping_column = batch_grouping_column
         self.random_state = np.random.RandomState(seed)
         self.shuffle = shuffle
@@ -40,15 +39,19 @@ class SeqDataBatchSampler(BatchSampler):
     def _get_shuffled_index(self):
 
         batch_size = self.batch_size
-        label_df = (
-            self.label_df if self.indices is None else self.label_df[self.indices]
-        )
+        group_values = self._group_values
 
-        batch_keys = list()
-        for _, sub_df in label_df.select(
-            pl.col(SAMPLE_ID_COL, self.batch_grouping_column)
-        ).group_by(self.batch_grouping_column, maintain_order=True):
-            indexes = sub_df[SAMPLE_ID_COL].to_list()
+        if self.indices is not None:
+            sample_indices = np.asarray(self.indices)
+        else:
+            sample_indices = np.arange(self._n_samples)
+
+        groups = group_values[sample_indices]
+        unique_keys = np.unique(groups)
+
+        batch_keys = []
+        for key in unique_keys:
+            indexes = sample_indices[groups == key]
             if self.shuffle:
                 indexes = self.random_state.permutation(indexes)
             batch_keys.extend(
@@ -72,16 +75,15 @@ class SeqDataBatchSampler(BatchSampler):
 
     def count_num_of_batches(self):
 
-        label_df = (
-            self.label_df if self.indices is None else self.label_df[self.indices]
-        )
-        sample_count = label_df.group_by(self.batch_grouping_column).len()
+        group_values = self._group_values
+        if self.indices is not None:
+            group_values = group_values[np.asarray(self.indices)]
+
+        _, counts = np.unique(group_values, return_counts=True)
         if self.drop_last:
-            return sample_count.select(pl.col("len") // self.batch_size)["len"].sum()
+            return int(np.sum(counts // self.batch_size))
         else:
-            return sample_count.select(
-                (pl.col("len") + self.batch_size - 1) // self.batch_size
-            )["len"].sum()
+            return int(np.sum((counts + self.batch_size - 1) // self.batch_size))
 
     def __len__(self):
         # https://pytorch.org/docs/stable/data.html

@@ -1,6 +1,5 @@
 from typing import List, Tuple, Dict, Callable, Optional
 from pathlib import Path
-import h5py
 
 import polars as pl
 import numpy as np
@@ -9,6 +8,8 @@ import torch
 from torch.utils.data import Dataset
 from torch.utils.data import TensorDataset
 from sklearn.model_selection import train_test_split
+
+from delpi.utils.hdf import HdfDataset
 
 
 class DatasetSplitter:
@@ -57,7 +58,7 @@ class DatasetSplitter:
         return train_df, test_df
 
 
-class PMSMDataset(Dataset):
+class PMSMDataset(HdfDataset):
     """
     각 bag = (run_index, precursor_index)
     grouped_pmsm_df:
@@ -77,9 +78,8 @@ class PMSMDataset(Dataset):
         rt_scale: float = 1000.0,
         data_dict: Optional[Dict] = None,
     ):
+        super().__init__(hdf_files)
         self.pmsm_df = pmsm_df
-        self.hdf_files = hdf_files
-        self._hfs = [None] * len(hdf_files)  # For file-based access
         self.group_key = hdf_group_key
         self.data_dict = data_dict
         self.use_memory = data_dict is not None
@@ -87,19 +87,6 @@ class PMSMDataset(Dataset):
 
     def __len__(self):
         return self.pmsm_df.shape[0]
-
-    def __del__(self):
-        if hasattr(self, "_hfs"):
-            for i, hf in enumerate(self._hfs):
-                if hf is not None and isinstance(hf, h5py.File):
-                    hf.close()
-                    self._hfs[i] = None
-
-    def _get_hf(self, hdf_index):
-        """Get HDF5 file handle for file-based access"""
-        if self._hfs[hdf_index] is None:
-            self._hfs[hdf_index] = h5py.File(self.hdf_files[hdf_index], "r")
-        return self._hfs[hdf_index]
 
     def get_pmsm_embedding(
         self, run_index: int, pmsm_index: int, rt_diff: float
@@ -112,7 +99,7 @@ class PMSMDataset(Dataset):
         if self.use_memory:
             pmsm_embedding[:-1] = self.data_dict[run_index][pmsm_index]
         else:
-            hf = self._get_hf(run_index)
+            hf = self.get_hf(run_index)
             features_group = hf[self.group_key]["features"]
             pmsm_embedding[:-1] = features_group[pmsm_index, ...]
 
