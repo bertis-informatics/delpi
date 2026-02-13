@@ -28,11 +28,15 @@ DelPi is an open-source peptide identification tool for mass spectrometry–base
 - For a 25 min DIA gradient (human sample, Astral Orbitrap), DelPi completes peptide identification in approximately 20 minutes on a single NVIDIA RTX 4090 GPU
     
 
+## Supported LC-MS/MS Data
+
+- **Formats:** mzML and Thermo RAW (other vendor formats can be converted to mzML using [ProteoWizard MSConvert](https://proteowizard.sourceforge.io))
+- **Acquisition modes:** DIA and DDA
+- **Ion mobility (IM) data** (e.g., FAIMS, PASEF) is not currently supported, but will be supported soon
+
 ## Installation
 
 > **Windows users:** Please use **PowerShell** (not Command Prompt/cmd) for all installation steps. The install scripts (`.ps1`) require PowerShell to run.
-
-We recommend using [uv](https://github.com/astral-sh/uv), a fast Python package manager. If you prefer pip, simply replace `uv` commands with `pip` equivalents noted below.
 
 ### Step 1: Clone the Repository
 ```bash
@@ -42,11 +46,13 @@ cd delpi
 
 ### Step 2: Set Up Virtual Environment
 
-#### Option A: Using uv (or pip)
+Create a virtual environment using venv (Option A) or conda (Option B). Package installation in later steps uses pip or [uv](https://github.com/astral-sh/uv).
+
+#### Option A: Using venv
 ```bash
 # Create a virtual environment with Python 3.12
 uv venv delpi_env --python 3.12
-# If using pip: python -m venv delpi_env
+# If not using uv: python -m venv delpi_env
 
 # Activate the virtual environment
 # Windows:
@@ -76,29 +82,20 @@ uv pip install torch --index-url https://download.pytorch.org/whl/cu128
 
 ### Step 4: Install pymsio
 
-[pymsio](https://github.com/bertis-informatics/pymsio) is required for reading mzML and Thermo RAW files. Run the following script from the `delpi` directory — it clones the pymsio repository, downloads the Thermo RawFileReader DLLs, and installs pymsio in one step.
+[pymsio](https://github.com/bertis-informatics/pymsio) is bundled in the `pymsio/` directory. The install script downloads the Thermo RawFileReader DLLs and installs pymsio in one step. For additional details, see the [pymsio README](pymsio/README.md).
 
 **Windows PowerShell:**
 ```powershell
-.\install_pymsio.ps1
+.\pymsio\install.ps1
 ```
 
 **Linux:**
 ```bash
-chmod +x install_pymsio.sh
-./install_pymsio.sh
+chmod +x pymsio/install.sh
+./pymsio/install.sh
 ```
 
-By default, pymsio is cloned into `delpi/pymsio/`. To specify a different location:
-```bash
-# Linux
-./install_pymsio.sh --install-dir /path/to/pymsio
 
-# Windows PowerShell
-.\install_pymsio.ps1 -InstallDir C:\path\to\pymsio
-```
-
-For manual installation or additional details, see the [pymsio README](https://github.com/bertis-informatics/pymsio).
 
 ### Step 5: Install DelPi
 
@@ -152,7 +149,7 @@ Verify your DelPi installation using publicly available DIA data from the [Skyli
 
 ### 1. Prepare LC-MS/MS Data
 
-DelPi supports LC-MS/MS data in **mzML** and **Thermo RAW** formats (DIA or DDA mode). For other vendor formats, files can be converted to mzML using [ProteoWizard MSConvert](https://proteowizard.sourceforge.io). Ion mobility (IM) data (e.g., FAIMS, PASEF) is not currently supported.
+Ensure your data files are in a [supported format](#supported-lcmsms-data). If needed, convert to mzML using [ProteoWizard MSConvert](https://proteowizard.sourceforge.io).
 
 
 ### 2. Configure Search Parameters

@@ -3,8 +3,6 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# pymsio (cloned during installation)
-pymsio/
 
 # C extensions
 *.so
