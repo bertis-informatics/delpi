@@ -1,0 +1,9 @@
+numba>=0.47
+numpy
+pandas
+tqdm
+polars
+lxml
+isal
+h5py
+pythonnet>=3.0.5

@@ -1,0 +1,65 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+*.env
+
+# Conda environments (usually not included, but just in case)
+conda-env/
+
+# Thermo vendor DLL directory - keep folder, ignore contents
+dlls/thermo_fisher/*
+!dlls/thermo_fisher/.gitkeep
+pymsio/dlls/thermo_fisher/*
+!pymsio/dlls/thermo_fisher/.gitkeep
+
+
+temp/
+*.raw
+*.wiff
+*.wiff.scan
+*.d
+*.mzML
+*.mzml
+*.mgf
+*.mzXML
+*.bbmz
+*.mzML.gz
+
+# Jupyter
+*.ipynb
+# .ipynb_checkpoints/
+
+# VSCode / IDE
+.vscode/
+.idea/
+
+# Build / dist
+build/
+dist/
+*.egg-info/
+htmlcov/
+.coverage
+
+# Logs
+logs/
+*.log
+
+
+# OS별 잡파일
+.DS_Store
+Thumbs.db
+
+# 보안 관련
+*.pem
+*.key
+*.crt
+*.pfx
+.env
+.env.*
+pat.txt

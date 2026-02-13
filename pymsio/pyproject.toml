@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pymsio"
+version = "0.1.12"
+description = "MS I/O readers with optional vendor bindings"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "Apache-2.0" }
+# license-files = ["LICENSE*"]
+
+authors = [
+  { name = "Youngmin Park", email = "youngmin.park@bertis.com" }
+]
+
+dependencies = [
+  "pythonnet>=3.0.5",
+  "numba>=0.47",
+  "numpy",
+  "pandas",
+  "tqdm",
+  "polars",
+  "lxml",
+  "isal",
+  "h5py",
+  "pytest",
+]
+
+[project.urls]
+Repository = "https://github.com/bertis-informatics/pymsio"
+Issues = "https://github.com/bertis-informatics/pymsio/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["pymsio*"]
+exclude = ["tests*"]
+
+[tool.setuptools.package-data]
+"pymsio" = ["dlls/thermo_fisher/*.dll"]
