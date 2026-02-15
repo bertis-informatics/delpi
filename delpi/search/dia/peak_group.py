@@ -343,14 +343,15 @@ def find_peak_groups(
             apex_median_intensity[i] = np.median(apex_intensity[apex_intensity > 0])
 
         peak_group_weights = (
-            spec_peak_count_arr[peak_group_arr]
+            0.5 * xic_peak_count_arr[peak_group_arr - 1]
+            + 0.5 * xic_peak_count_arr[peak_group_arr + 1]
             + xic_peak_count_arr[peak_group_arr]
             + 2 * np.log2(apex_median_intensity)
         )
         peak_group_arr = cluster_peaks_with_weights(
             peak_group_arr,
             peak_group_weights,
-            dist_cutoff=rt_window_radius,
+            dist_cutoff=2,
         )
         mask = (peak_group_arr >= peak_lb) & (peak_group_arr <= peak_ub)
         peak_group_arr = peak_group_arr[mask]
