@@ -370,11 +370,12 @@ class Ms2SpectrumPredictor(LightningModule):
         else:
             param_groups = self.parameters()
 
-        optimizer = torch.optim.AdamW(param_groups, lr=self.max_lr, weight_decay=0.05)
+        optimizer = torch.optim.AdamW(param_groups, lr=self.max_lr, weight_decay=0.01)
         scheduler = get_cosine_schedule_with_warmup(
             optimizer,
             num_warmup_steps=self.num_warmup_steps,
             num_training_steps=self.num_training_steps,
+            min_lr=1e-6,
         )
 
         return ({"optimizer": optimizer, "lr_scheduler": scheduler},)
