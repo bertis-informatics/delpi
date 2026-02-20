@@ -123,7 +123,7 @@ class ModificationHandler:
         schema = {"mod_ids": pl.String, "mods": pl.String, "mod_sites": pl.String}
 
         if static_mods is None or len(static_mods) < 1:
-            return peptide_df.with_columns(
+            return peptide_df.select("peptide_index").with_columns(
                 pl.lit(None).cast(v).alias(k) for k, v in schema.items()
             )
 
