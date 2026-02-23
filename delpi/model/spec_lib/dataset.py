@@ -55,6 +55,10 @@ class PeptideDataset(Dataset):
         self.peptide_df = peptide_df
         self.label_df = label_df
 
+    @property
+    def labels(self):
+        return self.label_df
+
     def __len__(self):
         return self.label_df.shape[0]
 
@@ -101,51 +105,3 @@ class PeptideDataset(Dataset):
         sample["x_mod"] = x_mod
 
         return sample
-
-
-# class PmsmDataset(Dataset):
-
-#     def __init__(
-#         self,
-#         pmsm_df: pl.DataFrame,
-#         nce: float = DEFAULT_NCE,
-#         fragmentation: int = DEFAULT_FRAGMENTATION,
-#         mass_analyzer: int = DEFAULT_MASS_ANALYZER,
-#     ):
-#         self.label_df = pmsm_df
-#         self.nce = nce
-#         self.fragmentation = fragmentation
-#         self.mass_analyzer = mass_analyzer
-
-#     def __len__(self):
-#         return self.label_df.shape[0]
-
-#     def __getitem__(self, index):
-
-#         pmsm_df = self.label_df
-#         precursor_index = pmsm_df.item(index, "precursor_index")
-#         precursor_charge = pmsm_df.item(index, "precursor_charge")
-#         mod_ids = pmsm_df.item(index, "mod_ids")
-#         mod_sites = pmsm_df.item(index, "mod_sites")
-#         seq_str = pmsm_df.item(index, "peptide")
-
-#         x_meta = torch.FloatTensor(
-#             [
-#                 precursor_charge,
-#                 self.nce,
-#                 self.fragmentation,
-#                 self.mass_analyzer,
-#             ]
-#         )
-
-#         x_aa = encode_sequence(seq_str)
-#         x_mod = encode_modification_feature_from_strings(
-#             mod_sites, mod_ids, x_aa.shape[0]
-#         )
-
-#         return {
-#             "precursor_index": precursor_index,
-#             "x_aa": x_aa,
-#             "x_mod": x_mod,
-#             "x_meta": x_meta,
-#         }

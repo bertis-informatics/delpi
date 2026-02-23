@@ -57,6 +57,8 @@ class SpectralLibReader:
 
         self.averagine_df = get_precursor_lib_df(max_isotopes=max_precursor_isotopes)
 
+        self._peptidoform_df = None
+
     def calibrate_rt(self, rt_calibrator: RetentionTimeCalibrator) -> None:
         rt_df = rt_calibrator.predict(self.modification_df["ref_rt"])
         self.predicted_rt_arr[:] = rt_df["predicted_rt"].to_numpy()
@@ -195,6 +197,9 @@ class SpectralLibReader:
 
     def get_peptidoform_df(self) -> pl.DataFrame:
 
+        if self._peptidoform_df is not None:
+            return self._peptidoform_df
+
         peptide_df = (
             pl.scan_parquet(self.peptide_db_path / "peptide_df.parquet")
             .select(
@@ -215,10 +220,10 @@ class SpectralLibReader:
             )
             .collect()
         )
-        peptidoform_df = create_peptidoform_df(
+        self._peptidoform_df = create_peptidoform_df(
             peptide_df,
             modification_df,
             modified_sequence_format="delpi",
         )
 
-        return peptidoform_df
+        return self._peptidoform_df
