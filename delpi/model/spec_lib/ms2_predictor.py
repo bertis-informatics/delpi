@@ -365,7 +365,7 @@ class Ms2SpectrumPredictor(LightningModule):
         """Configure optimizer and learning rate scheduler."""
         if self.fine_tuning:
             param_groups = param_groups_lrd(
-                model=self, weight_decay=0.05, layer_decay=0.75
+                model=self, weight_decay=0.05, layer_decay=0.75, max_lr=self.max_lr
             )
         else:
             param_groups = self.parameters()

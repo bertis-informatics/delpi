@@ -222,7 +222,7 @@ class RetentionTimePredictor(LightningModule):
         # optimizer = torch.optim.AdamW(self.parameters(), lr=self.max_lr)
         if self.fine_tuning:
             param_groups = param_groups_lrd_for_rt_predictor(
-                model=self, weight_decay=0.05, layer_decay=0.5
+                model=self, weight_decay=0.05, layer_decay=0.5, max_lr=self.max_lr
             )
         else:
             param_groups = self.parameters()
