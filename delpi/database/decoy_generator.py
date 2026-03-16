@@ -1,3 +1,5 @@
+import random
+
 import polars as pl
 
 DIANN_MAP = {aa: ma for aa, ma in zip("GAVLIFMPWSCTYHKRQEND", "LLLVVLLLLTSSSSLLNDQE")}
@@ -13,15 +15,22 @@ def get_diann_decoy(peptide):
     )
 
 
+def get_pseudo_shuffle_decoy(peptide):
+    internal = list(peptide[1:-1])
+    random.shuffle(internal)
+    return peptide[0] + "".join(internal) + peptide[-1]
+
+
 class DecoyGenerator:
 
     def __init__(self, method: str = None):
 
         assert method in [
             "pseudo_reverse",
+            "pseudo_shuffle",
             "diann",
             None,
-        ], "`pseudo_reverse` and `diann` methods are supported"
+        ], "`pseudo_reverse`, `pseudo_shuffle`, and `diann` methods are supported"
 
         self.method = method
 
@@ -39,6 +48,12 @@ class DecoyGenerator:
                 .str.slice(1, pl.col("sequence_length") - 1)
                 .str.reverse()
                 + pl.col("peptide").str.slice(pl.col("sequence_length"), 2)
+            ).alias("peptide")
+        elif self.method == "pseudo_shuffle":
+            get_decoy = (
+                pl.col("peptide").map_elements(
+                    get_pseudo_shuffle_decoy, return_dtype=pl.String
+                )
             ).alias("peptide")
         elif self.method == "diann":
             get_decoy = (
