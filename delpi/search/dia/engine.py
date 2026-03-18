@@ -14,7 +14,6 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-
 from pymsio import MassSpecData
 from delpi.lcms.dia_run import DIARun, DIAWindow
 from delpi.database.spec_lib_reader import SpectralLibReader
@@ -32,12 +31,14 @@ from delpi.search.dia.batch_generator import count_total_batches, generate_batch
 from delpi.search.dia.lfq_utils import get_ms1_area
 from delpi.search.clustering import cluster_matches
 from delpi.utils.device_ctx import make_inference_contexts
+from delpi.utils.prefetch import prefetch_batches
 from delpi.model.input import THEORETICAL_PEAK, EXPERIMENTAL_PEAK
-
+from delpi.constants import DIA_MATCHED_PEAKS_CUTOFF
 
 logger = logging.getLogger(__name__)
 
-LOGIT_CUTOFF = 1.0
+# LOGIT_CUTOFF = 1.0
+LOGIT_CUTOFF = -0.5
 TOPK_PER_PRECURSOR = 10
 
 
@@ -81,7 +82,7 @@ class DIASearchEngine(BaseSearchEngine):
 
         frame_num_map = dia_win.get_frame_num_map()
         ms2_peak_df = dia_win.get_peak_container()
-        ms1_rt_arr = dia_win.ms1_meta_df["time_in_seconds"].to_numpy()
+        # ms1_rt_arr = dia_win.ms1_meta_df["time_in_seconds"].to_numpy()
 
         peak_group_container, peak_index_container = find_peak_groups(
             speclib_container,
@@ -90,6 +91,7 @@ class DIASearchEngine(BaseSearchEngine):
             frame_num_map=frame_num_map,
             ms1_mass_tol=ms1_tol,
             ms2_mass_tol=ms2_tol,
+            min_peak_count=DIA_MATCHED_PEAKS_CUTOFF,
             topk=peak_group_topk,
         )
         total_batches = count_total_batches(
@@ -108,22 +110,27 @@ class DIASearchEngine(BaseSearchEngine):
         )
 
         results = defaultdict(list)
-        for (
-            precursor_index_arr,
-            frame_num_arr,
-            x_theo,
-            x_exp,
-            x_ind,
-            x_quant,
-            ms1_scale_arr,
-        ) in tqdm(
-            batch_iter, total=total_batches, position=1, desc="PMSMs", leave=False
+        prefetched_iter = prefetch_batches(batch_iter, prefetch_count=2)
+        for tensors in tqdm(
+            prefetched_iter, total=total_batches, position=1, desc="PmSMs", leave=False
         ):
-            n = x_theo.shape[0]
-            X_theo = X_theo_tensor[:n].copy_(torch.from_numpy(x_theo))
-            X_exp = X_exp_tensor[:n, : x_exp.shape[1], :].copy_(torch.from_numpy(x_exp))
+            precursor_index_arr = tensors[0].numpy()
+            frame_num_arr = tensors[1].numpy()
+            x_theo_t = tensors[2]
+            x_exp_t = tensors[3]
+            x_ind_t = tensors[4]
+            x_quant_t = tensors[5]
+            ms1_scale_t = tensors[6]
 
-            logits, x_feature = model(X_theo, X_exp)
+            n = x_theo_t.shape[0]
+            X_theo = X_theo_tensor[:n].copy_(
+                x_theo_t.to(self.device, non_blocking=True)
+            )
+            X_exp = X_exp_tensor[:n, : x_exp_t.shape[1], :].copy_(
+                x_exp_t.to(self.device, non_blocking=True)
+            )
+
+            logits, x_feature = model(X_theo, X_exp, return_feature=True)
 
             logits = logits.flatten()
             mask = logits > logit_cutoff
@@ -131,6 +138,11 @@ class DIASearchEngine(BaseSearchEngine):
             x_feature = x_feature[mask].detach().cpu().numpy()
             logits = logits[mask].detach().cpu().numpy()
             mask = mask.detach().cpu().numpy()
+
+            x_exp = x_exp_t.numpy()
+            x_ind = x_ind_t.numpy()
+            x_quant = x_quant_t.numpy()
+            ms1_scale_arr = ms1_scale_t.numpy()
 
             precursor_index_arr = precursor_index_arr[mask]
             frame_num_arr = frame_num_arr[mask]
@@ -280,7 +292,8 @@ class DIASearchEngine(BaseSearchEngine):
             logit_cutoff = LOGIT_CUTOFF
             save_quant = False
         else:
-            logit_cutoff = LOGIT_CUTOFF - 2.0
+            # logit_cutoff = LOGIT_CUTOFF - 2.0
+            logit_cutoff = LOGIT_CUTOFF - 1.0
             save_quant = True
 
         result_manager = self._perform_full_search(
@@ -297,10 +310,10 @@ class DIASearchEngine(BaseSearchEngine):
         rt_calibrator = self._perform_rt_calibration(run, before_full_search=False)
 
         if self.state == SearchState.FIRST_SEARCH:
-            result_manager.write_df(
-                df=run.meta_df.select(pl.exclude("peak_start", "peak_stop")),
-                key="meta_df",
-            )
+            # result_manager.write_df(
+            #     df=run.meta_df.select(pl.exclude("peak_start", "peak_stop")),
+            #     key="meta_df",
+            # )
             result_manager.write_attr(
                 "cycle_time_in_seconds", run.cycle_time_in_seconds
             )

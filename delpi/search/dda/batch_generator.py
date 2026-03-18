@@ -71,6 +71,21 @@ def _make_batch_in_parallel(
         ms1_scale_arr[i] = ms1_scale
 
 
+def _allocate_dda_buffer(batch_size: int, num_theoretical_peaks: int):
+    """Allocate a complete set of numpy arrays for one DDA batch."""
+    return {
+        "X_theo": np.empty(
+            (batch_size, num_theoretical_peaks, THEO_TOKEN_DIM), dtype=np.float32
+        ),
+        "X_exp": np.empty(
+            (batch_size, MAX_EXP_PEAK_TOKENS, EXP_TOKEN_DIM), dtype=np.float32
+        ),
+        "X_precursor_index": np.empty(batch_size, dtype=np.uint32),
+        "ms1_scale_arr": np.empty(batch_size, dtype=np.float32),
+        "X_indices": np.empty((batch_size, 64), dtype=np.int32),
+    }
+
+
 def generate_batches(
     speclib_container: SpectralLibContainer,
     ms1_meta_df: MetaContainer,
@@ -82,31 +97,22 @@ def generate_batches(
     ms1_mass_tol: float,
     ms2_mass_tol: float,
     batch_size: int,
+    num_buffers: int = 2,
 ):
     num_theoretical_peaks = (
         speclib_container.max_fragments + speclib_container.max_precursor_isotopes
     )
 
-    X_theo = np.empty(
-        (batch_size, num_theoretical_peaks, THEO_TOKEN_DIM),
-        dtype=np.float32,
-    )
-    X_exp = np.empty(
-        (batch_size, MAX_EXP_PEAK_TOKENS, EXP_TOKEN_DIM),
-        dtype=np.float32,
-    )
-    X_precursor_index = np.empty(batch_size, dtype=np.uint32)
-    ms1_scale_arr = np.empty(batch_size, dtype=np.float32)
-
-    # Peak indices for matched fragment ions
-    X_indices = np.empty((batch_size, 64), dtype=np.int32)
+    buffers = [
+        _allocate_dda_buffer(batch_size, num_theoretical_peaks)
+        for _ in range(num_buffers)
+    ]
 
     frame_num_arr = peak_group_container.frame_num_arr
-    # precursor_index0_arr = peak_group_container.precursor_index0_arr
-    # min_precursor_index = frag_db.min_precursor_index
     batch_iter = iter_batch_indices(peak_group_container.peak_count_arr, batch_size)
 
-    for num_peaks, batch_indices in batch_iter:
+    for buf_idx, (num_peaks, batch_indices) in enumerate(batch_iter):
+        buf = buffers[buf_idx % num_buffers]
         cur_batch_size = batch_indices.shape[0]
         _make_batch_in_parallel(
             batch_indices,
@@ -119,18 +125,18 @@ def generate_batches(
             peak_index_container,
             ms1_mass_tol,
             ms2_mass_tol,
-            X_precursor_index,
-            X_theo,
-            X_exp,
-            X_indices,
-            ms1_scale_arr,
+            buf["X_precursor_index"],
+            buf["X_theo"],
+            buf["X_exp"],
+            buf["X_indices"],
+            buf["ms1_scale_arr"],
         )
 
         yield (
-            X_precursor_index[:cur_batch_size],
+            buf["X_precursor_index"][:cur_batch_size],
             frame_num_arr[batch_indices],
-            X_theo[:cur_batch_size, :, :],
-            X_exp[:cur_batch_size, :num_peaks, :],
-            X_indices[:cur_batch_size, :],
-            ms1_scale_arr[:cur_batch_size],
+            buf["X_theo"][:cur_batch_size, :, :],
+            buf["X_exp"][:cur_batch_size, :num_peaks, :],
+            buf["X_indices"][:cur_batch_size, :],
+            buf["ms1_scale_arr"][:cur_batch_size],
         )

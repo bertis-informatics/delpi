@@ -30,6 +30,7 @@ from delpi.search.dda.batch_generator import count_total_batches, generate_batch
 from delpi.search.clustering import cluster_matches
 from delpi.search.dia.lfq_utils import get_ms1_area_dda
 from delpi.utils.device_ctx import make_inference_contexts
+from delpi.utils.prefetch import prefetch_batches
 from delpi.constants import ISOLATION_LOWER_TOL, ISOLATION_UPPER_TOL
 from delpi.model.input import THEORETICAL_PEAK, EXPERIMENTAL_PEAK
 
@@ -123,25 +124,30 @@ class DDASearchEngine(BaseSearchEngine):
         )
 
         results = defaultdict(list)
-        for (
-            precursor_index_arr,
-            frame_num_arr,
-            x_theo,
-            x_exp,
-            x_ind,
-            ms1_scale_arr,
-        ) in tqdm(
-            batch_iter,
+        prefetched_iter = prefetch_batches(batch_iter, prefetch_count=2)
+        for tensors in tqdm(
+            prefetched_iter,
             total=total_batches,
             position=1,
-            desc="PMSMs",
+            desc="PmSM",
             leave=False,
         ):
-            n = x_theo.shape[0]
-            X_theo = X_theo_tensor[:n].copy_(torch.from_numpy(x_theo))
-            X_exp = X_exp_tensor[:n, : x_exp.shape[1], :].copy_(torch.from_numpy(x_exp))
+            precursor_index_arr = tensors[0].numpy()
+            frame_num_arr = tensors[1].numpy()
+            x_theo_t = tensors[2]
+            x_exp_t = tensors[3]
+            x_ind_t = tensors[4]
+            ms1_scale_t = tensors[5]
 
-            logits, x_feature = model(X_theo, X_exp)
+            n = x_theo_t.shape[0]
+            X_theo = X_theo_tensor[:n].copy_(
+                x_theo_t.to(self.device, non_blocking=True)
+            )
+            X_exp = X_exp_tensor[:n, : x_exp_t.shape[1], :].copy_(
+                x_exp_t.to(self.device, non_blocking=True)
+            )
+
+            logits, x_feature = model(X_theo, X_exp, return_feature=True)
             logits = logits.flatten()
 
             mask = logits > logit_cutoff
@@ -149,6 +155,10 @@ class DDASearchEngine(BaseSearchEngine):
             x_feature = x_feature[mask].detach().cpu().numpy()
             logits = logits[mask].detach().cpu().numpy()
             mask = mask.detach().cpu().numpy()
+
+            x_exp = x_exp_t.numpy()
+            x_ind = x_ind_t.numpy()
+            ms1_scale_arr = ms1_scale_t.numpy()
 
             precursor_index_arr = precursor_index_arr[mask]
             frame_num_arr = frame_num_arr[mask]
@@ -195,9 +205,11 @@ class DDASearchEngine(BaseSearchEngine):
         group_key = self.get_results_group_key()
 
         speclib_reader = SpectralLibReader(peptide_db_path=self.get_db_dir())
-
         if self.state > SearchState.FIRST_SEARCH:
-            lc_peak_width = result_manager.read_attr("lc_peak_width")
+            try:
+                lc_peak_width = result_manager.read_attr("lc_peak_width")
+            except Exception:
+                lc_peak_width = run.estimate_LC_fwhm() * 1.69
         else:
             lc_peak_width = run.estimate_LC_fwhm() * 1.69
 
@@ -310,10 +322,14 @@ class DDASearchEngine(BaseSearchEngine):
         logger.info("RT calibration fitted")
 
         if self.state == SearchState.FIRST_SEARCH:
-            result_manager.write_df(
-                df=run.meta_df.select(pl.exclude("peak_start", "peak_stop")),
-                key="meta_df",
+            # result_manager.write_df(
+            #     df=run.meta_df.select(pl.exclude("peak_start", "peak_stop")),
+            #     key="meta_df",
+            # )
+            run.meta_df.select(pl.exclude("peak_start", "peak_stop")).write_parquet(
+                result_manager.output_dir / f"{result_manager.run_name}.meta_df.parquet"
             )
+
             result_manager.write_attr("lc_peak_width", self.lc_peak_width)
             result_manager.write_attr(
                 "gradient_length_in_seconds", run.gradient_length_in_seconds
