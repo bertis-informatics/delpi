@@ -10,7 +10,7 @@ from lightning.pytorch.loggers import CSVLogger
 from sklearn.model_selection import train_test_split
 
 from delpi.model.spec_lib.ms2_predictor import Ms2SpectrumPredictor
-from delpi.search.tl.dataset import TransferLearningDataset
+from delpi.search.tl.dataset import TransferLearningDataset, LABEL_DTYPE
 from delpi.search.result_aggregator import ResultsAggregator
 from delpi import MODEL_DIR
 
@@ -41,12 +41,14 @@ class TransferLearningTrainer:
         device: torch.device,
     ) -> np.ndarray:
 
-        torch.set_float32_matmul_precision("medium")
-
         logger = CSVLogger(save_dir=output_dir, version=f"ms2_predictor_tl")
         hdf_files = result_aggregator.get_hdf_files()
         label_df = result_aggregator.get_tl_label_df()
-        in_memory = label_df.shape[0] < 1_000_000
+        labels = np.empty(len(label_df), dtype=LABEL_DTYPE)
+        for field in LABEL_DTYPE.names:
+            labels[field] = label_df[field].to_numpy()
+
+        in_memory = len(labels) < 1_000_000
         data_dict = (
             result_aggregator.get_tl_data(
                 data_keys=["x_aa", "x_mod", "x_meta", "x_intensity"]
@@ -55,19 +57,19 @@ class TransferLearningTrainer:
             else None
         )
 
-        val_size = min(int(label_df.shape[0] * 0.2), 10000)
-        train_df, val_df = train_test_split(
-            label_df, test_size=val_size, random_state=718, shuffle=True
+        val_size = min(int(len(labels) * 0.2), 10000)
+        train_labels, val_labels = train_test_split(
+            labels, test_size=val_size, random_state=718, shuffle=True
         )
 
-        train_ds = TransferLearningDataset(hdf_files, train_df, data_dict=data_dict)
-        val_ds = TransferLearningDataset(hdf_files, val_df, data_dict=data_dict)
+        train_ds = TransferLearningDataset(hdf_files, train_labels, data_dict=data_dict)
+        val_ds = TransferLearningDataset(hdf_files, val_labels, data_dict=data_dict)
 
-        if train_df.shape[0] < 50000:
+        if len(train_labels) < 50000:
             fraction = None
             max_epochs = self.training_params["max_epochs"]
         else:
-            fraction = min(50000 / train_df.shape[0], 0.5)
+            fraction = min(50000 / len(train_labels), 0.5)
             max_epochs = self.training_params["max_epochs"] * 2
 
         model = Ms2SpectrumPredictor(

@@ -10,7 +10,7 @@ from lightning.pytorch.loggers import CSVLogger
 from sklearn.model_selection import train_test_split
 
 from delpi.model.spec_lib.rt_predictor import RetentionTimePredictor
-from delpi.search.tl.dataset import TransferLearningDatasetForRT
+from delpi.search.tl.dataset import TransferLearningDatasetForRT, LABEL_DTYPE
 from delpi.search.result_aggregator import ResultsAggregator
 from delpi.model.rt_calibrator import RetentionTimeCalibrator
 from delpi import MODEL_DIR
@@ -55,10 +55,13 @@ class TransferLearningTrainerForRT:
         device: torch.device,
     ) -> np.ndarray:
 
-        torch.set_float32_matmul_precision("medium")
         logger = CSVLogger(save_dir=output_dir, version=f"rt_predictor_tl")
 
         label_df = result_aggregator.get_tl_label_df()
+        labels = np.empty(len(label_df), dtype=LABEL_DTYPE)
+        for field in LABEL_DTYPE.names:
+            labels[field] = label_df[field].to_numpy()
+
         data_dict = result_aggregator.get_tl_data(
             data_keys=["precursor_index", "x_aa", "x_mod", "x_rt"]
         )
@@ -66,27 +69,30 @@ class TransferLearningTrainerForRT:
         if len(data_dict) > 1:
             data_dict = self._align_retention_times(data_dict)
 
-        train_df, val_df = train_test_split(
-            label_df,
+        train_labels, val_labels = train_test_split(
+            labels,
             test_size=self.training_params["val_split"],
             random_state=self.training_params["random_seed"],
             shuffle=True,
         )
 
         ## to avoid too-long training time, limit the number of samples
-        if train_df.shape[0] > self.training_params["max_train_samples"]:
-            train_df = train_df.sample(
-                n=self.training_params["max_train_samples"],
-                seed=self.training_params["random_seed"],
+        rng = np.random.default_rng(self.training_params["random_seed"])
+        if len(train_labels) > self.training_params["max_train_samples"]:
+            idx = rng.choice(
+                len(train_labels),
+                self.training_params["max_train_samples"],
+                replace=False,
             )
-        if val_df.shape[0] > self.training_params["max_val_samples"]:
-            val_df = val_df.sample(
-                n=self.training_params["max_val_samples"],
-                seed=self.training_params["random_seed"],
+            train_labels = train_labels[idx]
+        if len(val_labels) > self.training_params["max_val_samples"]:
+            idx = rng.choice(
+                len(val_labels), self.training_params["max_val_samples"], replace=False
             )
+            val_labels = val_labels[idx]
 
-        train_ds = TransferLearningDatasetForRT(train_df, data_dict=data_dict)
-        val_ds = TransferLearningDatasetForRT(val_df, data_dict=data_dict)
+        train_ds = TransferLearningDatasetForRT(train_labels, data_dict=data_dict)
+        val_ds = TransferLearningDatasetForRT(val_labels, data_dict=data_dict)
 
         pretrained_weights = torch.load(
             MODEL_DIR / "delpi.rt_predictor.pth",

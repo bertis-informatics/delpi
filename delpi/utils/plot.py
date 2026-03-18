@@ -53,7 +53,7 @@ def plot_rt_mapping(
     plt.plot(x_rt, pred_rt_df["predicted_rt"], color="r")
     plt.plot(x_rt, pred_rt_df["rt_lb"], color="blue", linestyle=":")
     plt.plot(x_rt, pred_rt_df["rt_ub"], color="purple", linestyle=":")
-    plt.title(f"RT mapping with {len(obs_rt)} PMSMs")
+    plt.title(f"RT mapping with {len(obs_rt)} PmSMs")
     plt.xlabel("Reference RT")
     plt.ylabel("Observed RT [seconds]")
     # plt.savefig(img_file_path)
