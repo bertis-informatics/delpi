@@ -59,13 +59,13 @@ def cluster_psms(
     peak_index_arr: np.ndarray,  # (N, 64)
     jaccard_thres: float = 0.6,
 ) -> np.ndarray:
-    """Assigns each PMSM to a cluster using greedy single-link criterion.
+    """Assigns each PmSM to a cluster using greedy single-link criterion.
 
     Returns
     -------
-    cluster_id_arr : int32[::1] length N - global cluster id per PMSM
+    cluster_id_arr : int32[::1] length N - global cluster id per PmSM
     rep_idx_arr    : int32[::1] length *C* - row index of the representative
-                     PMSM for each cluster, where *C* is the number of clusters
+                     PmSM for each cluster, where *C* is the number of clusters
     """
     N = frame_num_arr.shape[0]
 
@@ -73,7 +73,7 @@ def cluster_psms(
     cluster_id_arr = np.empty(N, dtype=np.int32)
     rep_idx_arr = np.empty(N, dtype=np.int32)
 
-    # Sort PMSMs by frame so that same‑frame rows are contiguous
+    # Sort PmSMs by frame so that same‑frame rows are contiguous
     order = np.argsort(frame_num_arr)
 
     current_frame = -1
@@ -119,21 +119,21 @@ def cluster_matches(
     max_frame_diff: int,
     jaccard_thres: float = 0.6,
 ) -> np.ndarray:
-    """Assign each PMSM to a cluster using greedy single-link criterion.
+    """Assign each PmSM to a cluster using greedy single-link criterion.
 
-    Two PMSMs are put in the *same* cluster if **both** conditions hold:
+    Two PmSMs are put in the *same* cluster if **both** conditions hold:
     1. ``abs(frame_num[i] - frame_num[rep]) ≤ 1``
     2. Jaccard similarity between their peak sets ≥ ``jaccard_thres``.
 
-    The algorithm processes PMSMs sorted by ``frame_num`` so that candidate
+    The algorithm processes PmSMs sorted by ``frame_num`` so that candidate
     representative scans are encountered earlier; all heavy work is inside
     this nopython JIT kernel (no Python objects).
 
     Returns
     -------
-    cluster_id_arr : int32[::1] length N – cluster id for each PMSM
+    cluster_id_arr : int32[::1] length N – cluster id for each PmSM
     rep_idx_arr    : int32[::1] length *C* – row index of the representative
-                     PMSM for each cluster (*C* = number of clusters)
+                     PmSM for each cluster (*C* = number of clusters)
     """
     N = frame_index_arr.shape[0]
 
@@ -142,7 +142,7 @@ def cluster_matches(
     rep_idx_arr = np.empty(N, dtype=np.int32)
     rep_frame_arr = np.empty(N, dtype=np.int32)  # frame number of each rep
 
-    # Process PMSMs in ascending frame order for locality
+    # Process PmSMs in ascending frame order for locality
     order = np.argsort(frame_index_arr)
     cluster_count = 0
 
