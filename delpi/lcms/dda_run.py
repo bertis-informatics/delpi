@@ -1,6 +1,7 @@
 import gc
 from typing import Self
 
+from delpi.utils.peak import find_peak_index
 import numpy as np
 import polars as pl
 from scipy.signal import savgol_filter, find_peaks
@@ -109,7 +110,7 @@ class DDARun:
             z_score_arr=self.ms_data.z_score_arr[st:ed],
         )
 
-    def estimate_LC_fwhm(self, min_mz: float = 400, max_mz: float = 800):
+    def _estimate_LC_fwhm(self, min_mz: float = 400, max_mz: float = 800):
 
         assert self.ms1_map is not None
 
@@ -153,3 +154,98 @@ class DDARun:
                 #     break
 
         return float(pl.concat(lc_peak_width_list).median())
+
+    def estimate_LC_fwhm(self, min_samples: int = 1000):
+
+        lc_win_radius = self.gradient_length_in_seconds * 0.025
+        frame_num_to_index = self.ms1_map.frame_num_to_index.astype(np.int32)
+
+        ms1_meta_df = self.ms1_map.meta_df
+        peak_df = self.ms1_map.peak_df
+
+        ms2_meta_df = self.meta_df.filter(pl.col("ms_level") == 2)
+        ms2_meta_df = ms2_meta_df.with_columns(
+            peak_df["mz"]
+            .search_sorted(ms2_meta_df["isolation_min_mz"], side="left")
+            .alias("peak_st_idx"),
+            peak_df["mz"]
+            .search_sorted(ms2_meta_df["isolation_max_mz"], side="right")
+            .alias("peak_ed_idx"),
+        )
+
+        # ── Pre-extract everything to numpy – eliminates per-iteration polars overhead ──
+        ms1_times = ms1_meta_df["time_in_seconds"].to_numpy()  # (n_ms1,)
+        ms1_frame_nums = ms1_meta_df["frame_num"].to_numpy()  # (n_ms1,)
+        n_ms1 = len(ms1_times)
+
+        peak_fn = peak_df["frame_num"].to_numpy()  # (n_peaks,)
+        peak_ab = peak_df["ab"].to_numpy()  # (n_peaks,)
+
+        ms2_rt = ms2_meta_df["time_in_seconds"].to_numpy()  # (n_ms2,)
+        ms2_peak_st = ms2_meta_df["peak_st_idx"].to_numpy()  # (n_ms2,)
+        ms2_peak_ed = ms2_meta_df["peak_ed_idx"].to_numpy()  # (n_ms2,)
+
+        # Pre-allocate a max-size XIC buffer; reuse across iterations.
+        xic_buf = np.zeros(n_ms1, dtype=np.float32)
+
+        lc_peak_width_list: list = []
+        num_lc_peaks = 0
+        i0 = int(ms2_meta_df.shape[0] * 0.25)
+        i1 = int(ms2_meta_df.shape[0] * 0.75)
+
+        for i in range(i0, i1):
+            rt = ms2_rt[i]
+            st = int(ms2_peak_st[i])
+            ed = int(ms2_peak_ed[i])
+
+            # np.searchsorted instead of polars .search_sorted per iteration
+            min_frame_idx = max(
+                int(np.searchsorted(ms1_times, rt - lc_win_radius, side="left")), 0
+            )
+            max_frame_idx = min(
+                int(np.searchsorted(ms1_times, rt + lc_win_radius, side="right")),
+                n_ms1 - 1,
+            )
+
+            win_size = max_frame_idx - min_frame_idx + 1
+            min_frame_num = ms1_frame_nums[min_frame_idx]
+            max_frame_num = ms1_frame_nums[max_frame_idx]
+
+            # Replace polars filter/group_by/agg with numpy masking + np.add.at
+            fn_slice = peak_fn[st:ed]
+            ab_slice = peak_ab[st:ed]
+            mask = (fn_slice >= min_frame_num) & (fn_slice <= max_frame_num)
+            fn_sel = fn_slice[mask]
+            ab_sel = ab_slice[mask]
+
+            if len(fn_sel) == 0:
+                continue
+
+            local_idx = frame_num_to_index[fn_sel] - min_frame_idx
+            xic_arr = xic_buf[:win_size]
+            xic_arr[:] = 0.0
+            np.add.at(xic_arr, local_idx, ab_sel)
+
+            xic_arr = savgol_filter(xic_arr, window_length=11, polyorder=3)
+
+            height_cutoff = float(np.median(ab_sel)) * 1.4
+            peak_arr, peak_props = find_peaks(
+                xic_arr,
+                rel_height=0.5,
+                height=height_cutoff,
+                prominence=0.01,
+                width=2,
+            )
+
+            if len(peak_arr) == 0:
+                continue
+
+            peak_st_arr = peak_props["left_ips"].astype(np.int32) + min_frame_idx
+            peak_ed_arr = peak_props["right_ips"].astype(np.int32) + min_frame_idx
+            lc_peak_width_list.append(ms1_times[peak_ed_arr] - ms1_times[peak_st_arr])
+            num_lc_peaks += len(peak_arr)
+
+            if num_lc_peaks > min_samples:
+                break
+
+        return float(np.median(np.concatenate(lc_peak_width_list)))
