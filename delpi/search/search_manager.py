@@ -326,10 +326,10 @@ class SearchManager:
         num_decoys = pmsm_df["is_decoy"].sum()
         num_targets = len(pmsm_df) - num_decoys
         logger.info(
-            f"Training a classifier with {num_targets:,} positive and {num_decoys:,} negative PMSMs"
+            f"Training a classifier with {num_targets:,} positive and {num_decoys:,} negative PmSMs"
         )
 
-        # Train classifier and rescore PMSMs
+        # Train classifier and rescore PmSMs
         splitter = DatasetSplitter()
         train_df, test_df = splitter.split_by_peptide(
             pmsm_df.select(
@@ -372,7 +372,7 @@ class SearchManager:
         del train_dataset
         data_dict = None
 
-        ## select best-scoring PMSM per cluster of each run
+        ## select best-scoring PmSM per cluster of each run
         pmsm_df = (
             test_df.select(
                 pl.col("run_index", "pmsm_index", "cluster"),
@@ -388,7 +388,7 @@ class SearchManager:
             .drop("cluster")
         )
         logger.info(
-            f"Selected {pmsm_df.shape[0]} non-redundant PMSMs (one per cluster) from {len(test_score_arr)} PMSMs"
+            f"Selected {pmsm_df.shape[0]} non-redundant PmSMs (one per cluster) from {len(test_score_arr)} PmSMs"
         )
 
         ## Perform global and run-specific FDR analysis

@@ -68,14 +68,10 @@ class BaseSearchEngine(ABC):
 
     def _load_model(self) -> DelPiModel:
         acq_method = self.get_acquisition_method()
-        model = torch.load(
-            MODEL_DIR / f"delpi.{acq_method.lower()}.pth",
-            weights_only=False,
-            map_location=self.device,
-        )
-        assert isinstance(model, DelPiModel)
+        model = DelPiModel.load(MODEL_DIR / f"delpi.{acq_method.lower()}.pth")
+        model = model.to(self.device).eval()
         model.transform = PeptideMultiSpectraMatchScaler()
-        return model.eval()
+        return model
 
     def next_state(self):
         self.state = SearchState(self.state + 1)
@@ -143,6 +139,9 @@ class BaseSearchEngine(ABC):
             reader = ReaderFactory.get_reader(raw_path)
             lcms_data = reader.load()
             max_rt_time = lcms_data.meta_df.item(-1, "time_in_seconds")
+            # lcms_data.meta_df.write_parquet(
+            #     self.search_config.output_dir / f"{lcms_data.run_name}.meta_df.parquet"
+            # )
             logger.info(
                 f"Loaded {lcms_data.meta_df.shape[0]} spectra. Max scan time: {max_rt_time/60:.1f} min"
             )
@@ -155,7 +154,19 @@ class BaseSearchEngine(ABC):
             if self.state < SearchState.SECOND_SEARCH:
                 pmsm_df = self.perform_tda(result_manager)
                 group_key = self.get_results_group_key()
-                result_manager.write_df(pmsm_df, key=f"{group_key}/pmsm_df")
+                # result_manager.write_df(pmsm_df, key=f"{group_key}/pmsm_df")
+                req_cols = [
+                    "precursor_index",
+                    "observed_rt",
+                    "predicted_rt",
+                    "is_decoy",
+                    "precursor_q_value",
+                ]
+                result_manager.write_dict(
+                    f"{group_key}/pmsm_df",
+                    {key: pmsm_df[key].to_numpy() for key in req_cols},
+                )
+
                 self.next_state()
                 tl_dataset = self.prepare_transfer_learning_data(
                     lcms_data,
@@ -190,10 +201,10 @@ class BaseSearchEngine(ABC):
         num_decoys = pmsm_df["is_decoy"].sum()
         num_targets = len(pmsm_df) - num_decoys
         logger.info(
-            f"Training a classifier with {num_targets:,} positive and {num_decoys:,} negative PMSMs"
+            f"Training a classifier with {num_targets:,} positive and {num_decoys:,} negative PmSMs"
         )
 
-        # Train classifier and rescore PMSMs
+        # Train classifier and rescore PmSMs
         splitter = DatasetSplitter()
         train_df, test_df = splitter.split_by_peptide(pmsm_df)
         train_dataset = PMSMDataset.create_tensor_dataset(train_df, data_dict)
@@ -208,10 +219,10 @@ class BaseSearchEngine(ABC):
         )
 
         ###############################################################################
-        # select only one PMSM per cluster (sharing the same peaks)
-        # then select only one PMSM per precursor
+        # select only one PmSM per cluster (sharing the same peaks)
+        # then select only one PmSM per precursor
         # the order of these two steps does matter
-        # because low-scoring PMSMs of precursor may not share peaks with other PMSMs
+        # because low-scoring PmSMs of precursor may not share peaks with other PmSMs
         ################################################################################
         pmsm_df = (
             test_df.with_columns(score=test_score_arr)
@@ -219,16 +230,16 @@ class BaseSearchEngine(ABC):
             .agg(pl.all().sort_by("score").last())
         )
         logger.info(
-            f"Selected {pmsm_df.shape[0]} non-redundant PMSMs (one per cluster) from {test_df.shape[0]} PMSMs"
+            f"Selected {pmsm_df.shape[0]} non-redundant PmSMs (one per cluster) from {test_df.shape[0]} PmSMs"
         )
 
-        ## Now select only one PMSM per precursor
+        ## Now select only one PmSM per precursor
         pmsm_df = pmsm_df.group_by(["precursor_index"]).agg(
             pl.all().sort_by("score").last()
         )
 
         logger.debug(
-            f"Selected {pmsm_df.shape[0]} best-scoring PMSMs (one per Precursor)"
+            f"Selected {pmsm_df.shape[0]} best-scoring PmSMs (one per Precursor)"
         )
 
         fdr_analyzer = FDRAnalyzer(
@@ -292,7 +303,18 @@ class BaseSearchEngine(ABC):
                     pmsm_df, score_column="logit", out_column="precursor_q_value"
                 )
             else:  # SECND_SEARCH and before_full_search
-                pmsm_df = result_manager.read_df(f"{group_key}/pmsm_df")
+                pmsm_df = pl.from_dict(
+                    result_manager.read_dict(
+                        f"{group_key}/pmsm_df",
+                        data_keys=[
+                            "precursor_index",
+                            "observed_rt",
+                            "predicted_rt",
+                            "is_decoy",
+                            "precursor_q_value",
+                        ],
+                    )
+                )
 
                 ## update precursor_index for refined DB
                 precursor_df = (
@@ -300,24 +322,11 @@ class BaseSearchEngine(ABC):
                     .select(pl.col("g_precursor_index", "precursor_index"))
                     .collect()
                 )
-                req_cols = pl.col(
-                    "precursor_index",
-                    "observed_rt",
-                    "predicted_rt",
-                    "is_decoy",
-                    "precursor_q_value",
-                )
 
-                pmsm_df = (
-                    pmsm_df.select(req_cols)
-                    .rename({"precursor_index": "g_precursor_index"})
-                    .join(
-                        precursor_df.select(
-                            pl.col("g_precursor_index", "precursor_index")
-                        ),
-                        on="g_precursor_index",
-                        how="left",
-                    )
+                pmsm_df = pmsm_df.rename({"precursor_index": "g_precursor_index"}).join(
+                    precursor_df.select(pl.col("g_precursor_index", "precursor_index")),
+                    on="g_precursor_index",
+                    how="left",
                 )
 
                 pmsm_df = PeptideDatabase.join(

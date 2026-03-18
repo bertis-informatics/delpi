@@ -8,9 +8,7 @@ from delpi.database.numba.spec_lib_container import SpectralLibContainer
 from delpi.search.dia.peak_group import PeakIndexContainer
 from delpi.database.numba.spec_lib_utils import get_theoretical_peaks
 from delpi.utils.peak import find_peak_index
-
-MATCHED_PEAKS_CUTOFF_LB = 3
-MATCHED_PEAKS_CUTOFF_UB = 6
+from delpi.constants import DDA_MATCHED_PEAKS_CUTOFF_LB, DDA_MATCHED_PEAKS_CUTOFF_UB
 
 
 class DdaPeakGroupContainer(NamedTuple):
@@ -25,7 +23,8 @@ class DdaPeakGroupContainer(NamedTuple):
 @nb.njit(inline="always", nogil=True, fastmath=True, cache=True)
 def get_matched_peak_cutoff(pept_len: int):
     return max(
-        MATCHED_PEAKS_CUTOFF_LB, min(MATCHED_PEAKS_CUTOFF_UB, np.ceil(pept_len / 3))
+        DDA_MATCHED_PEAKS_CUTOFF_LB,
+        min(DDA_MATCHED_PEAKS_CUTOFF_UB, np.ceil(pept_len / 3)),
     )
 
 
@@ -272,7 +271,7 @@ def find_peak_groups(
     ms1_mass_tol: float = 10,
     ms2_mass_tol: float = 10,
     rt_window_radius: int = 4,
-    min_peak_count: int = MATCHED_PEAKS_CUTOFF_LB,
+    min_peak_count: int = DDA_MATCHED_PEAKS_CUTOFF_LB,
     topk: int = 10,
 ) -> Tuple[DdaPeakGroupContainer, PeakIndexContainer]:
 

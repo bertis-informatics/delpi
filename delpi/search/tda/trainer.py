@@ -69,8 +69,6 @@ class TargetDecoyTrainer:
         Returns:
             Array of scores for the test dataset
         """
-        torch.set_float32_matmul_precision("medium")
-
         input_size = PMSMDataset.PMSM_EMBEDDING_DIM
         num_workers = (
             0

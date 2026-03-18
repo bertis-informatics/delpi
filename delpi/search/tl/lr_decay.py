@@ -13,9 +13,16 @@ def _get_layer_id(name, num_layers):
 
 
 def param_groups_lrd(
-    model, weight_decay=0.05, no_weight_decay_list=[], layer_decay=0.75
+    model, weight_decay=0.05, no_weight_decay_list=[], layer_decay=0.75, max_lr=None
 ):
+    """
+    Parameter groups for layer-wise lr decay.
 
+    Args:
+        max_lr: peak learning rate. When provided, each group's ``lr`` is set to
+            ``lr_scale * max_lr`` so that LambdaLR schedulers (which multiply
+            the stored ``lr`` by a lambda) automatically respect layer-wise decay.
+    """
     param_group_names = {}
     param_groups = {}
 
@@ -39,17 +46,16 @@ def param_groups_lrd(
 
         if group_name not in param_group_names:
             this_scale = layer_scales[layer_id]
+            group_entry = {
+                "lr_scale": this_scale,
+                "weight_decay": this_decay,
+                "params": [],
+            }
+            if max_lr is not None:
+                group_entry["lr"] = this_scale * max_lr
 
-            param_group_names[group_name] = {
-                "lr_scale": this_scale,
-                "weight_decay": this_decay,
-                "params": [],
-            }
-            param_groups[group_name] = {
-                "lr_scale": this_scale,
-                "weight_decay": this_decay,
-                "params": [],
-            }
+            param_group_names[group_name] = {**group_entry, "params": []}
+            param_groups[group_name] = group_entry
 
         param_group_names[group_name]["params"].append(n)
         param_groups[group_name]["params"].append(p)
@@ -72,9 +78,16 @@ def _get_layer_id_for_rt_predictor(name, num_layers):
 
 
 def param_groups_lrd_for_rt_predictor(
-    model, weight_decay=0.05, no_weight_decay_list=[], layer_decay=0.75
+    model, weight_decay=0.05, no_weight_decay_list=[], layer_decay=0.75, max_lr=None
 ):
+    """
+    Parameter groups for layer-wise lr decay (RT predictor, cnn_rnn encoder).
 
+    Args:
+        max_lr: peak learning rate. When provided, each group's ``lr`` is set to
+            ``lr_scale * max_lr`` so that LambdaLR schedulers automatically
+            respect layer-wise decay.
+    """
     assert (
         model.encoder_type == "cnn_rnn"
     ), "Layer-wise lr decay is only implemented for cnn_rnn encoder."
@@ -102,17 +115,16 @@ def param_groups_lrd_for_rt_predictor(
 
         if group_name not in param_group_names:
             this_scale = layer_scales[layer_id]
+            group_entry = {
+                "lr_scale": this_scale,
+                "weight_decay": this_decay,
+                "params": [],
+            }
+            if max_lr is not None:
+                group_entry["lr"] = this_scale * max_lr
 
-            param_group_names[group_name] = {
-                "lr_scale": this_scale,
-                "weight_decay": this_decay,
-                "params": [],
-            }
-            param_groups[group_name] = {
-                "lr_scale": this_scale,
-                "weight_decay": this_decay,
-                "params": [],
-            }
+            param_group_names[group_name] = {**group_entry, "params": []}
+            param_groups[group_name] = group_entry
 
         param_group_names[group_name]["params"].append(n)
         param_groups[group_name]["params"].append(p)

@@ -58,24 +58,24 @@ class ResultManager:
             else:
                 raise KeyError(f"Attribute `{attr_name}` not found in HDF5 file.")
 
-    def write_df(
-        self,
-        df: pl.DataFrame,
-        key: str,
-        complib: str = "blosc:zstd",
-        complevel: int = 4,
-    ) -> None:
-        df.to_pandas().to_hdf(
-            self.hdf_file_path,
-            key=key,
-            mode="a",
-            format="fixed",
-            complib=complib,
-            complevel=complevel,
-        )
+    # def write_df(
+    #     self,
+    #     df: pl.DataFrame,
+    #     key: str,
+    #     complib: str = "blosc:zstd",
+    #     complevel: int = 4,
+    # ) -> None:
+    #     df.to_pandas().to_hdf(
+    #         self.hdf_file_path,
+    #         key=key,
+    #         mode="a",
+    #         format="fixed",
+    #         complib=complib,
+    #         complevel=complevel,
+    #     )
 
-    def read_df(self, key: str) -> pl.DataFrame:
-        return pl.from_pandas(pd.read_hdf(self.hdf_file_path, key=key))
+    # def read_df(self, key: str) -> pl.DataFrame:
+    #     return pl.from_pandas(pd.read_hdf(self.hdf_file_path, key=key))
 
     def read_dict(self, group_key: str, data_keys: List[str]) -> Dict[str, np.ndarray]:
         """
@@ -160,12 +160,18 @@ class ResultManager:
         n_additions = data.shape[0]
 
         if dataset_name not in hdf:
+            chunk_shape = (chunk_row_size, *data.shape[1:])
+            # Disable compression for pathological tiny-chunk 1D case
+            use_compression = compression
+            if data.ndim == 1 and chunk_row_size == 1:
+                use_compression = None  # disables compression in h5py
+
             # Create new dataset with unlimited first dimension
             hdf.create_dataset(
                 dataset_name,
                 data=data,
-                compression=compression,
-                chunks=(chunk_row_size, *data.shape[1:]),
+                compression=use_compression,
+                chunks=chunk_shape,
                 maxshape=(None, *data.shape[1:]),
             )
             n_samples = n_additions
@@ -243,12 +249,3 @@ class ResultManager:
         # }
 
         return counts
-
-
-def test():
-
-    result_mgr = ResultManager("test_run", Path(r"D:\benchmark\DIA\2022-HGSOC\delpi"))
-
-    result_mgr.write_df(df, key="meta_df")
-
-    meta_df = result_mgr.read_df(key="meta_df")

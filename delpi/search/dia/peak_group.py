@@ -243,7 +243,7 @@ def find_peak_groups(
     ms2_mass_tol: float = 10,
     rt_window_radius: int = 4,
     min_xic_peak_count: int = 3,
-    min_peak_count: int = 16,
+    min_peak_count: int = 12,
     topk: int = 10,
 ) -> Tuple[PeakGroupContainer, PeakIndexContainer]:
 
