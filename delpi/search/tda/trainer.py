@@ -16,6 +16,10 @@ from delpi.search.tda.classfier import TargetDecoyClassifier
 from delpi.utils.down_sampler import DownsampleSampler
 from delpi.search.tda.dataset import PMSMDataset
 
+from delpi.interfaces import BaseProgressReporter
+
+from lightning.pytorch.callbacks import Callback
+
 
 # Default training parameters
 DEFAULT_TRAINING_PARAMS = {
@@ -56,6 +60,7 @@ class TargetDecoyTrainer:
         test_dataset: Union[PMSMDataset, TensorDataset],
         output_dir: Path,
         device: torch.device,
+        progress_reporter: BaseProgressReporter = None,
     ) -> np.ndarray:
         """
         Train a target-decoy classifier and score the test dataset.
@@ -108,6 +113,20 @@ class TargetDecoyTrainer:
         # Setup callbacks
         callbacks = self._setup_callbacks()
         logger = CSVLogger(save_dir=output_dir, version=model_version)
+
+        # =========================================================
+        #  [MODIFIED] Add Custom Callback for GUI progress reporting
+        # =========================================================
+        if progress_reporter is not None:
+            class LightningProgressBridge(Callback):
+                def on_train_epoch_end(self, pl_trainer, pl_module):
+                    progress_reporter.update(
+                        current=pl_trainer.current_epoch + 1,
+                        total=pl_trainer.max_epochs,
+                        msg=f"Global TDA Training: Epoch {pl_trainer.current_epoch + 1}/{pl_trainer.max_epochs}"
+                    )
+            
+            callbacks.append(LightningProgressBridge())
 
         # Train model
         trainer = Trainer(

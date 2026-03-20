@@ -14,6 +14,9 @@ from delpi.search.tl.dataset import TransferLearningDataset
 from delpi.search.result_aggregator import ResultsAggregator
 from delpi import MODEL_DIR
 
+from delpi.interfaces import BaseProgressReporter
+
+from lightning.pytorch.callbacks import Callback
 
 # Default training parameters
 DEFAULT_TRAINING_PARAMS = {
@@ -39,6 +42,7 @@ class TransferLearningTrainer:
         output_dir: Path,
         result_aggregator: ResultsAggregator,
         device: torch.device,
+        progress_reporter: BaseProgressReporter = None, # [MODIFIED] Added parameter
     ) -> np.ndarray:
 
         torch.set_float32_matmul_precision("medium")
@@ -103,6 +107,20 @@ class TransferLearningTrainer:
         )
         # Setup callbacks
         callbacks = self._setup_callbacks()
+
+        # [MODIFIED] Create a custom PyTorch Lightning callback to bridge progress
+        if progress_reporter is not None:
+            class LightningProgressBridge(Callback):
+                def on_train_epoch_end(self, trainer, pl_module):
+                    # Report the current epoch progress to the GUI
+                    progress_reporter.update(
+                        current=trainer.current_epoch + 1,
+                        total=trainer.max_epochs,
+                        msg=f"Training MS2 Predictor: Epoch {trainer.current_epoch + 1}/{trainer.max_epochs}"
+                    )
+            
+            # Append our custom callback to the list of callbacks
+            callbacks.append(LightningProgressBridge())
 
         # Setup trainer
         trainer = Trainer(

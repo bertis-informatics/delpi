@@ -37,6 +37,7 @@ from delpi.utils.mp import get_multiprocessing_context
 from delpi.database.utils import get_modified_sequence
 from delpi.constants import DEFAULT_Q_VALUE_CUTOFF
 
+from delpi.interfaces import BaseProgressReporter
 
 SUPPORTED_DEVICES = ["cuda"]
 
@@ -57,7 +58,10 @@ class SearchManager:
     'acquisition_method' configuration parameter.
     """
 
-    def __init__(self, search_config: SearchConfig, specified_device: str = "auto"):
+    def __init__(self, 
+                 search_config: SearchConfig, 
+                 specified_device: str = "auto",
+                 progress_reporter: BaseProgressReporter = None):
         """
         Initialize the search coordinator.
 
@@ -68,6 +72,8 @@ class SearchManager:
         self._validated_device: torch.device = None
         self.state: SearchState = SearchState.INIT
         self.check_device(specified_device)
+
+        self.progress_reporter = progress_reporter
 
     @property
     def output_dir(self) -> Path:
@@ -215,6 +221,7 @@ class SearchManager:
             p = get_multiprocessing_context().Process(
                 target=engine.process_single_run,
                 args=(raw_path,),
+                kwargs={"progress_reporter": self.progress_reporter}
             )
             p.start()
             logger.debug(f"Start a child process (PID: {p.pid})")
@@ -246,6 +253,7 @@ class SearchManager:
             output_dir=output_dir,
             result_aggregator=result_aggregator,
             device=self.device,
+            progress_reporter=self.progress_reporter, # [MODIFIED] Added reporter
         )
         del rt_trainer
 
@@ -255,6 +263,7 @@ class SearchManager:
             output_dir=output_dir,
             result_aggregator=result_aggregator,
             device=self.device,
+            progress_reporter=self.progress_reporter, # [MODIFIED] Added reporter
         )
         del trainer
 
@@ -281,6 +290,7 @@ class SearchManager:
             max_fragment_mz=search_config["fragment"].get("max_mz", 1800),
             ms2_predictor=ms2_predictor,
             rt_predictor=rt_predictor,
+            progress_reporter=self.progress_reporter, # [MODIFIED] Added reporter
         )
 
         spec_generator.generate_spectral_lib(
@@ -365,6 +375,7 @@ class SearchManager:
             test_dataset=test_dataset,
             output_dir=search_config.output_dir,
             device=self.device,
+            progress_reporter=self.progress_reporter, # [MODIFIED] Added reporter
         )
 
         # Cleanup (make sure hdf files are closed)
@@ -528,25 +539,44 @@ class SearchManager:
             f"Search configuration:\n\n{yaml.dump(self.search_config.config, default_flow_style=False, indent=2)}"
         )
 
+        # [MODIFIED] Helper function to report overall workflow progress
+        total_stages = 6
+        current_stage = 0
+        def report_workflow_stage(stage_name: str):
+            nonlocal current_stage
+            current_stage += 1
+            if self.progress_reporter:
+                self.progress_reporter.update(current_stage, total_stages, f"Workflow: {stage_name}")
+
+        report_workflow_stage("Preparing Database")
         self.prepare_database()
 
         # First search
+        report_workflow_stage("First Search")
         self.execute_batch()
 
         # Transfer learning
+        report_workflow_stage("Transfer Learning")
         self.perform_transfer_learning()
 
         # Second search
+        report_workflow_stage("Second Search")
         self.execute_batch()
 
         # FDR control and quantification
+        report_workflow_stage("Global Target-Decoy Analysis")
         pmsm_df = self.perform_global_tda()
 
         # Quantification
+        report_workflow_stage("Cross-run Quantification")
         pmsm_df, pg_quant_df = self.perform_quantification(pmsm_df)
 
         # Save final results
         self.save_pmsm_df(pmsm_df, pg_quant_df)
+
+        # Final update
+        if self.progress_reporter:
+            self.progress_reporter.update(total_stages, total_stages, "Workflow Completed")
 
         logger.info("DelPi workflow completed successfully")
 

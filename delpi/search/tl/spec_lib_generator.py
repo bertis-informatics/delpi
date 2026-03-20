@@ -14,6 +14,8 @@ from delpi.database.spec_lib_generator import SpectralLibGenerator
 from delpi.database.precursor_generator import PrecursorGenerator
 from delpi.model.spec_lib.rt_predictor import RetentionTimePredictor
 
+from delpi.interfaces import BaseProgressReporter
+
 
 class RefinedSpectralLibGenerator(SpectralLibGenerator):
 
@@ -34,6 +36,7 @@ class RefinedSpectralLibGenerator(SpectralLibGenerator):
         suffix_ion_type=BaseIonType.Y,
         max_fragments=16,
         device: Union[str, torch.device] = "cuda:0",
+        progress_reporter: BaseProgressReporter = None,
         *args,
         **kwargs,
     ):
@@ -50,6 +53,8 @@ class RefinedSpectralLibGenerator(SpectralLibGenerator):
             *args,
             **kwargs,
         )
+
+        self.progress_reporter = progress_reporter
 
         self.peptide_df = None
         self.modification_df = None

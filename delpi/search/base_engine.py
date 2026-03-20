@@ -35,6 +35,7 @@ from delpi.utils.fdr import calculate_q_value
 from delpi.utils.log_config import configure_logging
 from delpi import MODEL_DIR
 
+from delpi.interfaces import BaseProgressReporter
 
 logger = logging.getLogger(__name__)
 
@@ -131,7 +132,7 @@ class BaseSearchEngine(ABC):
         elif self.device.type == "mps":
             torch.mps.empty_cache()
 
-    def process_single_run(self, raw_path: Path) -> None:
+    def process_single_run(self, raw_path: Path, progress_reporter: BaseProgressReporter = None) -> None:
 
         configure_logging(
             logfile_path=self.search_config.log_file_path, level=logging.INFO
@@ -139,6 +140,11 @@ class BaseSearchEngine(ABC):
 
         try:
             logger.info(f"Loading LC-MS data: {raw_path}")
+
+            # [MODIFIED] Report starting status
+            if progress_reporter:
+                progress_reporter.update(current=0, total=100, msg="Loading LC-MS data...")
+
             # Load raw data
             reader = ReaderFactory.get_reader(raw_path)
             lcms_data = reader.load()
@@ -149,14 +155,23 @@ class BaseSearchEngine(ABC):
 
             # Perform search (implemented by subclasses)
             logger.info(f"Start {self.get_acquisition_method()} search")
+            # [MODIFIED] Report search status
+            if progress_reporter:
+                progress_reporter.update(current=20, total=100, msg=f"Performing {self.get_acquisition_method()} search...")
             result_manager = self.perform_search(lcms_data)
 
             self.next_state()
             if self.state < SearchState.SECOND_SEARCH:
+                # [MODIFIED] Report TDA status
+                if progress_reporter:
+                    progress_reporter.update(current=60, total=100, msg="Performing Target-Decoy Analysis...")
                 pmsm_df = self.perform_tda(result_manager)
                 group_key = self.get_results_group_key()
                 result_manager.write_df(pmsm_df, key=f"{group_key}/pmsm_df")
                 self.next_state()
+                # [MODIFIED] Report TL preparation status
+                if progress_reporter:
+                    progress_reporter.update(current=80, total=100, msg="Preparing Transfer Learning data...")
                 tl_dataset = self.prepare_transfer_learning_data(
                     lcms_data,
                     pmsm_df.filter(pl.col("is_decoy") == False),
@@ -165,6 +180,10 @@ class BaseSearchEngine(ABC):
                 )
                 result_manager.write_tl_data(tl_dataset)
                 logger.info("Transfer learning data prepared")
+            
+            # [MODIFIED] Report completion
+            if progress_reporter:
+                progress_reporter.update(current=100, total=100, msg="Single run processing completed.")
 
         except Exception as e:
             logger.error(f"Search failed: {str(e)}")

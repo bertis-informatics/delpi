@@ -7,6 +7,8 @@ from delpi.search.config import SearchConfig
 from delpi.search.search_manager import SearchManager
 from delpi.utils.log_config import configure_logging
 
+from delpi.interfaces import BaseProgressReporter
+
 logger = logging.getLogger(__name__)
 
 
@@ -39,7 +41,12 @@ def parse_arguments():
     return parser.parse_args()
 
 
-def run_search(config_path: str, device: str = "cuda:0", log_level: str = "info"):
+def run_search(
+        config_path: str, 
+        device: str = "cuda:0", 
+        log_level: str = "info",
+        progress_reporter: BaseProgressReporter = None,
+    ):
     """
     Run DelPi search with given parameters.
 

@@ -46,7 +46,7 @@ dependencies = [
     "lxml",
     "isal",
     "tabulate",
-    "pymsio",
+    "pymsio>=0.1.13",
 ]
 
 [project.optional-dependencies]

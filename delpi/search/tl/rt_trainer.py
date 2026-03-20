@@ -15,6 +15,9 @@ from delpi.search.result_aggregator import ResultsAggregator
 from delpi.model.rt_calibrator import RetentionTimeCalibrator
 from delpi import MODEL_DIR
 
+from delpi.interfaces import BaseProgressReporter
+
+from lightning.pytorch.callbacks import Callback
 
 # Default training parameters
 DEFAULT_TRAINING_PARAMS = {
@@ -53,6 +56,7 @@ class TransferLearningTrainerForRT:
         output_dir: Path,
         result_aggregator: ResultsAggregator,
         device: torch.device,
+        progress_reporter: BaseProgressReporter = None,
     ) -> np.ndarray:
 
         torch.set_float32_matmul_precision("medium")
@@ -117,6 +121,20 @@ class TransferLearningTrainerForRT:
         )
         # Setup callbacks
         callbacks = self._setup_callbacks()
+
+        # =========================================================
+        #  [MODIFIED] Add a custom callback to forward progress updates to the GUI
+        # =========================================================
+        if progress_reporter is not None:
+            class LightningProgressBridge(Callback):
+                def on_train_epoch_end(self, pl_trainer, pl_module):
+                    progress_reporter.update(
+                        current=pl_trainer.current_epoch + 1,
+                        total=pl_trainer.max_epochs,
+                        msg=f"Training RT Predictor: Epoch {pl_trainer.current_epoch + 1}/{pl_trainer.max_epochs}"
+                    )
+            
+            callbacks.append(LightningProgressBridge())
 
         # Setup trainer
         trainer = Trainer(
