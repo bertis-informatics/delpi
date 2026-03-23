@@ -127,11 +127,14 @@ class SearchManager:
         """Prepare the peptide database if it doesn't exist."""
         self.state = SearchState.DB_PREP
         if not self.search_config.check_database_exists():
+            if self.search_config.get_param("fasta_file") is None:
+                raise ValueError("FASTA file is not specified in configuration")
+
             from delpi.search.database import build_database_in_subprocess
 
             build_database_in_subprocess(self.search_config, self.device)
         else:
-            logger.info("Peptide database found (previously built)")
+            logger.info(f"Use existing peptide database: {self.search_config.db_dir}")
 
     def check_device(self, specified_device: str = "auto") -> None:
         """

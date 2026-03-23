@@ -21,6 +21,8 @@ ms2_mass_tol_in_ppm: 10
 
 q_value_cutoff: 0.01
 
+decoy_method: mutation
+
 digest:
   enzyme: trypsin
   min_len: 7
