@@ -37,8 +37,8 @@ from delpi.constants import DIA_MATCHED_PEAKS_CUTOFF
 
 logger = logging.getLogger(__name__)
 
-# LOGIT_CUTOFF = 1.0
-LOGIT_CUTOFF = -0.5
+LOGIT_CUTOFF = 1.0
+# LOGIT_CUTOFF = 0.0
 TOPK_PER_PRECURSOR = 10
 
 
@@ -123,49 +123,44 @@ class DIASearchEngine(BaseSearchEngine):
             ms1_scale_t = tensors[6]
 
             n = x_theo_t.shape[0]
-            X_theo = X_theo_tensor[:n].copy_(
-                x_theo_t.to(self.device, non_blocking=True)
-            )
-            X_exp = X_exp_tensor[:n, : x_exp_t.shape[1], :].copy_(
-                x_exp_t.to(self.device, non_blocking=True)
-            )
+            X_theo = X_theo_tensor[:n]
+            X_theo.copy_(x_theo_t, non_blocking=True)
+            X_exp = X_exp_tensor[:n, : x_exp_t.shape[1], :]
+            X_exp.copy_(x_exp_t, non_blocking=True)
 
             logits, x_feature = model(X_theo, X_exp, return_feature=True)
 
             logits = logits.flatten()
             mask = logits > logit_cutoff
 
+            if not mask.any():
+                continue
+
             x_feature = x_feature[mask].detach().cpu().numpy()
             logits = logits[mask].detach().cpu().numpy()
             mask = mask.detach().cpu().numpy()
 
-            x_exp = x_exp_t.numpy()
-            x_ind = x_ind_t.numpy()
-            x_quant = x_quant_t.numpy()
-            ms1_scale_arr = ms1_scale_t.numpy()
-
             precursor_index_arr = precursor_index_arr[mask]
             frame_num_arr = frame_num_arr[mask]
             frame_index_arr = dia_win.frame_num_to_index[frame_num_arr]
-            x_ind = x_ind[mask]
-            x_quant = x_quant[mask]
-            ms1_area_arr = get_ms1_area(x_exp[mask], ms1_scale_arr[mask])
+            x_ind = x_ind_t.numpy()[mask]
 
             observed_rt = frame_num_map.ms2_rt_arr[
                 frame_num_map.frame_num_to_index_arr[frame_num_arr]
             ]
 
-            if precursor_index_arr.shape[0] > 0:
-                results["precursor_index"].append(precursor_index_arr)
-                results["frame_num"].append(frame_num_arr)
-                results["frame_index"].append(frame_index_arr)
-                results["logit"].append(logits)
-                results["features"].append(x_feature)
-                results["observed_rt"].append(observed_rt)
-                results["peak_indices"].append(x_ind)
-                if save_quant:
-                    results["ms1_area"].append(ms1_area_arr)
-                    results["xic_array"].append(x_quant)
+            results["precursor_index"].append(precursor_index_arr)
+            results["frame_num"].append(frame_num_arr)
+            results["frame_index"].append(frame_index_arr)
+            results["logit"].append(logits)
+            results["features"].append(x_feature)
+            results["observed_rt"].append(observed_rt)
+            results["peak_indices"].append(x_ind)
+            if save_quant:
+                x_exp = x_exp_t.numpy()[mask]
+                ms1_scale_arr = ms1_scale_t.numpy()[mask]
+                results["ms1_area"].append(get_ms1_area(x_exp, ms1_scale_arr))
+                results["xic_array"].append(x_quant_t.numpy()[mask])
 
         results = {k: np.concatenate(v) for k, v in results.items()}
         if len(results) > 0:

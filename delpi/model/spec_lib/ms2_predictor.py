@@ -158,40 +158,31 @@ class Ms2SpectrumPredictor(LightningModule):
 
         return y_pred
 
-    def predict_batch_arr(self, batch: Dict[str, torch.Tensor]) -> np.ndarray:
-        """_summary_
+    # def predict_batch(self, batch: Dict[str, torch.Tensor]) -> np.ndarray:
+    #     """_summary_
 
-        Returns:
-            pl.DataFrame: _description_
-            ┌──────────┬──────────┬──────────┬──────────┬─────────────────┬────────────────┐
-            │ b_z1     ┆ y_z1     ┆ b_z2     ┆ y_z2     ┆ precursor_index ┆ cleavage_index │
-            │ ---      ┆ ---      ┆ ---      ┆ ---      ┆ ---             ┆ ---            │
-            │ f32      ┆ f32      ┆ f32      ┆ f32      ┆ i64             ┆ u8             │
-            ╞══════════╪══════════╪══════════╪══════════╪═════════════════╪════════════════╡
-            │ 0.0      ┆ 0.0      ┆ 0.0      ┆ 0.0      ┆ 7               ┆ 0              │
-            │ 0.331823 ┆ 0.0      ┆ 0.0      ┆ 0.024395 ┆ 7               ┆ 1              │
-            │ …        ┆ …        ┆ …        ┆ …        ┆ …               ┆ …              │
-            │ 0.016013 ┆ 0.0      ┆ 0.0      ┆ 0.0      ┆ 1761            ┆ 10             │
-            └──────────┴──────────┴──────────┴──────────┴─────────────────┴────────────────┘
-        """
-        precursor_index_arr = batch["precursor_index"].to(torch.uint32).numpy()
-        x_aa = batch["x_aa"].to(device=self.device)
-        x_mod = batch["x_mod"].to(device=self.device)
-        x_meta = batch["x_meta"].to(device=self.device)
+    #     Returns:
+    #         pl.DataFrame: _description_
+    #         ┌──────────┬──────────┬──────────┬──────────┬─────────────────┬────────────────┐
+    #         │ b_z1     ┆ y_z1     ┆ b_z2     ┆ y_z2     ┆ precursor_index ┆ cleavage_index │
+    #         │ ---      ┆ ---      ┆ ---      ┆ ---      ┆ ---             ┆ ---            │
+    #         │ f32      ┆ f32      ┆ f32      ┆ f32      ┆ i64             ┆ u8             │
+    #         ╞══════════╪══════════╪══════════╪══════════╪═════════════════╪════════════════╡
+    #         │ 0.0      ┆ 0.0      ┆ 0.0      ┆ 0.0      ┆ 7               ┆ 0              │
+    #         │ 0.331823 ┆ 0.0      ┆ 0.0      ┆ 0.024395 ┆ 7               ┆ 1              │
+    #         │ …        ┆ …        ┆ …        ┆ …        ┆ …               ┆ …              │
+    #         │ 0.016013 ┆ 0.0      ┆ 0.0      ┆ 0.0      ┆ 1761            ┆ 10             │
+    #         └──────────┴──────────┴──────────┴──────────┴─────────────────┴────────────────┘
+    #     """
+    #     precursor_index_arr = batch["precursor_index"].to(torch.uint32).numpy()
+    #     x_aa = batch["x_aa"].to(device=self.device, non_blocking=True)
+    #     x_mod = batch["x_mod"].to(device=self.device, non_blocking=True)
+    #     x_meta = batch["x_meta"].to(device=self.device, non_blocking=True)
+    #     y_pred = self(x_aa, x_mod, x_meta)
 
-        y_pred = self(x_aa, x_mod, x_meta)
+    #     y_pred = y_pred.detach().cpu().numpy()
 
-        # if include_modloss:
-        #     ion_type_count = 8
-        # else:
-        #     ion_type_count = 4
-        #     y_pred = y_pred[..., :ion_type_count]
-        # scale = torch.amax(y_pred, dim=(1, 2), keepdim=True)
-        # y_pred = y_pred / (scale + EPS)
-
-        y_pred = y_pred.detach().cpu().numpy()
-
-        return precursor_index_arr, y_pred
+    #     return precursor_index_arr, y_pred
 
     def predict_batch(
         self, batch: Dict[str, torch.Tensor], include_modloss: bool = False

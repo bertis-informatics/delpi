@@ -56,3 +56,47 @@ def prefetch_batches(batch_iter, prefetch_count=2):
     thread.join()
     if error_box:
         raise error_box[0]
+
+
+def prefetch_dataloader(dataloader, prefetch_count=2):
+    """
+    Prefetch batches from a :class:`~torch.utils.data.DataLoader` on a
+    background thread while the main thread runs GPU inference.
+
+    The producer thread calls ``next(dataloader)`` and pins every tensor
+    in the resulting dict so that subsequent ``.to(device, non_blocking=True)``
+    calls use fast DMA transfers.
+
+    Args:
+        dataloader: A PyTorch DataLoader yielding ``dict[str, Tensor | Any]``.
+        prefetch_count: How many batches to buffer ahead (default 2).
+    """
+    q: Queue = Queue(maxsize=prefetch_count)
+    sentinel = object()
+    error_box: list = []
+
+    def _producer():
+        try:
+            for batch in dataloader:
+                pinned = {
+                    k: v.pin_memory() if isinstance(v, torch.Tensor) else v
+                    for k, v in batch.items()
+                }
+                q.put(pinned)
+        except Exception as e:
+            error_box.append(e)
+        finally:
+            q.put(sentinel)
+
+    thread = threading.Thread(target=_producer, daemon=True)
+    thread.start()
+
+    while True:
+        item = q.get()
+        if item is sentinel:
+            break
+        yield item
+
+    thread.join()
+    if error_box:
+        raise error_box[0]

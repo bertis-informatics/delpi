@@ -15,6 +15,7 @@ from delpi.model.spec_lib.dataset import PeptideDataset
 from delpi.utils.batch_sampler import SeqDataBatchSampler
 from delpi.database.numba.prefix_mass_array import PrefixMassArrayContainer
 from delpi.database.numba.spec_lib_utils import update_speclib_arr
+from delpi.utils.prefetch import prefetch_dataloader
 from delpi import MODEL_DIR
 
 
@@ -111,6 +112,21 @@ class SpectralLibGenerator:
             dataset=precursor_ds, batch_sampler=batch_sampler, num_workers=0
         )
 
+        # Pre-allocate GPU buffers for zero-allocation H2D transfer
+        max_token_len = peptide_df["sequence_length"].max() + 3
+        mod_feat_dim = self.ms2_predictor.mod_embedding.in_features
+        X_aa_buf = torch.empty(
+            (batch_size, max_token_len), dtype=torch.long, device=self.device
+        )
+        X_mod_buf = torch.empty(
+            (batch_size, max_token_len, mod_feat_dim),
+            dtype=torch.float32,
+            device=self.device,
+        )
+        X_meta_buf = torch.empty(
+            (batch_size, 4), dtype=torch.float32, device=self.device
+        )
+
         ion_type_container = self.fragmentation.get_ion_types()
         peptidoform_index_arr = precursor_df["peptidoform_index"].to_numpy()
         max_fragments = self.max_fragments
@@ -125,12 +141,29 @@ class SpectralLibGenerator:
         out_rank_arr = np.empty(speclib_row_count, dtype=np.uint8)
 
         with torch.inference_mode():
-            for batch_idx, batch in tqdm(
-                enumerate(dl), total=total, desc="Predicting MS2 spectra", leave=True
+            for batch in tqdm(
+                prefetch_dataloader(dl),
+                total=total,
+                desc="Predicting MS2 spectra",
+                leave=True,
             ):
-                batch_precursor_index_arr, batch_intensity_arr = (
-                    self.ms2_predictor.predict_batch_arr(batch)
+                batch_precursor_index_arr = (
+                    batch["precursor_index"].to(torch.uint32).numpy()
                 )
+                x_aa_t = batch["x_aa"]
+                x_mod_t = batch["x_mod"]
+                x_meta_t = batch["x_meta"]
+
+                n, L = x_aa_t.shape
+                X_aa_buf[:n, :L].copy_(x_aa_t, non_blocking=True)
+                X_mod_buf[:n, :L, :].copy_(x_mod_t, non_blocking=True)
+                X_meta_buf[:n].copy_(x_meta_t, non_blocking=True)
+
+                y_pred = self.ms2_predictor(
+                    X_aa_buf[:n, :L], X_mod_buf[:n, :L, :], X_meta_buf[:n]
+                )
+                batch_intensity_arr = y_pred.detach().cpu().numpy()
+
                 update_speclib_arr(
                     out_precursor_index_arr,
                     out_clevage_index_arr,
@@ -183,15 +216,51 @@ class SpectralLibGenerator:
             dataset=precursor_ds, batch_sampler=batch_sampler, num_workers=0
         )
 
-        dfs = list()
-        with torch.inference_mode():
-            for batch_idx, batch in tqdm(
-                enumerate(dl), total=total, desc="Predicting RT", leave=True
-            ):
-                batch_rt_df = self.rt_predictor.predict_batch(batch)
-                dfs.append(batch_rt_df)
+        # Pre-allocate GPU buffers for zero-allocation H2D transfer
+        max_token_len = peptide_df["sequence_length"].max() + 3
+        mod_feat_dim = self.rt_predictor.mod_embedding.in_features
+        X_aa_buf = torch.empty(
+            (batch_size, max_token_len), dtype=torch.long, device=self.device
+        )
+        X_mod_buf = torch.empty(
+            (batch_size, max_token_len, mod_feat_dim),
+            dtype=torch.float32,
+            device=self.device,
+        )
 
-        return pl.concat(dfs, how="vertical")
+        # Pre-allocate output arrays
+        out_peptidoform_index = np.empty(modification_df.shape[0], dtype=np.uint32)
+        out_ref_rt = np.empty(modification_df.shape[0], dtype=np.float32)
+        offset = 0
+
+        with torch.inference_mode():
+            for batch in tqdm(
+                prefetch_dataloader(dl), total=total, desc="Predicting RT", leave=True
+            ):
+                peptidoform_index_arr = (
+                    batch["peptidoform_index"].to(torch.uint32).numpy()
+                )
+                x_aa_t = batch["x_aa"]
+                x_mod_t = batch["x_mod"]
+
+                n, L = x_aa_t.shape
+                X_aa_buf[:n, :L].copy_(x_aa_t, non_blocking=True)
+                X_mod_buf[:n, :L, :].copy_(x_mod_t, non_blocking=True)
+
+                y_pred = self.rt_predictor(X_aa_buf[:n, :L], X_mod_buf[:n, :L, :])
+
+                out_peptidoform_index[offset : offset + n] = peptidoform_index_arr
+                out_ref_rt[offset : offset + n] = (
+                    y_pred.flatten().detach().cpu().numpy()
+                )
+                offset += n
+
+        return pl.DataFrame(
+            {
+                "peptidoform_index": out_peptidoform_index[:offset],
+                "ref_rt": out_ref_rt[:offset],
+            }
+        )
 
     def generate_spectral_lib(
         self,

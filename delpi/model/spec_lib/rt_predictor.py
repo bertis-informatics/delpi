@@ -137,19 +137,19 @@ class RetentionTimePredictor(LightningModule):
 
         return y_pred
 
-    def predict_batch(self, batch: Dict[str, torch.Tensor]) -> pl.DataFrame:
+    # def predict_batch(self, batch: Dict[str, torch.Tensor]) -> pl.DataFrame:
 
-        peptidoform_index_arr = batch["peptidoform_index"].to(torch.uint32).numpy()
-        x_aa = batch["x_aa"].to(device=self.device)
-        x_mod = batch["x_mod"].to(device=self.device)
-        y_pred = self(x_aa, x_mod)
+    #     peptidoform_index_arr = batch["peptidoform_index"].to(torch.uint32).numpy()
+    #     x_aa = batch["x_aa"].to(device=self.device, non_blocking=True)
+    #     x_mod = batch["x_mod"].to(device=self.device, non_blocking=True)
+    #     y_pred = self(x_aa, x_mod)
 
-        return pl.DataFrame(
-            {
-                "peptidoform_index": peptidoform_index_arr,
-                "ref_rt": y_pred.flatten().detach().cpu().numpy(),
-            }
-        )
+    #     return pl.DataFrame(
+    #         {
+    #             "peptidoform_index": peptidoform_index_arr,
+    #             "ref_rt": y_pred.flatten().detach().cpu().numpy(),
+    #         }
+    #     )
 
     def _compute_loss(self, x_aa, x_mod, y_true):
 
