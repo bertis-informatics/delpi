@@ -33,6 +33,9 @@ from delpi.search.tl.data_prep import (
 from delpi.search.search_state import SearchState
 from delpi.utils.fdr import calculate_q_value
 from delpi.utils.log_config import configure_logging
+from delpi.search.progress.tracker import ProgressTracker
+from delpi.search.progress.tqdm_tracker import TqdmProgressTracker
+from delpi.search.progress.callback_tracker import CallbackProgressTracker
 from delpi import MODEL_DIR
 
 
@@ -99,7 +102,9 @@ class BaseSearchEngine(ABC):
         pass
 
     @abstractmethod
-    def perform_search(self, lcms_data: MassSpecData) -> ResultManager:
+    def perform_search(
+        self, lcms_data: MassSpecData, progress: ProgressTracker = None
+    ) -> ResultManager:
         """
         Perform the core search logic for a single LC-MS/MS run.
 
@@ -107,8 +112,8 @@ class BaseSearchEngine(ABC):
         and must be implemented by subclasses (DDA/DIA engines).
 
         Args:
-            search_config: Search configuration
             lcms_data: LC-MS/MS data
+            progress: Progress tracker for reporting status
 
         Returns:
             ResultManager with search results
@@ -131,32 +136,71 @@ class BaseSearchEngine(ABC):
         elif self.device.type == "mps":
             torch.mps.empty_cache()
 
-    def process_single_run(self, raw_path: Path) -> None:
+    def process_single_run(
+        self,
+        raw_path: Path,
+        progress_queue=None,
+    ) -> None:
+        """Run the full search pipeline for a single raw file.
+
+        This method is designed to be called in a child process spawned by
+        :meth:`SearchManager.execute_batch`.
+
+        Parameters
+        ----------
+        raw_path : Path
+            Path to the raw LC-MS/MS file.
+        progress_queue : multiprocessing.Queue, optional
+            When provided, a :class:`CallbackProgressTracker` is created
+            that puts :class:`ProgressSnapshot` objects onto the queue so
+            the parent process can forward them.  A ``None`` sentinel is
+            put on the queue when this method finishes (success or error).
+            When *not* provided, a :class:`TqdmProgressTracker` is used
+            for CLI output.
+        """
 
         configure_logging(
             logfile_path=self.search_config.log_file_path, level=logging.INFO
         )
 
+        if progress_queue is not None:
+            progress = CallbackProgressTracker(
+                total=100,
+                description="Overall",
+                callback=lambda snap: progress_queue.put(snap),
+            )
+        else:
+            progress = TqdmProgressTracker(total=100, description="Overall")
+
         try:
             logger.info(f"Loading LC-MS data: {raw_path}")
-            # Load raw data
+            # Load raw data (5% of overall)
+            load_progress = progress.create_child("Loading", total=1, portion=5)
             reader = ReaderFactory.get_reader(raw_path)
             lcms_data = reader.load()
+            load_progress.complete()
             max_rt_time = lcms_data.meta_df.item(-1, "time_in_seconds")
             logger.info(
                 f"Loaded {lcms_data.meta_df.shape[0]} spectra. Max scan time: {max_rt_time/60:.1f} min"
             )
 
-            # Perform search (implemented by subclasses)
+            # Perform search (80% of overall)
             logger.info(f"Start {self.get_acquisition_method()} search")
-            result_manager = self.perform_search(lcms_data)
+            search_progress = progress.create_child("Search", total=100, portion=80)
+            result_manager = self.perform_search(lcms_data, progress=search_progress)
+            search_progress.complete()
 
             self.next_state()
             if self.state < SearchState.SECOND_SEARCH:
+                # TDA + TL data prep (15% of overall)
+                tda_progress = progress.create_child("TDA", total=1, portion=10)
                 pmsm_df = self.perform_tda(result_manager)
                 group_key = self.get_results_group_key()
                 result_manager.write_df(pmsm_df, key=f"{group_key}/pmsm_df")
+                tda_progress.complete()
+
                 self.next_state()
+                tl_progress = progress.create_child("TL-Prep", total=1, portion=5)
                 tl_dataset = self.prepare_transfer_learning_data(
                     lcms_data,
                     pmsm_df.filter(pl.col("is_decoy") == False),
@@ -164,11 +208,18 @@ class BaseSearchEngine(ABC):
                     is_phospho_search=self.search_config.is_phospho_search,
                 )
                 result_manager.write_tl_data(tl_dataset)
+                tl_progress.complete()
                 logger.info("Transfer learning data prepared")
+
+            progress.complete()
 
         except Exception as e:
             logger.error(f"Search failed: {str(e)}")
             raise RuntimeError(f"Search failed for {raw_path}") from e
+        finally:
+            progress.close()
+            if progress_queue is not None:
+                progress_queue.put(None)  # sentinel — tells parent we're done
 
     def perform_tda(self, result_manager: ResultManager) -> pl.DataFrame:
 

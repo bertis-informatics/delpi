@@ -1,13 +1,14 @@
 import gc
 from typing import Optional
 
-import tqdm
 import polars as pl
 
 from pymsio import MassSpecData
 from delpi.lcms.dia_window import DIAWindow
 from delpi.lcms.ms1_spectra import MS1Spectra
 from delpi.lcms.dia_scheme import determine_dia_scheme
+from delpi.search.progress.tracker import ProgressTracker
+from delpi.search.progress.dummy_tracker import DummyProgressTracker
 
 
 class DIARun:
@@ -40,7 +41,11 @@ class DIARun:
         min_iso_win_idx: Optional[int] = None,
         max_iso_win_idx: Optional[int] = None,
         free_ms_data: bool = False,
+        progress: ProgressTracker = None,
     ):
+
+        if progress is None:
+            progress = DummyProgressTracker()
 
         if min_iso_win_idx is None:
             min_iso_win_idx = self.dia_scheme_df.item(0, "isolation_win_idx")
@@ -49,19 +54,21 @@ class DIARun:
             max_iso_win_idx = self.dia_scheme_df.item(-1, "isolation_win_idx")
 
         pabar_total = max_iso_win_idx - min_iso_win_idx + 1 + 2
-        with tqdm.tqdm(total=pabar_total, desc="Data-Prep") as pbar:
+        sub = progress.create_child("Data-Prep", total=pabar_total, portion=1)
 
-            self.ms_data.compute_z_score()
-            pbar.update(1)
+        self.ms_data.compute_z_score()
+        sub.advance(1)
 
-            # create MS1Spectra
-            _ = self.get_ms1_map()
-            pbar.update(1)
+        # create MS1Spectra
+        _ = self.get_ms1_map()
+        sub.advance(1)
 
-            for isolation_win_idx in range(min_iso_win_idx, max_iso_win_idx + 1):
-                dia_window = self.get_dia_window(isolation_win_idx)
-                self.windows[isolation_win_idx] = dia_window
-                pbar.update(1)
+        for isolation_win_idx in range(min_iso_win_idx, max_iso_win_idx + 1):
+            dia_window = self.get_dia_window(isolation_win_idx)
+            self.windows[isolation_win_idx] = dia_window
+            sub.advance(1)
+
+        sub.complete()
 
         if free_ms_data:
             self.ms_data = None

@@ -9,6 +9,7 @@ import logging
 import time
 import yaml
 import psutil
+import queue
 from pathlib import Path
 
 import polars as pl
@@ -32,6 +33,7 @@ from delpi.search.tda.dataset import DatasetSplitter, PMSMDataset
 from delpi.search.tda.fdr_analyzer import FDRAnalyzer
 from delpi.search.tda.trainer import TargetDecoyTrainer
 from delpi.search.search_state import SearchState
+from delpi.search.progress import CallbackProgressTracker
 from delpi.search.dia.max_lfq import maxlfq
 from delpi.utils.mp import get_multiprocessing_context
 from delpi.database.utils import get_modified_sequence
@@ -57,15 +59,29 @@ class SearchManager:
     'acquisition_method' configuration parameter.
     """
 
-    def __init__(self, search_config: SearchConfig, specified_device: str = "auto"):
+    def __init__(
+        self,
+        search_config: SearchConfig,
+        specified_device: str = "auto",
+        progress: CallbackProgressTracker = None,
+    ):
         """
         Initialize the search coordinator.
 
         Args:
             search_config: Configuration object containing search parameters
+            specified_device: Device specification (e.g. 'cuda:0', 'auto')
+            progress: Optional CallbackProgressTracker.  When provided,
+                a ``multiprocessing.Queue`` bridge is used to forward
+                :class:`ProgressSnapshot` objects from the child process
+                to this tracker's callback.  ``process_single_run`` still
+                runs in a separate process for GPU-memory isolation.
+                When ``None`` (default), each child process shows a tqdm
+                progress bar.
         """
         self.search_config: SearchConfig = search_config
         self._validated_device: torch.device = None
+        self._progress: CallbackProgressTracker = progress
         self.state: SearchState = SearchState.INIT
         self.check_device(specified_device)
 
@@ -195,7 +211,14 @@ class SearchManager:
         self._validated_device = device
 
     def execute_batch(self) -> None:
-        """Execute workflow for all input files using separate processes."""
+        """Execute workflow for all input files using separate processes.
+
+        Each run is **always** executed in a child process for GPU-memory
+        isolation.  When a :class:`CallbackProgressTracker` was supplied at
+        construction time, a ``multiprocessing.Queue`` bridges progress
+        snapshots from the child back to the parent so that the user's
+        callback fires in-process.
+        """
 
         input_files = self.input_files
 
@@ -209,18 +232,28 @@ class SearchManager:
 
         # Create engine instance for process execution
         engine = self.get_engine()
+        mp_ctx = get_multiprocessing_context()
 
         for run_idx, raw_path in enumerate(input_files):
             run_name = MassSpecFileReader.extract_run_name(raw_path)
             st_t = time.perf_counter()
             logger.info(f"[{run_idx+1}/{len(input_files)}] Processing run: {run_name}")
 
-            p = get_multiprocessing_context().Process(
+            # Set up queue bridge when an external tracker is provided
+            progress_queue = mp_ctx.Queue() if self._progress is not None else None
+
+            p = mp_ctx.Process(
                 target=engine.process_single_run,
                 args=(raw_path,),
+                kwargs={"progress_queue": progress_queue} if progress_queue else {},
             )
             p.start()
             logger.debug(f"Start a child process (PID: {p.pid})")
+
+            if progress_queue is not None:
+                # Drain snapshots from the child and forward to the user's tracker
+                self._drain_progress_queue(progress_queue, p)
+
             p.join()
 
             if p.exitcode != 0:
@@ -231,6 +264,20 @@ class SearchManager:
             logger.info(
                 f"[{run_idx+1}/{len(input_files)}] Completed processing. Elapsed: {elapsed:.1f} s"
             )
+
+    def _drain_progress_queue(self, progress_queue, process) -> None:
+        """Read :class:`ProgressSnapshot` objects from *progress_queue* until
+        the child sends a ``None`` sentinel or the child process exits."""
+        while True:
+            try:
+                snapshot = progress_queue.get(timeout=1.0)
+            except queue.Empty:
+                if not process.is_alive():
+                    break
+                continue
+            if snapshot is None:
+                break
+            self._progress.forward_snapshot(snapshot)
 
     def perform_transfer_learning(self) -> None:
 
