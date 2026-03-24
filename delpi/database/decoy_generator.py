@@ -23,15 +23,15 @@ def get_shuffled_decoy(peptide):
 
 class DecoyGenerator:
 
+    supported_methods = ["pseudo_reverse", "mutation", "pseudo_shuffle", "diann"]
+
     def __init__(self, method: str = None, random_seed: int = 323):
 
-        assert method in [
-            "pseudo_reverse",
-            "pseudo_shuffle",
-            "diann",
-            None,
-        ], "`pseudo_reverse`, `pseudo_shuffle`, and `diann` methods are supported"
-
+        if method is not None and method not in self.supported_methods:
+            raise ValueError(
+                f"Unsupported decoy generation method: {method}. "
+                f"Supported methods: {self.supported_methods}"
+            )
         self.method = method
         self.random_seed = random_seed
 
@@ -51,7 +51,7 @@ class DecoyGenerator:
                 + pl.col("peptide").str.slice(pl.col("sequence_length"), 2)
             ).alias("peptide")
 
-        elif self.method == "diann":
+        elif self.method in ["diann", "mutation"]:
             get_decoy = (
                 pl.col("peptide").map_elements(
                     get_mutated_decoy, return_dtype=pl.String
