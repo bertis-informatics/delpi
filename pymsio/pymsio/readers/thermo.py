@@ -76,12 +76,11 @@ class ThermoRawReader(MassSpecFileReader):
         self,
         filepath: Union[str, Path],
         num_workers: int = 0,
-        show_progress: bool = False,
     ):
         if not LOADED_DLL:
             raise RuntimeError(f"Failed to load Thermo DLLs: {_DLL_LOAD_ERROR}")
 
-        super().__init__(filepath, num_workers, show_progress)
+        super().__init__(filepath, num_workers)
 
         self.filepath = str(filepath)
         self._raw = RawFileReaderAdapter.FileFactory(self.filepath)
@@ -97,6 +96,10 @@ class ThermoRawReader(MassSpecFileReader):
     @property
     def acquisition_date(self) -> str:
         return self._raw.CreationDate.ToString("o")
+
+    @property
+    def num_spectra(self):
+        return self.num_frames
 
     @property
     def num_frames(self) -> int:
@@ -204,14 +207,14 @@ class ThermoRawReader(MassSpecFileReader):
             for fn in self._progress(frame_nums, desc="load spectra")
         ]
 
-    def load(self) -> MassSpecData:
+    def load(self, progress=None) -> MassSpecData:
         scan_range = range(self.first_scan_number, self.last_scan_number + 1)
         need_meta = self._meta_df is None
 
         cols: Dict[str, list] = defaultdict(list) if need_meta else {}
         all_spectra: List[PeakArray] = []
 
-        for fn in self._progress(scan_range, desc="load spectra"):
+        for fn in self._progress(scan_range, progress=progress, desc="load spectra"):
             if need_meta:
                 self._read_scan_meta(fn, cols)
             all_spectra.append(self._read_peaks_arrays(fn))

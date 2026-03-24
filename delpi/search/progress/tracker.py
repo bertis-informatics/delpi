@@ -93,3 +93,9 @@ class ProgressTracker(ABC):
 
     def __exit__(self, *args) -> None:
         self.close()
+
+    # tqdm-compatible alias ---------------------------------------------------
+
+    def update(self, n: int = 1) -> None:
+        """Alias for :meth:`advance` (tqdm-compatible duck typing)."""
+        self.advance(n)

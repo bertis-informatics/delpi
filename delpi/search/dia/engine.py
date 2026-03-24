@@ -285,13 +285,13 @@ class DIASearchEngine(BaseSearchEngine):
         )
 
         # Data preparation (15% of overall)
-        prep_progress = progress.create_child("Data-Prep", total=1, portion=15)
+        prep_progress = progress.create_child("Data-Prep", total=1, portion=5)
         run.load_windows(free_ms_data=False, progress=prep_progress)
         prep_progress.complete()
         logger.info("DIA data prepared")
 
         # RT calibration with quick search or previous search results
-        rt_cal_progress = progress.create_child("RT-Calibration", total=1, portion=5)
+        rt_cal_progress = progress.create_child("RT-Calibration", total=1, portion=1)
         rt_calibrator = self._perform_rt_calibration(run, before_full_search=True)
         rt_cal_progress.complete()
 
@@ -305,7 +305,7 @@ class DIASearchEngine(BaseSearchEngine):
             logit_cutoff = LOGIT_CUTOFF - 2.0
             save_quant = True
 
-        search_progress = progress.create_child("Search", total=num_wins, portion=70)
+        search_progress = progress.create_child("Search", total=num_wins, portion=93)
         result_manager = self._perform_full_search(
             run,
             rt_calibrator,
@@ -319,7 +319,7 @@ class DIASearchEngine(BaseSearchEngine):
         logger.info(f"Search completed. Elapsed: {elapsed:.1f} s")
 
         # Post-search RT calibration (10% of overall)
-        rt_cal2_progress = progress.create_child("RT-Refit", total=1, portion=10)
+        rt_cal2_progress = progress.create_child("RT-Refit", total=1, portion=1)
         rt_calibrator = self._perform_rt_calibration(run, before_full_search=False)
         rt_cal2_progress.complete()
 

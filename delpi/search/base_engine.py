@@ -159,8 +159,11 @@ class BaseSearchEngine(ABC):
             for CLI output.
         """
 
+        use_tqdm = progress_queue is None
         configure_logging(
-            logfile_path=self.search_config.log_file_path, level=logging.INFO
+            logfile_path=self.search_config.log_file_path,
+            level=logging.INFO,
+            use_tqdm=use_tqdm,
         )
 
         if progress_queue is not None:
@@ -175,9 +178,18 @@ class BaseSearchEngine(ABC):
         try:
             logger.info(f"Loading LC-MS data: {raw_path}")
             # Load raw data (5% of overall)
-            load_progress = progress.create_child("Loading", total=1, portion=5)
             reader = ReaderFactory.get_reader(raw_path)
-            lcms_data = reader.load()
+            num_scans = reader.num_spectra
+            if num_scans is not None:
+                load_progress = progress.create_child(
+                    "Loading spectra", total=num_scans, portion=5
+                )
+                lcms_data = reader.load(progress=load_progress)
+            else:
+                load_progress = progress.create_child(
+                    "Loading spectra", total=1, portion=5
+                )
+                lcms_data = reader.load()
             load_progress.complete()
             max_rt_time = lcms_data.meta_df.item(-1, "time_in_seconds")
             logger.info(
