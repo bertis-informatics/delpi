@@ -127,7 +127,7 @@ class DDASearchEngine(BaseSearchEngine):
 
         if progress is None:
             progress = DummyProgressTracker()
-        batch_progress = progress.create_child("PMSMs", total=total_batches, portion=1)
+        batch_progress = progress.create_child("PmSMs", total=total_batches, portion=1)
 
         results = defaultdict(list)
         for tensors in prefetch_batches(batch_iter, prefetch_count=2):

@@ -40,8 +40,8 @@ from delpi.constants import DIA_MATCHED_PEAKS_CUTOFF
 
 logger = logging.getLogger(__name__)
 
-LOGIT_CUTOFF = 1.0
-# LOGIT_CUTOFF = 0.0
+# LOGIT_CUTOFF = 1.0
+LOGIT_CUTOFF = 0.0
 TOPK_PER_PRECURSOR = 10
 
 
@@ -115,13 +115,10 @@ class DIASearchEngine(BaseSearchEngine):
 
         if progress is None:
             progress = DummyProgressTracker()
-        batch_progress = progress.create_child("PMSMs", total=total_batches, portion=1)
+        batch_progress = progress.create_child("PmSMs", total=total_batches, portion=1)
 
         results = defaultdict(list)
-        prefetched_iter = prefetch_batches(batch_iter, prefetch_count=2)
-        for tensors in tqdm(
-            prefetched_iter, total=total_batches, position=1, desc="PmSMs", leave=False
-        ):
+        for tensors in prefetch_batches(batch_iter, prefetch_count=2):
             precursor_index_arr = tensors[0].numpy()
             frame_num_arr = tensors[1].numpy()
             x_theo_t = tensors[2]
