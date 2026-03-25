@@ -138,34 +138,32 @@ class DIASearchEngine(BaseSearchEngine):
             logits = logits.flatten()
             mask = logits > logit_cutoff
 
-            if not mask.any():
-                continue
+            if mask.any():
+                x_feature = x_feature[mask].detach().cpu().numpy()
+                logits = logits[mask].detach().cpu().numpy()
+                mask = mask.detach().cpu().numpy()
 
-            x_feature = x_feature[mask].detach().cpu().numpy()
-            logits = logits[mask].detach().cpu().numpy()
-            mask = mask.detach().cpu().numpy()
+                precursor_index_arr = precursor_index_arr[mask]
+                frame_num_arr = frame_num_arr[mask]
+                frame_index_arr = dia_win.frame_num_to_index[frame_num_arr]
+                x_ind = x_ind_t.numpy()[mask]
 
-            precursor_index_arr = precursor_index_arr[mask]
-            frame_num_arr = frame_num_arr[mask]
-            frame_index_arr = dia_win.frame_num_to_index[frame_num_arr]
-            x_ind = x_ind_t.numpy()[mask]
+                observed_rt = frame_num_map.ms2_rt_arr[
+                    frame_num_map.frame_num_to_index_arr[frame_num_arr]
+                ]
 
-            observed_rt = frame_num_map.ms2_rt_arr[
-                frame_num_map.frame_num_to_index_arr[frame_num_arr]
-            ]
-
-            results["precursor_index"].append(precursor_index_arr)
-            results["frame_num"].append(frame_num_arr)
-            results["frame_index"].append(frame_index_arr)
-            results["logit"].append(logits)
-            results["features"].append(x_feature)
-            results["observed_rt"].append(observed_rt)
-            results["peak_indices"].append(x_ind)
-            if save_quant:
-                x_exp = x_exp_t.numpy()[mask]
-                ms1_scale_arr = ms1_scale_t.numpy()[mask]
-                results["ms1_area"].append(get_ms1_area(x_exp, ms1_scale_arr))
-                results["xic_array"].append(x_quant_t.numpy()[mask])
+                results["precursor_index"].append(precursor_index_arr)
+                results["frame_num"].append(frame_num_arr)
+                results["frame_index"].append(frame_index_arr)
+                results["logit"].append(logits)
+                results["features"].append(x_feature)
+                results["observed_rt"].append(observed_rt)
+                results["peak_indices"].append(x_ind)
+                if save_quant:
+                    x_exp = x_exp_t.numpy()[mask]
+                    ms1_scale_arr = ms1_scale_t.numpy()[mask]
+                    results["ms1_area"].append(get_ms1_area(x_exp, ms1_scale_arr))
+                    results["xic_array"].append(x_quant_t.numpy()[mask])
 
             batch_progress.advance(1)
 

@@ -149,31 +149,30 @@ class DDASearchEngine(BaseSearchEngine):
             logits = logits.flatten()
             mask = logits > logit_cutoff
 
-            if not mask.any():
-                continue
+            if mask.any():
+                x_feature = x_feature[mask].detach().cpu().numpy()
+                logits = logits[mask].detach().cpu().numpy()
+                mask = mask.detach().cpu().numpy()
 
-            x_feature = x_feature[mask].detach().cpu().numpy()
-            logits = logits[mask].detach().cpu().numpy()
-            mask = mask.detach().cpu().numpy()
+                precursor_index_arr = precursor_index_arr[mask]
+                frame_num_arr = frame_num_arr[mask]
+                x_ind = x_ind_t.numpy()[mask]
 
-            precursor_index_arr = precursor_index_arr[mask]
-            frame_num_arr = frame_num_arr[mask]
-            x_ind = x_ind_t.numpy()[mask]
+                observed_rt = ms2_meta_df.rt_arr[
+                    ms2_meta_df.frame_num_to_index_arr[frame_num_arr]
+                ]
 
-            observed_rt = ms2_meta_df.rt_arr[
-                ms2_meta_df.frame_num_to_index_arr[frame_num_arr]
-            ]
+                results["precursor_index"].append(precursor_index_arr)
+                results["frame_num"].append(frame_num_arr)
+                results["logit"].append(logits)
+                results["features"].append(x_feature)
+                results["peak_indices"].append(x_ind)
+                results["observed_rt"].append(observed_rt)
+                if save_quant:
+                    x_exp = x_exp_t.numpy()[mask]
+                    ms1_scale_arr = ms1_scale_t.numpy()[mask]
+                    results["ms1_area"].append(get_ms1_area_dda(x_exp, ms1_scale_arr))
 
-            results["precursor_index"].append(precursor_index_arr)
-            results["frame_num"].append(frame_num_arr)
-            results["logit"].append(logits)
-            results["features"].append(x_feature)
-            results["peak_indices"].append(x_ind)
-            results["observed_rt"].append(observed_rt)
-            if save_quant:
-                x_exp = x_exp_t.numpy()[mask]
-                ms1_scale_arr = ms1_scale_t.numpy()[mask]
-                results["ms1_area"].append(get_ms1_area_dda(x_exp, ms1_scale_arr))
             batch_progress.advance(1)
 
         batch_progress.complete()
