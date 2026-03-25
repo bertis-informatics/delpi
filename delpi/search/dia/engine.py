@@ -12,9 +12,12 @@ import time
 import polars as pl
 import numpy as np
 import torch
+
 from tqdm import tqdm
 
 from pymsio import MassSpecData
+from delpi.search.progress.tracker import ProgressTracker
+from delpi.search.progress.dummy_tracker import DummyProgressTracker
 from delpi.lcms.dia_run import DIARun, DIAWindow
 from delpi.database.spec_lib_reader import SpectralLibReader
 from delpi.database.numba.spec_lib_container import SpectralLibContainer
@@ -75,6 +78,7 @@ class DIASearchEngine(BaseSearchEngine):
         peak_group_topk: int = 10,
         logit_cutoff: float = LOGIT_CUTOFF,
         save_quant: bool = False,
+        progress: ProgressTracker = None,
     ) -> Dict[str, np.ndarray]:
         """Search DIA spectra for a specific isolation window."""
         ms1_tol = search_config["ms1_mass_tol_in_ppm"]
@@ -108,6 +112,10 @@ class DIASearchEngine(BaseSearchEngine):
             ms1_mass_tol=ms1_tol,
             ms2_mass_tol=ms2_tol,
         )
+
+        if progress is None:
+            progress = DummyProgressTracker()
+        batch_progress = progress.create_child("PMSMs", total=total_batches, portion=1)
 
         results = defaultdict(list)
         prefetched_iter = prefetch_batches(batch_iter, prefetch_count=2)
@@ -162,6 +170,10 @@ class DIASearchEngine(BaseSearchEngine):
                 results["ms1_area"].append(get_ms1_area(x_exp, ms1_scale_arr))
                 results["xic_array"].append(x_quant_t.numpy()[mask])
 
+            batch_progress.advance(1)
+
+        batch_progress.complete()
+
         results = {k: np.concatenate(v) for k, v in results.items()}
         if len(results) > 0:
             results["search_group"] = np.full(
@@ -179,6 +191,7 @@ class DIASearchEngine(BaseSearchEngine):
         batch_size: int = 512,
         logit_cutoff: float = LOGIT_CUTOFF,
         save_quant: bool = False,
+        progress: ProgressTracker = None,
     ) -> ResultManager:
         """Perform the complete DIA search workflow."""
 
@@ -203,18 +216,21 @@ class DIASearchEngine(BaseSearchEngine):
             device=self.device,
         )
 
+        if progress is None:
+            progress = DummyProgressTracker()
+
         ctx = make_inference_contexts(self.device)
         with ctx.inference, ctx.amp, ctx.sdpa:
             cluster_count = 0
-            for win_idx, dia_win in tqdm(
-                run.windows.items(), position=0, desc="Isolation-Window", leave=True
-            ):
+            num_windows = len(run.windows)
+            for win_idx, dia_win in run.windows.items():
                 speclib_container = speclib_reader.read_by_mz_range(
                     *dia_win.isolation_mz_range
                 )
 
                 # no precursor candidates in this window
                 if speclib_container is None:
+                    progress.advance(1)
                     continue
 
                 results = self._search_spectra(
@@ -229,6 +245,7 @@ class DIASearchEngine(BaseSearchEngine):
                     peak_group_topk=TOPK_PER_PRECURSOR,
                     logit_cutoff=logit_cutoff,
                     save_quant=save_quant,
+                    progress=progress,
                 )
 
                 # Cluster matches sharing peaks
@@ -253,7 +270,9 @@ class DIASearchEngine(BaseSearchEngine):
 
         return result_manager
 
-    def perform_search(self, lcms_data: MassSpecData) -> ResultManager:
+    def perform_search(
+        self, lcms_data: MassSpecData, progress: ProgressTracker = None
+    ) -> ResultManager:
         """
         Perform the DIA search pipeline.
 
@@ -264,6 +283,9 @@ class DIASearchEngine(BaseSearchEngine):
         Returns:
             ResultManager with search results
         """
+        if progress is None:
+            progress = DummyProgressTracker()
+
         # Prepare DIA data and return DIARun object
         run = DIARun(lcms_data)
         num_wins = run.dia_scheme_df.shape[0]
@@ -274,13 +296,18 @@ class DIASearchEngine(BaseSearchEngine):
             f"Detected DIA scheme: {num_wins} isolation windows for {iso_min_mz:.2f} - {iso_max_mz:.2f} m/z"
         )
 
-        run.load_windows(free_ms_data=False)
+        # Data preparation (15% of overall)
+        prep_progress = progress.create_child("Data-Prep", total=1, portion=5)
+        run.load_windows(free_ms_data=False, progress=prep_progress)
+        prep_progress.complete()
         logger.info("DIA data prepared")
 
         # RT calibration with quick search or previous search results
+        rt_cal_progress = progress.create_child("RT-Calibration", total=1, portion=1)
         rt_calibrator = self._perform_rt_calibration(run, before_full_search=True)
+        rt_cal_progress.complete()
 
-        # Full search
+        # Full search (70% of overall)
         st_t = time.perf_counter()
         logger.info("Search started")
         if self.state < SearchState.SECOND_SEARCH:
@@ -291,18 +318,23 @@ class DIASearchEngine(BaseSearchEngine):
             logit_cutoff = LOGIT_CUTOFF - 1.0
             save_quant = True
 
+        search_progress = progress.create_child("Search", total=num_wins, portion=93)
         result_manager = self._perform_full_search(
             run,
             rt_calibrator,
             batch_size=512,
             logit_cutoff=logit_cutoff,
             save_quant=save_quant,
+            progress=search_progress,
         )
+        search_progress.complete()
         elapsed = time.perf_counter() - st_t
         logger.info(f"Search completed. Elapsed: {elapsed:.1f} s")
 
-        # Re-fit RT calibrator with full search results and save predicted RTs for re-scoring
+        # Post-search RT calibration (10% of overall)
+        rt_cal2_progress = progress.create_child("RT-Refit", total=1, portion=1)
         rt_calibrator = self._perform_rt_calibration(run, before_full_search=False)
+        rt_cal2_progress.complete()
 
         if self.state == SearchState.FIRST_SEARCH:
             # result_manager.write_df(

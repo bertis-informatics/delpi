@@ -39,7 +39,9 @@ def parse_arguments():
     return parser.parse_args()
 
 
-def run_search(config_path: str, device: str = "cuda:0", log_level: str = "info"):
+def run_search(
+    config_path: str, device: str = "cuda:0", log_level: str = "info", progress=None
+):
     """
     Run DelPi search with given parameters.
 
@@ -47,6 +49,10 @@ def run_search(config_path: str, device: str = "cuda:0", log_level: str = "info"
         config_path: Path to configuration YAML file
         device: Device to use for computation
         log_level: Logging level
+        progress: Optional ProgressTracker instance.  When provided the
+            engine runs in-process so that tracker callbacks (e.g. for a
+            GUI) fire normally.  When ``None`` (default) a tqdm progress
+            bar is shown in the terminal.
     """
 
     config_file = Path(config_path)
@@ -62,7 +68,9 @@ def run_search(config_path: str, device: str = "cuda:0", log_level: str = "info"
     configure_logging(logfile_path=search_config.log_file_path, level=log_level_num)
 
     # Run search
-    search_mgr = SearchManager(search_config, specified_device=device)
+    search_mgr = SearchManager(
+        search_config, specified_device=device, progress=progress
+    )
     search_mgr.execute_workflow()
 
 

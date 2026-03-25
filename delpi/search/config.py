@@ -4,6 +4,7 @@ from pathlib import Path
 from pymsio import MassSpecFileReader
 from delpi.chem.modification_param import ModificationParam
 from delpi.search.result_manager import ResultManager
+from delpi.database.decoy_generator import DecoyGenerator
 from delpi.utils.yaml_file import load_yaml, save_yaml
 
 SUPPORTED_FILE_TYPES = (".raw", ".mzml", ".mzml.gz", "h5")
@@ -117,12 +118,11 @@ class SearchConfig:
             )
 
         # Validate decoy method
-        decoy_method = self.get_param("decoy") or "pseudo_reverse"
-        supported_decoys = ["pseudo_reverse", "diann"]
-        if decoy_method not in supported_decoys:
+        decoy_method = self.get_param("decoy") or "mutation"
+        if decoy_method not in DecoyGenerator.supported_methods:
             raise ValueError(
                 f"Unsupported decoy method '{decoy_method}'. "
-                f"Supported methods: {supported_decoys}"
+                f"Supported methods: {DecoyGenerator.supported_methods}"
             )
 
         if len(self.input_files) < 1:
@@ -132,10 +132,6 @@ class SearchConfig:
         for input_file in self.input_files:
             if not input_file.exists():
                 raise FileNotFoundError(f"Input file not found: {input_file}")
-
-        # Validate fasta file exists
-        if not self.fasta_file.exists():
-            raise FileNotFoundError(f"FASTA file not found: {self.fasta_file}")
 
     def get_db_params(self) -> dict:
         """
@@ -153,6 +149,7 @@ class SearchConfig:
             "modification",
             "precursor",
             "fragment",
+            "decoy_method",
         ]
 
         for key in db_param_keys:
@@ -262,10 +259,19 @@ class SearchConfig:
         if not param_file.exists():
             return False
 
-        diff_keys = self.compare_with_saved_params(self.db_dir)
+        db_params = self.get_db_params()
+        if len(db_params) == 0:
+            return True
+            # warnings.warn(
+            #     f"Database files already exist, but parameters used for DB generation are different with current params: {diff_keys}. "
+            #     "These parameters will be ignored and the existing database will be used. "
+            # )
 
+        diff_keys = self.compare_with_saved_params(self.db_dir)
         if len(diff_keys) > 0:
+            # For now, we will not raise an error, just issue a warning. In the future, we may want to enforce this check more strictly.
             raise ValueError(
                 f"Database files already exist, but parameters used for DB generation are different with current params: {diff_keys}"
             )
+
         return True

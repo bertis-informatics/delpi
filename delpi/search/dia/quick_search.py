@@ -102,6 +102,9 @@ def run_quick_search(
         dia_win = run.get_dia_window(win_idx)
         speclib_container = spec_reader.read_by_mz_range(*dia_win.isolation_mz_range)
 
+        if speclib_container is None:
+            continue
+
         frame_num_map = dia_win.get_frame_num_map()
         ms2_peak_df = dia_win.get_peak_container()
 

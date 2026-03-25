@@ -39,8 +39,7 @@ def build_database(
         n_term_methionine_excision=search_config["digest"][
             "n_term_methionine_excision"
         ],
-        # decoy="pseudo_reverse",
-        decoy="diann",
+        decoy=search_config.config.get("decoy_method", "mutation"),
         mod_param_set=search_config["modification"]["mod_param_set"],
         max_mods=search_config["modification"]["max_mods"],
         min_precursor_charge=search_config["precursor"].get("min_charge", 2),

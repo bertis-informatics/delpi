@@ -10,7 +10,6 @@ from collections import defaultdict
 from typing import Dict
 
 import torch
-from tqdm import tqdm
 import numpy as np
 import polars as pl
 
@@ -33,6 +32,8 @@ from delpi.utils.device_ctx import make_inference_contexts
 from delpi.utils.prefetch import prefetch_batches
 from delpi.constants import ISOLATION_LOWER_TOL, ISOLATION_UPPER_TOL
 from delpi.model.input import THEORETICAL_PEAK, EXPERIMENTAL_PEAK
+from delpi.search.progress.tracker import ProgressTracker
+from delpi.search.progress.dummy_tracker import DummyProgressTracker
 
 
 logger = logging.getLogger(__name__)
@@ -84,6 +85,7 @@ class DDASearchEngine(BaseSearchEngine):
         peak_group_topk: int = 10,
         logit_cutoff: float = LOGIT_CUTOFF,
         save_quant: bool = False,
+        progress: ProgressTracker = None,
     ) -> Dict[str, np.ndarray]:
         """Search DDA spectra for a specific isolation window."""
 
@@ -123,15 +125,13 @@ class DDASearchEngine(BaseSearchEngine):
             batch_size=batch_size,
         )
 
+        if progress is None:
+            progress = DummyProgressTracker()
+        batch_progress = progress.create_child("PMSMs", total=total_batches, portion=1)
+
         results = defaultdict(list)
-        prefetched_iter = prefetch_batches(batch_iter, prefetch_count=2)
-        for tensors in tqdm(
-            prefetched_iter,
-            total=total_batches,
-            position=1,
-            desc="PmSM",
-            leave=False,
-        ):
+        for tensors in prefetch_batches(batch_iter, prefetch_count=2):
+
             precursor_index_arr = tensors[0].numpy()
             frame_num_arr = tensors[1].numpy()
             x_theo_t = tensors[2]
@@ -174,7 +174,9 @@ class DDASearchEngine(BaseSearchEngine):
                 x_exp = x_exp_t.numpy()[mask]
                 ms1_scale_arr = ms1_scale_t.numpy()[mask]
                 results["ms1_area"].append(get_ms1_area_dda(x_exp, ms1_scale_arr))
+            batch_progress.advance(1)
 
+        batch_progress.complete()
         results = {k: np.concatenate(v) for k, v in results.items()}
         if len(results) > 0:
             results["search_group"] = np.full(
@@ -191,6 +193,7 @@ class DDASearchEngine(BaseSearchEngine):
         batch_size: int = 512,
         logit_cutoff: float = LOGIT_CUTOFF,
         save_quant: bool = False,
+        progress: ProgressTracker = None,
     ) -> ResultManager:
         """Perform the complete DDA search workflow."""
 
@@ -225,12 +228,13 @@ class DDASearchEngine(BaseSearchEngine):
             device=self.device,
         )
 
+        if progress is None:
+            progress = DummyProgressTracker()
+
         ctx = make_inference_contexts(self.device)
         with ctx.inference, ctx.amp, ctx.sdpa:
             cluster_count = 0
-            for _, ms2_map in tqdm(
-                run.ms2_maps.items(), position=0, desc="Isolation-Window", leave=True
-            ):
+            for _, ms2_map in run.ms2_maps.items():
                 speclib_container = speclib_reader.read_by_isolation_window(
                     min_isolation_mz=ms2_map.isolation_mz_range[0],
                     max_isolation_mz=ms2_map.isolation_mz_range[1],
@@ -240,6 +244,7 @@ class DDASearchEngine(BaseSearchEngine):
 
                 # no precursor candidates in this window
                 if speclib_container is None:
+                    progress.advance(1)
                     continue
 
                 results = self._search_spectra(
@@ -255,6 +260,7 @@ class DDASearchEngine(BaseSearchEngine):
                     peak_group_topk=TOPK_PER_PRECURSOR,
                     logit_cutoff=logit_cutoff,
                     save_quant=save_quant,
+                    progress=progress,
                 )
 
                 # Cluster matches sharing peaks
@@ -281,21 +287,31 @@ class DDASearchEngine(BaseSearchEngine):
         # In DDA search, RT search space is not reduced
         return None
 
-    def perform_search(self, lcms_data: MassSpecData) -> ResultManager:
+    def perform_search(
+        self, lcms_data: MassSpecData, progress: ProgressTracker = None
+    ) -> ResultManager:
         """
         Perform the DDA search pipeline.
 
         Args:
             search_config: Search configuration
             lcms_data: DDA LC-MS/MS data
+            progress: Progress tracker for reporting status
 
         Returns:
             ResultManager with search results
         """
+        if progress is None:
+            progress = DummyProgressTracker()
+
+        # Data preparation (20% of overall)
+        prep_progress = progress.create_child("Data-Prep", total=1, portion=10)
         run = DDARun(lcms_data)
         run = run.prepare(num_groups=128)
+        prep_progress.complete()
         logger.info("DDA data prepared")
 
+        # Full search (70% of overall)
         st_t = time.perf_counter()
         logger.info("Search started")
         if self.state < SearchState.SECOND_SEARCH:
@@ -305,15 +321,24 @@ class DDASearchEngine(BaseSearchEngine):
             logit_cutoff = LOGIT_CUTOFF - 2.0
             save_quant = True
 
+        num_groups = len(run.ms2_maps)
+        search_progress = progress.create_child("Search", total=num_groups, portion=85)
         result_manager = self._perform_full_search(
-            run, batch_size=512, logit_cutoff=logit_cutoff, save_quant=save_quant
+            run,
+            batch_size=512,
+            logit_cutoff=logit_cutoff,
+            save_quant=save_quant,
+            progress=search_progress,
         )
+        search_progress.complete()
 
         elapsed = time.perf_counter() - st_t
         logger.info(f"Search completed. Elapsed: {elapsed:.1f} s")
 
-        # Re-fit RT calibrator with full search results and save predicted RTs for re-scoring
+        # Post-search RT calibration (10% of overall)
+        rt_cal_progress = progress.create_child("RT-Calibration", total=1, portion=5)
         rt_calibrator = self._perform_rt_calibration(run, before_full_search=False)
+        rt_cal_progress.complete()
         logger.info("RT calibration fitted")
 
         if self.state == SearchState.FIRST_SEARCH:
