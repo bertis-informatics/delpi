@@ -23,16 +23,16 @@ class InputEnum(Enum):
 
 class TheoPeakInput(InputEnum):
     PRED_INTENSITY = "predicted_intensity", 0, "float32"
-    MZ = "mz", 1, "float32"
+    # MZ = "mz", 1, "float32"
 
-    IS_PRECURSOR = "is_precursor", 2, "bool"
-    IS_PREFIX = "is_prefix", 3, "bool"
-    CHARGE = "charge", 4, "uint8"
-    ISOTOPE_INDEX = "isotope_index", 5, "uint8"
+    IS_PRECURSOR = "is_precursor", 1, "bool"
+    IS_PREFIX = "is_prefix", 2, "bool"
+    CHARGE = "charge", 3, "uint8"
+    ISOTOPE_INDEX = "isotope_index", 4, "uint8"
 
     # 2D positional encoding
-    CLEAVAGE_INDEX = "cleavage_index", 6, "uint8"
-    REV_CLEAVAGE_INDEX = "reverse_cleavage_index", 7, "uint8"
+    CLEAVAGE_INDEX = "cleavage_index", 5, "uint8"
+    REV_CLEAVAGE_INDEX = "reverse_cleavage_index", 6, "uint8"
 
 
 class ExpPeakInput(InputEnum):
