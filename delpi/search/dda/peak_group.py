@@ -130,19 +130,20 @@ def _generate_peak_group_arrays(
 
 
 @nb.njit(nogil=True, fastmath=True, cache=True)
-def iter_peaks(
-    meta_df: MetaContainer,
+def _count_matching_peaks(
     peak_df: PeakContainer,
     st_indices: np.ndarray,
     ed_indices: np.ndarray,
     frame_num_key_arr: np.ndarray,
     time_index_val_arr: np.ndarray,
 ):
+    count = 0
     for st, ed in zip(st_indices, ed_indices):
-        for i in nb.prange(st, ed):
+        for i in range(st, ed):
             fn = peak_df.frame_num_arr[i]
             if lookup_time_index(frame_num_key_arr, time_index_val_arr, fn) >= 0:
-                yield i
+                count += 1
+    return count
 
 
 @nb.njit(nogil=True, fastmath=True, cache=True)
@@ -160,39 +161,27 @@ def count_peaks(
     ms2_fg_st_indices: np.ndarray,
     ms2_fg_ed_indices: np.ndarray,
 ):
-
-    n_pc = 0
-    n_fg = 0
-    for _ in iter_peaks(
-        ms1_meta_df,
+    n_pc = _count_matching_peaks(
         ms1_peak_df,
         ms1_pc_st_indices,
         ms1_pc_ed_indices,
         frame_num_key_arr[0],
         time_index_val_arr[0],
-    ):
-        n_pc += 1
-
-    for _ in iter_peaks(
-        ms2_meta_df,
+    )
+    n_pc += _count_matching_peaks(
         ms2_peak_df,
         ms2_pc_st_indices,
         ms2_pc_ed_indices,
         frame_num_key_arr[1],
         time_index_val_arr[1],
-    ):
-        n_pc += 1
-
-    for _ in iter_peaks(
-        ms2_meta_df,
+    )
+    n_fg = _count_matching_peaks(
         ms2_peak_df,
         ms2_fg_st_indices,
         ms2_fg_ed_indices,
         frame_num_key_arr[1],
         time_index_val_arr[1],
-    ):
-        n_fg += 1
-
+    )
     return n_pc, n_fg
 
 
