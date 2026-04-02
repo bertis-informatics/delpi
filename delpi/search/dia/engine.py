@@ -95,7 +95,8 @@ class DIASearchEngine(BaseSearchEngine):
             frame_num_map=frame_num_map,
             ms1_mass_tol=ms1_tol,
             ms2_mass_tol=ms2_tol,
-            min_peak_count=DIA_MATCHED_PEAKS_CUTOFF,
+            # min_peak_count=DIA_MATCHED_PEAKS_CUTOFF,
+            min_peak_count=12,
             topk=peak_group_topk,
         )
         total_batches = count_total_batches(
@@ -219,47 +220,46 @@ class DIASearchEngine(BaseSearchEngine):
             cluster_count = 0
             num_windows = len(run.windows)
             for win_idx, dia_win in run.windows.items():
-                speclib_container = speclib_reader.read_by_mz_range(
+                chunk_results = []
+                for speclib_container in speclib_reader.iter_chunks_by_mz_range(
                     *dia_win.isolation_mz_range
-                )
-
-                # no precursor candidates in this window
-                if speclib_container is None:
-                    progress.advance(1)
-                    continue
-
-                results = self._search_spectra(
-                    search_config,
-                    dia_win,
-                    speclib_container,
-                    ms1_peak_df,
-                    model,
-                    X_theo_tensor,
-                    X_exp_tensor,
-                    batch_size,
-                    peak_group_topk=TOPK_PER_PRECURSOR,
-                    logit_cutoff=logit_cutoff,
-                    save_quant=save_quant,
-                    progress=progress,
-                )
-
-                # Cluster matches sharing peaks
-                if (
-                    results.get("frame_num") is not None
-                    and results["frame_num"].shape[0] > 0
                 ):
+                    results = self._search_spectra(
+                        search_config,
+                        dia_win,
+                        speclib_container,
+                        ms1_peak_df,
+                        model,
+                        X_theo_tensor,
+                        X_exp_tensor,
+                        batch_size,
+                        peak_group_topk=TOPK_PER_PRECURSOR,
+                        logit_cutoff=logit_cutoff,
+                        save_quant=save_quant,
+                        progress=progress,
+                    )
+                    if (
+                        results.get("frame_num") is not None
+                        and results["frame_num"].shape[0] > 0
+                    ):
+                        chunk_results.append(results)
+
+                if chunk_results:
+                    # Merge chunk results and cluster per window
+                    merged = {
+                        k: np.concatenate([r[k] for r in chunk_results])
+                        for k in chunk_results[0]
+                    }
                     cluster_arr = cluster_matches(
-                        frame_index_arr=dia_win.frame_num_to_index[
-                            results["frame_num"]
-                        ],
-                        peak_index_arr=results["peak_indices"],
+                        frame_index_arr=dia_win.frame_num_to_index[merged["frame_num"]],
+                        peak_index_arr=merged["peak_indices"],
                         max_frame_diff=1,
                         jaccard_thres=0.6,
                     )
-                    results["cluster"] = cluster_arr + cluster_count
+                    merged["cluster"] = cluster_arr + cluster_count
                     cluster_count += 1 + np.max(cluster_arr)
 
-                result_manager.write_dict(group_key, results)
+                    result_manager.write_dict(group_key, merged)
 
         self.empty_device_cache()
 

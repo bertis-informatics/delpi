@@ -234,49 +234,50 @@ class DDASearchEngine(BaseSearchEngine):
         with ctx.inference, ctx.amp, ctx.sdpa:
             cluster_count = 0
             for _, ms2_map in run.ms2_maps.items():
-                speclib_container = speclib_reader.read_by_isolation_window(
+                chunk_results = []
+                for speclib_container in speclib_reader.iter_chunks_by_isolation_window(
                     min_isolation_mz=ms2_map.isolation_mz_range[0],
                     max_isolation_mz=ms2_map.isolation_mz_range[1],
                     isolation_lower_tol_in_da=ISOLATION_LOWER_TOL,
                     isolation_upper_tol_in_da=ISOLATION_UPPER_TOL,
-                )
-
-                # no precursor candidates in this window
-                if speclib_container is None:
-                    progress.advance(1)
-                    continue
-
-                results = self._search_spectra(
-                    ms2_map,
-                    speclib_container,
-                    ms1_meta_df,
-                    ms1_peak_df,
-                    model,
-                    X_theo_tensor,
-                    X_exp_tensor,
-                    rt_window_half,
-                    batch_size=batch_size,
-                    peak_group_topk=TOPK_PER_PRECURSOR,
-                    logit_cutoff=logit_cutoff,
-                    save_quant=save_quant,
-                    progress=progress,
-                )
-
-                # Cluster matches sharing peaks
-                if (
-                    results.get("frame_num") is not None
-                    and results["frame_num"].shape[0] > 0
                 ):
+                    results = self._search_spectra(
+                        ms2_map,
+                        speclib_container,
+                        ms1_meta_df,
+                        ms1_peak_df,
+                        model,
+                        X_theo_tensor,
+                        X_exp_tensor,
+                        rt_window_half,
+                        batch_size=batch_size,
+                        peak_group_topk=TOPK_PER_PRECURSOR,
+                        logit_cutoff=logit_cutoff,
+                        save_quant=save_quant,
+                        progress=progress,
+                    )
+                    if (
+                        results.get("frame_num") is not None
+                        and results["frame_num"].shape[0] > 0
+                    ):
+                        chunk_results.append(results)
+
+                if chunk_results:
+                    # Merge chunk results and cluster per window
+                    merged = {
+                        k: np.concatenate([r[k] for r in chunk_results])
+                        for k in chunk_results[0]
+                    }
                     cluster_arr = cluster_matches(
-                        frame_index_arr=results["frame_num"],
-                        peak_index_arr=results["peak_indices"],
+                        frame_index_arr=merged["frame_num"],
+                        peak_index_arr=merged["peak_indices"],
                         max_frame_diff=0,
                         jaccard_thres=0.6,
                     )
-                    results["cluster"] = cluster_arr + cluster_count
+                    merged["cluster"] = cluster_arr + cluster_count
                     cluster_count += 1 + np.max(cluster_arr)
 
-                result_manager.write_dict(group_key, results)
+                    result_manager.write_dict(group_key, merged)
 
         self.empty_device_cache()
 

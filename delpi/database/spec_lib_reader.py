@@ -151,23 +151,68 @@ class SpectralLibReader:
 
         return speclib_container
 
-    def read_by_mz_range(
+    def _get_index_range_by_mz(
         self, min_precursor_mz: float, max_precursor_mz: float
-    ) -> SpectralLibContainer:
-
-        index_range = (
+    ) -> tuple:
+        return (
             self.all_precursor_df.filter(
                 pl.col("precursor_mz").is_between(min_precursor_mz, max_precursor_mz)
             )
             .select(
-                min_mz=pl.col("precursor_index").min(),
-                max_mz=pl.col("precursor_index").max(),
+                min_idx=pl.col("precursor_index").min(),
+                max_idx=pl.col("precursor_index").max(),
             )
             .collect()
             .row(0)
         )
 
+    def read_by_mz_range(
+        self, min_precursor_mz: float, max_precursor_mz: float
+    ) -> SpectralLibContainer:
+
+        index_range = self._get_index_range_by_mz(min_precursor_mz, max_precursor_mz)
         return self.read_by_index_range(*index_range)
+
+    def iter_chunks_by_mz_range(
+        self,
+        min_precursor_mz: float,
+        max_precursor_mz: float,
+        max_precursors_per_chunk: int = 1_000_000,
+    ):
+        """Yield SpectralLibContainers in chunks for a given m/z range."""
+        min_idx, max_idx = self._get_index_range_by_mz(
+            min_precursor_mz, max_precursor_mz
+        )
+        if min_idx is None or max_idx is None:
+            return
+        for start in range(min_idx, max_idx + 1, max_precursors_per_chunk):
+            end = min(start + max_precursors_per_chunk - 1, max_idx)
+            yield self.read_by_index_range(start, end)
+
+    def _get_index_range_by_isolation_window(
+        self,
+        min_isolation_mz: float,
+        max_isolation_mz: float,
+        isolation_lower_tol_in_da: float = 3.5,
+        isolation_upper_tol_in_da: float = 1.25,
+    ) -> tuple:
+        min_precursor_mz = min_isolation_mz - isolation_lower_tol_in_da / pl.col(
+            "precursor_charge"
+        )
+        max_precursor_mz = max_isolation_mz + isolation_upper_tol_in_da / pl.col(
+            "precursor_charge"
+        )
+        return (
+            self.all_precursor_df.filter(
+                pl.col("precursor_mz").is_between(min_precursor_mz, max_precursor_mz)
+            )
+            .select(
+                min_idx=pl.col("precursor_index").min(),
+                max_idx=pl.col("precursor_index").max(),
+            )
+            .collect()
+            .row(0)
+        )
 
     def read_by_isolation_window(
         self,
@@ -176,24 +221,34 @@ class SpectralLibReader:
         isolation_lower_tol_in_da: float = 3.5,
         isolation_upper_tol_in_da: float = 1.25,
     ) -> SpectralLibContainer:
-        min_precursor_mz = min_isolation_mz - isolation_lower_tol_in_da / pl.col(
-            "precursor_charge"
-        )
-        max_precursor_mz = max_isolation_mz + isolation_upper_tol_in_da / pl.col(
-            "precursor_charge"
-        )
-        index_range = (
-            self.all_precursor_df.filter(
-                pl.col("precursor_mz").is_between(min_precursor_mz, max_precursor_mz)
-            )
-            .select(
-                min_mz=pl.col("precursor_index").min(),
-                max_mz=pl.col("precursor_index").max(),
-            )
-            .collect()
-            .row(0)
+        index_range = self._get_index_range_by_isolation_window(
+            min_isolation_mz,
+            max_isolation_mz,
+            isolation_lower_tol_in_da,
+            isolation_upper_tol_in_da,
         )
         return self.read_by_index_range(*index_range)
+
+    def iter_chunks_by_isolation_window(
+        self,
+        min_isolation_mz: float,
+        max_isolation_mz: float,
+        isolation_lower_tol_in_da: float = 3.5,
+        isolation_upper_tol_in_da: float = 1.25,
+        max_precursors_per_chunk: int = 1_000_000,
+    ):
+        """Yield SpectralLibContainers in chunks for a given isolation window."""
+        min_idx, max_idx = self._get_index_range_by_isolation_window(
+            min_isolation_mz,
+            max_isolation_mz,
+            isolation_lower_tol_in_da,
+            isolation_upper_tol_in_da,
+        )
+        if min_idx is None or max_idx is None:
+            return
+        for start in range(min_idx, max_idx + 1, max_precursors_per_chunk):
+            end = min(start + max_precursors_per_chunk - 1, max_idx)
+            yield self.read_by_index_range(start, end)
 
     def get_peptidoform_df(self) -> pl.DataFrame:
 
