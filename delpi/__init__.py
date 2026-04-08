@@ -4,3 +4,5 @@ from pathlib import Path
 PROJECT_DIR = Path(__file__).parents[1]
 DATA_DIR = PROJECT_DIR / "data"
 MODEL_DIR = PROJECT_DIR / "models"
+
+__version__ = "1.0.0"
