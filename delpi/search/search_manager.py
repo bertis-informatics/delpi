@@ -8,7 +8,6 @@ acquisition-specific search engines.
 import logging
 import time
 import yaml
-import psutil
 import queue
 from pathlib import Path
 
@@ -241,7 +240,7 @@ class SearchManager:
         bs = lower if (raw_bs - lower) < (upper - raw_bs) else upper
         bs = max(256, min(bs, 2048))
         self.search_config.config["batch_size"] = bs
-        logger.info(f"Auto-resolved batch size: {bs} (GPU memory: {mem_gb:.1f} GB)")
+        logger.info(f"Auto-resolved batch size: {bs}")
 
     def execute_batch(self) -> None:
         """Execute workflow for all input files using separate processes.
