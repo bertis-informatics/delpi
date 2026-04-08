@@ -208,6 +208,41 @@ class SearchManager:
         # Store the validated device for use by engines
         self._validated_device = device
 
+        # Resolve batch_size if set to 'auto'
+        self._resolve_batch_size()
+
+    def _resolve_batch_size(self) -> None:
+        """Resolve ``batch_size`` in search config from 'auto' or an explicit value.
+
+        Rule of thumb: 1024 for 24 GB GPU, scaling linearly and rounding
+        down to the nearest power of 2.  Clamped to [256, 2048].
+        """
+        raw = self.search_config.config.get("batch_size", "auto")
+        if isinstance(raw, int) or (isinstance(raw, str) and raw.isdigit()):
+            self.search_config.config["batch_size"] = int(raw)
+            return
+
+        # auto – determine from GPU memory
+        device = self._validated_device
+        if device is not None and device.type == "cuda":
+            mem_gb = torch.cuda.get_device_properties(device).total_memory / (1024**3)
+        else:
+            mem_gb = 12  # conservative fallback
+
+        raw_bs = mem_gb / 24 * 1024
+        # round to nearest power of 2
+        log2 = (
+            raw_bs.bit_length() - 1
+            if isinstance(raw_bs, int)
+            else int(raw_bs).bit_length() - 1
+        )
+        lower = 1 << log2
+        upper = 1 << (log2 + 1)
+        bs = lower if (raw_bs - lower) < (upper - raw_bs) else upper
+        bs = max(256, min(bs, 2048))
+        self.search_config.config["batch_size"] = bs
+        logger.info(f"Auto-resolved batch size: {bs} (GPU memory: {mem_gb:.1f} GB)")
+
     def execute_batch(self) -> None:
         """Execute workflow for all input files using separate processes.
 
@@ -351,11 +386,13 @@ class SearchManager:
             db_dir=self.get_db_dir(), search_config=search_config
         )
 
+        search_batch_size = search_config.config.get("batch_size", 512)
         processor = TDAProcessor(
             db_dir=self.get_db_dir(),
             output_dir=search_config.output_dir,
             device=self.device,
             q_value_cutoff=q_value_cutoff,
+            batch_size=search_batch_size * 4,
         )
         pmsm_df = processor.run_global(result_aggregator, group_key)
         self.log_id_statistics_table(pmsm_df, q_value_cutoff)
@@ -605,11 +642,11 @@ class SearchManager:
         # First search
         self.execute_batch()
 
-        # # Transfer learning
-        # self.perform_transfer_learning()
+        # Transfer learning
+        self.perform_transfer_learning()
 
-        # # Second search
-        # self.execute_batch()
+        # Second search
+        self.execute_batch()
 
         # # FDR control and quantification
         # pmsm_df = self.perform_global_tda()

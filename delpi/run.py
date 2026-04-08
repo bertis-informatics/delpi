@@ -2,6 +2,7 @@ import logging
 import argparse
 import sys
 from pathlib import Path
+from typing import Union
 
 from delpi.search.config import SearchConfig
 from delpi.search.search_manager import SearchManager
@@ -36,11 +37,21 @@ def parse_arguments():
         help="Logging level",
     )
 
+    parser.add_argument(
+        "--batch-size",
+        default="auto",
+        help="Batch size for search inference ('auto' to set based on GPU memory)",
+    )
+
     return parser.parse_args()
 
 
 def run_search(
-    config_path: str, device: str = "cuda:0", log_level: str = "info", progress=None
+    config_path: str,
+    device: str = "cuda:0",
+    log_level: str = "info",
+    batch_size: Union[str, int] = "auto",
+    progress=None,
 ):
     """
     Run DelPi search with given parameters.
@@ -49,6 +60,7 @@ def run_search(
         config_path: Path to configuration YAML file
         device: Device to use for computation
         log_level: Logging level
+        batch_size: Batch size for inference ('auto' to set based on GPU memory)
         progress: Optional ProgressTracker instance.  When provided the
             engine runs in-process so that tracker callbacks (e.g. for a
             GUI) fire normally.  When ``None`` (default) a tqdm progress
@@ -61,6 +73,7 @@ def run_search(
 
     # Initialize search configuration
     search_config = SearchConfig(config_path)
+    search_config.config["batch_size"] = batch_size
     search_config.check_params()
 
     # Configure logging
@@ -82,6 +95,7 @@ def main():
             config_path=args.config_path,
             device=args.device,
             log_level=args.log_level,
+            batch_size=args.batch_size,
         )
     except Exception as e:
         logger.error(f"DelPi search failed: {str(e)}")

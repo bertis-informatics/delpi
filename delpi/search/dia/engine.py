@@ -34,7 +34,7 @@ from delpi.search.dia.batch_generator import count_total_batches, generate_batch
 from delpi.search.dia.lfq_utils import get_ms1_area
 from delpi.search.clustering import cluster_matches
 from delpi.utils.device_ctx import make_inference_contexts
-from delpi.utils.prefetch import prefetch_batches
+from delpi.utils.prefetch import Prefetcher, pin_numpy_tuple
 from delpi.model.input import THEORETICAL_PEAK, EXPERIMENTAL_PEAK
 from delpi.constants import DIA_MATCHED_PEAKS_CUTOFF
 
@@ -78,6 +78,7 @@ class DIASearchEngine(BaseSearchEngine):
         logit_cutoff: float = LOGIT_CUTOFF,
         save_quant: bool = False,
         progress: ProgressTracker = None,
+        peak_groups: tuple = None,
     ) -> Dict[str, np.ndarray]:
         """Search DIA spectra for a specific isolation window."""
         ms1_tol = search_config["ms1_mass_tol_in_ppm"]
@@ -87,16 +88,19 @@ class DIASearchEngine(BaseSearchEngine):
         ms2_peak_df = dia_win.get_peak_container()
         # ms1_rt_arr = dia_win.ms1_meta_df["time_in_seconds"].to_numpy()
 
-        peak_group_container, peak_index_container = find_peak_groups(
-            speclib_container,
-            ms1_peak_df=ms1_peak_df,
-            ms2_peak_df=ms2_peak_df,
-            frame_num_map=frame_num_map,
-            ms1_mass_tol=ms1_tol,
-            ms2_mass_tol=ms2_tol,
-            min_peak_count=DIA_MATCHED_PEAKS_CUTOFF,
-            topk=peak_group_topk,
-        )
+        if peak_groups is not None:
+            peak_group_container, peak_index_container = peak_groups
+        else:
+            peak_group_container, peak_index_container = find_peak_groups(
+                speclib_container,
+                ms1_peak_df=ms1_peak_df,
+                ms2_peak_df=ms2_peak_df,
+                frame_num_map=frame_num_map,
+                ms1_mass_tol=ms1_tol,
+                ms2_mass_tol=ms2_tol,
+                min_peak_count=DIA_MATCHED_PEAKS_CUTOFF,
+                topk=peak_group_topk,
+            )
         total_batches = count_total_batches(
             peak_group_container.peak_count_arr, batch_size=batch_size
         )
@@ -117,7 +121,7 @@ class DIASearchEngine(BaseSearchEngine):
         batch_progress = progress.create_child("PmSMs", total=total_batches, portion=1)
 
         results = defaultdict(list)
-        for tensors in prefetch_batches(batch_iter, prefetch_count=2):
+        for tensors in Prefetcher(batch_iter, transform=pin_numpy_tuple):
             precursor_index_arr = tensors[0].numpy()
             frame_num_arr = tensors[1].numpy()
             x_theo_t = tensors[2]
@@ -215,49 +219,81 @@ class DIASearchEngine(BaseSearchEngine):
 
         ctx = make_inference_contexts(self.device)
         with ctx.inference, ctx.amp, ctx.sdpa:
-            cluster_count = 0
-            num_windows = len(run.windows)
-            for win_idx, dia_win in run.windows.items():
-                chunk_results = []
-                for speclib_container in speclib_reader.iter_chunks_by_mz_range(
-                    *dia_win.isolation_mz_range
-                ):
-                    results = self._search_spectra(
-                        search_config,
-                        dia_win,
-                        speclib_container,
-                        ms1_peak_df,
-                        model,
-                        X_theo_tensor,
-                        X_exp_tensor,
-                        batch_size,
-                        peak_group_topk=TOPK_PER_PRECURSOR,
-                        logit_cutoff=logit_cutoff,
-                        save_quant=save_quant,
-                        progress=progress,
-                    )
-                    if (
-                        results.get("frame_num") is not None
-                        and results["frame_num"].shape[0] > 0
+
+            def _prep_all():
+                for win_idx, dia_win in run.windows.items():
+                    for sc in speclib_reader.iter_chunks_by_mz_range(
+                        *dia_win.isolation_mz_range
                     ):
-                        chunk_results.append(results)
+                        pgc, pic = find_peak_groups(
+                            sc,
+                            ms1_peak_df=ms1_peak_df,
+                            ms2_peak_df=dia_win.get_peak_container(),
+                            frame_num_map=dia_win.get_frame_num_map(),
+                            ms1_mass_tol=search_config["ms1_mass_tol_in_ppm"],
+                            ms2_mass_tol=search_config["ms2_mass_tol_in_ppm"],
+                            min_peak_count=DIA_MATCHED_PEAKS_CUTOFF,
+                            topk=TOPK_PER_PRECURSOR,
+                        )
+                        yield dia_win, sc, pgc, pic
 
-                if chunk_results:
-                    # Merge chunk results and cluster per window
-                    merged = {
-                        k: np.concatenate([r[k] for r in chunk_results])
-                        for k in chunk_results[0]
-                    }
-                    cluster_arr = cluster_matches(
-                        frame_index_arr=dia_win.frame_num_to_index[merged["frame_num"]],
-                        peak_index_arr=merged["peak_indices"],
-                        max_frame_diff=1,
-                        jaccard_thres=0.6,
-                    )
-                    merged["cluster"] = cluster_arr + cluster_count
-                    cluster_count += 1 + np.max(cluster_arr)
+            def _flush(dia_win, chunk_results, cluster_count):
+                merged = {
+                    k: np.concatenate([r[k] for r in chunk_results])
+                    for k in chunk_results[0]
+                }
+                cluster_arr = cluster_matches(
+                    frame_index_arr=dia_win.frame_num_to_index[merged["frame_num"]],
+                    peak_index_arr=merged["peak_indices"],
+                    max_frame_diff=1,
+                    jaccard_thres=0.6,
+                )
+                merged["cluster"] = cluster_arr + cluster_count
+                cluster_count += 1 + np.max(cluster_arr)
+                result_manager.write_dict(group_key, merged)
+                return cluster_count
 
-                    result_manager.write_dict(group_key, merged)
+            cluster_count = 0
+            prev_dia_win = None
+            chunk_results = []
+
+            for dia_win, sc, pgc, pic in Prefetcher(
+                _prep_all(),
+                prefetch_count=1,
+                thread_initializer=self._limit_numba_threads,
+            ):
+                if prev_dia_win is not None and dia_win is not prev_dia_win:
+                    if chunk_results:
+                        cluster_count = _flush(
+                            prev_dia_win, chunk_results, cluster_count
+                        )
+                        chunk_results = []
+                prev_dia_win = dia_win
+
+                results = self._search_spectra(
+                    search_config,
+                    dia_win,
+                    sc,
+                    ms1_peak_df,
+                    model,
+                    X_theo_tensor,
+                    X_exp_tensor,
+                    batch_size,
+                    peak_group_topk=TOPK_PER_PRECURSOR,
+                    logit_cutoff=logit_cutoff,
+                    save_quant=save_quant,
+                    progress=progress,
+                    peak_groups=(pgc, pic),
+                )
+                if (
+                    results.get("frame_num") is not None
+                    and results["frame_num"].shape[0] > 0
+                ):
+                    chunk_results.append(results)
+
+            # flush last group
+            if chunk_results:
+                cluster_count = _flush(prev_dia_win, chunk_results, cluster_count)
 
         self.empty_device_cache()
 
@@ -307,15 +343,15 @@ class DIASearchEngine(BaseSearchEngine):
             logit_cutoff = LOGIT_CUTOFF
             save_quant = False
         else:
-            # logit_cutoff = LOGIT_CUTOFF - 2.0
             logit_cutoff = LOGIT_CUTOFF - 1.0
             save_quant = True
 
+        batch_size = self.search_config.config.get("batch_size", 512)
         search_progress = progress.create_child("Search", total=num_wins, portion=93)
         result_manager = self._perform_full_search(
             run,
             rt_calibrator,
-            batch_size=512,
+            batch_size=batch_size,
             logit_cutoff=logit_cutoff,
             save_quant=save_quant,
             progress=search_progress,

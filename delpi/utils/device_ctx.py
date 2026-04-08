@@ -1,4 +1,3 @@
-# device_contexts.py
 """
 Device-aware inference/AMP/SDPA context helpers.
 

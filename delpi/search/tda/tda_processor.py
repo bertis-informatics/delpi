@@ -46,6 +46,7 @@ class TDAProcessor:
         q_value_cutoff: float = DEFAULT_Q_VALUE_CUTOFF,
         n_ensemble: int = 1,
         ensemble_train_ratio: float = 0.8,
+        batch_size: int = 2048,
     ):
         self.db_dir = db_dir
         self.output_dir = output_dir
@@ -53,6 +54,7 @@ class TDAProcessor:
         self.q_value_cutoff = q_value_cutoff
         self.n_ensemble = n_ensemble
         self.ensemble_train_ratio = ensemble_train_ratio
+        self.batch_size = batch_size
 
     # ==================================================================
     # Public entry points
@@ -363,11 +365,10 @@ class TDAProcessor:
         df: pl.DataFrame,
         model: torch.nn.Module,
         feature_fn: FeatureLoader,
-        batch_size: int = 4096,
     ) -> np.ndarray:
         """Score a subset of PmSMs with a trained model."""
         feature_arr = feature_fn(df)
-        return self._batched_inference(model, feature_arr, batch_size)
+        return self._batched_inference(model, feature_arr, self.batch_size)
 
     def _ensemble_score(
         self,
@@ -375,7 +376,6 @@ class TDAProcessor:
         test_df: pl.DataFrame,
         feature_fn: FeatureLoader,
         fold_label: str = "",
-        batch_size: int = 4096,
     ) -> np.ndarray:
         """Train K models via bootstrap from *train_df* and average logits."""
         test_feature_arr = feature_fn(test_df)
@@ -396,7 +396,7 @@ class TDAProcessor:
                 model_version=f"global_tda_{fold_label}_e{k}",
                 seed=seed,
             )
-            scores = self._batched_inference(model, test_feature_arr, batch_size)
+            scores = self._batched_inference(model, test_feature_arr, self.batch_size)
             avg_scores += scores
             logger.info(
                 f"Ensemble {fold_label} model {k + 1}/{self.n_ensemble} trained"

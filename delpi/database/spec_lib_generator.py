@@ -15,7 +15,7 @@ from delpi.model.spec_lib.dataset import PeptideDataset
 from delpi.utils.batch_sampler import SeqDataBatchSampler
 from delpi.database.numba.prefix_mass_array import PrefixMassArrayContainer
 from delpi.database.numba.spec_lib_utils import update_speclib_arr
-from delpi.utils.prefetch import prefetch_dataloader
+from delpi.utils.prefetch import Prefetcher, pin_tensor_dict
 from delpi import MODEL_DIR
 
 
@@ -142,7 +142,7 @@ class SpectralLibGenerator:
 
         with torch.inference_mode():
             for batch in tqdm(
-                prefetch_dataloader(dl),
+                Prefetcher(dl, transform=pin_tensor_dict),
                 total=total,
                 desc="Predicting MS2 spectra",
                 leave=True,
@@ -235,7 +235,10 @@ class SpectralLibGenerator:
 
         with torch.inference_mode():
             for batch in tqdm(
-                prefetch_dataloader(dl), total=total, desc="Predicting RT", leave=True
+                Prefetcher(dl, transform=pin_tensor_dict),
+                total=total,
+                desc="Predicting RT",
+                leave=True,
             ):
                 peptidoform_index_arr = (
                     batch["peptidoform_index"].to(torch.uint32).numpy()

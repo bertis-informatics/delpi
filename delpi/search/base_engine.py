@@ -28,11 +28,11 @@ from delpi.search.tl.data_prep import (
     TransferLearningConfig,
 )
 from delpi.search.search_state import SearchState
-from delpi.utils.fdr import calculate_q_value
-from delpi.utils.log_config import configure_logging
 from delpi.search.progress.tracker import ProgressTracker
 from delpi.search.progress.tqdm_tracker import TqdmProgressTracker
 from delpi.search.progress.callback_tracker import CallbackProgressTracker
+from delpi.utils.fdr import calculate_q_value
+from delpi.utils.log_config import configure_logging
 from delpi.constants import DEFAULT_Q_VALUE_CUTOFF
 from delpi import MODEL_DIR
 
@@ -73,6 +73,19 @@ class BaseSearchEngine(ABC):
         model = model.to(self.device).eval()
         model.transform = PeptideMultiSpectraMatchScaler()
         return model
+
+    @staticmethod
+    def _limit_numba_threads():
+        """Limit numba thread count in the current (background) thread.
+
+        Called as ``thread_initializer`` for :class:`Prefetcher` so that
+        background ``find_peak_groups`` work uses only half of the available
+        cores, leaving the rest free for GPU-feeding data pipelines.
+        """
+        import numba
+
+        n = max(1, numba.config.NUMBA_NUM_THREADS // 2)
+        numba.set_num_threads(n)
 
     def next_state(self):
         self.state = SearchState(self.state + 1)
@@ -325,11 +338,13 @@ class BaseSearchEngine(ABC):
             "q_value_cutoff", DEFAULT_Q_VALUE_CUTOFF
         )
         group_key = self.get_results_group_key()
+        search_batch_size = self.search_config.config.get("batch_size", 512)
         processor = TDAProcessor(
             db_dir=self.get_db_dir(),
             output_dir=self.search_config.output_dir,
             device=self.device,
             q_value_cutoff=q_value_cutoff,
+            batch_size=search_batch_size * 4,
         )
         pmsm_df = processor.run_single(result_manager, group_key)
 

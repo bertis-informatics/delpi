@@ -29,7 +29,7 @@ from delpi.search.dda.batch_generator import count_total_batches, generate_batch
 from delpi.search.clustering import cluster_matches
 from delpi.search.dia.lfq_utils import get_ms1_area_dda
 from delpi.utils.device_ctx import make_inference_contexts
-from delpi.utils.prefetch import prefetch_batches
+from delpi.utils.prefetch import Prefetcher, pin_numpy_tuple
 from delpi.constants import ISOLATION_LOWER_TOL, ISOLATION_UPPER_TOL
 from delpi.model.input import THEORETICAL_PEAK, EXPERIMENTAL_PEAK
 from delpi.search.progress.tracker import ProgressTracker
@@ -86,6 +86,7 @@ class DDASearchEngine(BaseSearchEngine):
         logit_cutoff: float = LOGIT_CUTOFF,
         save_quant: bool = False,
         progress: ProgressTracker = None,
+        peak_groups: tuple = None,
     ) -> Dict[str, np.ndarray]:
         """Search DDA spectra for a specific isolation window."""
 
@@ -96,17 +97,20 @@ class DDASearchEngine(BaseSearchEngine):
         ms2_meta_df = ms2_map.get_meta_container()
         ms2_peak_df = ms2_map.get_peak_container()
 
-        peak_group_container, peak_index_container = find_peak_groups(
-            speclib_container,
-            ms1_meta_df,
-            ms2_meta_df,
-            ms1_peak_df,
-            ms2_peak_df,
-            rt_window_half,
-            isolation_lower_tol_in_da=ISOLATION_LOWER_TOL,
-            isolation_upper_tol_in_da=ISOLATION_UPPER_TOL,
-            topk=peak_group_topk,
-        )
+        if peak_groups is not None:
+            peak_group_container, peak_index_container = peak_groups
+        else:
+            peak_group_container, peak_index_container = find_peak_groups(
+                speclib_container,
+                ms1_meta_df,
+                ms2_meta_df,
+                ms1_peak_df,
+                ms2_peak_df,
+                rt_window_half,
+                isolation_lower_tol_in_da=ISOLATION_LOWER_TOL,
+                isolation_upper_tol_in_da=ISOLATION_UPPER_TOL,
+                topk=peak_group_topk,
+            )
 
         total_batches = count_total_batches(
             peak_group_container.peak_count_arr, batch_size=512
@@ -130,7 +134,7 @@ class DDASearchEngine(BaseSearchEngine):
         batch_progress = progress.create_child("PmSMs", total=total_batches, portion=1)
 
         results = defaultdict(list)
-        for tensors in prefetch_batches(batch_iter, prefetch_count=2):
+        for tensors in Prefetcher(batch_iter, transform=pin_numpy_tuple):
 
             precursor_index_arr = tensors[0].numpy()
             frame_num_arr = tensors[1].numpy()
@@ -232,52 +236,88 @@ class DDASearchEngine(BaseSearchEngine):
 
         ctx = make_inference_contexts(self.device)
         with ctx.inference, ctx.amp, ctx.sdpa:
-            cluster_count = 0
-            for _, ms2_map in run.ms2_maps.items():
-                chunk_results = []
-                for speclib_container in speclib_reader.iter_chunks_by_isolation_window(
-                    min_isolation_mz=ms2_map.isolation_mz_range[0],
-                    max_isolation_mz=ms2_map.isolation_mz_range[1],
-                    isolation_lower_tol_in_da=ISOLATION_LOWER_TOL,
-                    isolation_upper_tol_in_da=ISOLATION_UPPER_TOL,
-                ):
-                    results = self._search_spectra(
-                        ms2_map,
-                        speclib_container,
-                        ms1_meta_df,
-                        ms1_peak_df,
-                        model,
-                        X_theo_tensor,
-                        X_exp_tensor,
-                        rt_window_half,
-                        batch_size=batch_size,
-                        peak_group_topk=TOPK_PER_PRECURSOR,
-                        logit_cutoff=logit_cutoff,
-                        save_quant=save_quant,
-                        progress=progress,
-                    )
-                    if (
-                        results.get("frame_num") is not None
-                        and results["frame_num"].shape[0] > 0
+
+            def _prep_all():
+                for _, ms2_map in run.ms2_maps.items():
+                    ms2_meta = ms2_map.get_meta_container()
+                    ms2_peak = ms2_map.get_peak_container()
+                    for sc in speclib_reader.iter_chunks_by_isolation_window(
+                        min_isolation_mz=ms2_map.isolation_mz_range[0],
+                        max_isolation_mz=ms2_map.isolation_mz_range[1],
+                        isolation_lower_tol_in_da=ISOLATION_LOWER_TOL,
+                        isolation_upper_tol_in_da=ISOLATION_UPPER_TOL,
                     ):
-                        chunk_results.append(results)
+                        pgc, pic = find_peak_groups(
+                            sc,
+                            ms1_meta_df,
+                            ms2_meta,
+                            ms1_peak_df,
+                            ms2_peak,
+                            rt_window_half,
+                            isolation_lower_tol_in_da=ISOLATION_LOWER_TOL,
+                            isolation_upper_tol_in_da=ISOLATION_UPPER_TOL,
+                            topk=TOPK_PER_PRECURSOR,
+                        )
+                        yield ms2_map, sc, pgc, pic
 
-                if chunk_results:
-                    # Merge chunk results and cluster per window
-                    merged = {
-                        k: np.concatenate([r[k] for r in chunk_results])
-                        for k in chunk_results[0]
-                    }
-                    cluster_arr = cluster_matches(
-                        frame_index_arr=merged["frame_num"],
-                        peak_index_arr=merged["peak_indices"],
-                        max_frame_diff=0,
-                        jaccard_thres=0.6,
-                    )
-                    merged["cluster"] = cluster_arr + cluster_count
-                    cluster_count += 1 + np.max(cluster_arr)
+            def _flush(ms2_map, chunk_results, cluster_count):
+                merged = {
+                    k: np.concatenate([r[k] for r in chunk_results])
+                    for k in chunk_results[0]
+                }
+                cluster_arr = cluster_matches(
+                    frame_index_arr=merged["frame_num"],
+                    peak_index_arr=merged["peak_indices"],
+                    max_frame_diff=0,
+                    jaccard_thres=0.6,
+                )
+                merged["cluster"] = cluster_arr + cluster_count
+                cluster_count += 1 + np.max(cluster_arr)
+                result_manager.write_dict(group_key, merged)
+                return cluster_count
 
-                    result_manager.write_dict(group_key, merged)
+            cluster_count = 0
+            prev_ms2_map = None
+            chunk_results = []
+
+            for ms2_map, sc, pgc, pic in Prefetcher(
+                _prep_all(),
+                prefetch_count=1,
+                thread_initializer=self._limit_numba_threads,
+            ):
+                if prev_ms2_map is not None and ms2_map is not prev_ms2_map:
+                    if chunk_results:
+                        cluster_count = _flush(
+                            prev_ms2_map, chunk_results, cluster_count
+                        )
+                        chunk_results = []
+                prev_ms2_map = ms2_map
+
+                results = self._search_spectra(
+                    ms2_map,
+                    sc,
+                    ms1_meta_df,
+                    ms1_peak_df,
+                    model,
+                    X_theo_tensor,
+                    X_exp_tensor,
+                    rt_window_half,
+                    batch_size=batch_size,
+                    peak_group_topk=TOPK_PER_PRECURSOR,
+                    logit_cutoff=logit_cutoff,
+                    save_quant=save_quant,
+                    progress=progress,
+                    peak_groups=(pgc, pic),
+                )
+                if (
+                    results.get("frame_num") is not None
+                    and results["frame_num"].shape[0] > 0
+                ):
+                    chunk_results.append(results)
+
+            # flush last group
+            if chunk_results:
+                cluster_count = _flush(prev_ms2_map, chunk_results, cluster_count)
 
         self.empty_device_cache()
 
@@ -321,11 +361,12 @@ class DDASearchEngine(BaseSearchEngine):
             logit_cutoff = LOGIT_CUTOFF - 2.0
             save_quant = True
 
+        batch_size = self.search_config.config.get("batch_size", 512)
         num_groups = len(run.ms2_maps)
         search_progress = progress.create_child("Search", total=num_groups, portion=85)
         result_manager = self._perform_full_search(
             run,
-            batch_size=512,
+            batch_size=batch_size,
             logit_cutoff=logit_cutoff,
             save_quant=save_quant,
             progress=search_progress,
