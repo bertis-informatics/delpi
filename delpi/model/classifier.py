@@ -104,6 +104,7 @@ class DelPiModel(pl.LightningModule):
         payload = torch.load(Path(path), weights_only=True)
         model = cls(**payload["hyper_parameters"])
         model.load_state_dict(payload["model_state_dict"])
+        model.meta = payload.get("meta", {})
         model.eval()
         return model
 

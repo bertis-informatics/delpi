@@ -29,9 +29,7 @@ from delpi.search.result_manager import ResultManager
 from delpi.search.tl.rt_trainer import TransferLearningTrainerForRT
 from delpi.search.tl.trainer import TransferLearningTrainer
 from delpi.search.tl.spec_lib_generator import RefinedSpectralLibGenerator
-from delpi.search.tda.dataset import DatasetSplitter, PMSMDataset
-from delpi.search.tda.fdr_analyzer import FDRAnalyzer
-from delpi.search.tda.trainer import TargetDecoyTrainer
+from delpi.search.tda.tda_processor import TDAProcessor
 from delpi.search.search_state import SearchState
 from delpi.search.progress import CallbackProgressTracker
 from delpi.search.dia.max_lfq import maxlfq
@@ -340,9 +338,6 @@ class SearchManager:
         spec_generator.save(search_config.refined_db_dir)
 
     def perform_global_tda(self) -> None:
-
-        # [TODO] handle potential memory issue in case of many runs
-
         self.state = SearchState.SECOND_TDA
         logger.info("Performing global target-decoy analysis")
 
@@ -356,107 +351,134 @@ class SearchManager:
             db_dir=self.get_db_dir(), search_config=search_config
         )
 
-        hdf_files = result_aggregator.get_hdf_files()
-
-        # [TODO] load features conditionally based on num_runs and available memory
-        total_hdf_size = sum(f.stat().st_size for f in hdf_files)
-        available_memory = psutil.virtual_memory().available
-        load_features = total_hdf_size * 0.4 < available_memory
-        # load_features = num_runs <= 64
-        logger.info(
-            f"Total HDF size: {total_hdf_size / (1024**3):.2f} GB, "
-            f"Available RAM: {available_memory / (1024**3):.2f} GB. "
-            f"Load features: {load_features}"
-        )
-
-        pmsm_df, data_dict = result_aggregator.get_search_results(
-            group_key, load_features=load_features
-        )
-
-        num_decoys = pmsm_df["is_decoy"].sum()
-        num_targets = len(pmsm_df) - num_decoys
-        logger.info(
-            f"Training a classifier with {num_targets:,} positive and {num_decoys:,} negative PmSMs"
-        )
-
-        # Train classifier and rescore PmSMs
-        splitter = DatasetSplitter()
-        train_df, test_df = splitter.split_by_peptide(
-            pmsm_df.select(
-                pl.col(
-                    "run_index",
-                    "pmsm_index",
-                    "peptide_index",
-                    "is_decoy",
-                    "observed_rt",
-                    "predicted_rt",
-                    "cluster",
-                )
-            )
-        )
-
-        train_dataset = PMSMDataset(
-            pmsm_df=train_df,
-            hdf_files=hdf_files,
-            hdf_group_key=group_key,
-            data_dict=data_dict,
-        )
-        test_dataset = PMSMDataset(
-            pmsm_df=test_df,
-            hdf_files=hdf_files,
-            hdf_group_key=group_key,
-            data_dict=data_dict,
-        )
-
-        trainer = TargetDecoyTrainer()
-        test_score_arr = trainer.train(
-            model_version="global_tda",
-            train_dataset=train_dataset,
-            test_dataset=test_dataset,
+        processor = TDAProcessor(
+            db_dir=self.get_db_dir(),
             output_dir=search_config.output_dir,
             device=self.device,
+            q_value_cutoff=q_value_cutoff,
         )
-
-        # Cleanup (make sure hdf files are closed)
-        del test_dataset
-        del train_dataset
-        data_dict = None
-
-        ## select best-scoring PmSM per cluster of each run
-        pmsm_df = (
-            test_df.select(
-                pl.col("run_index", "pmsm_index", "cluster"),
-                pl.Series(values=test_score_arr, name="score"),
-            )
-            .group_by(["run_index", "cluster"])
-            .agg(pl.all().sort_by("score").last())
-            .join(
-                pmsm_df.select(pl.exclude("cluster")),
-                how="left",
-                on=["run_index", "pmsm_index"],
-            )
-            .drop("cluster")
-        )
-        logger.info(
-            f"Selected {pmsm_df.shape[0]} non-redundant PmSMs (one per cluster) from {len(test_score_arr)} PmSMs"
-        )
-
-        ## Perform global and run-specific FDR analysis
-        fdr_analyzer = FDRAnalyzer(
-            q_value_cutoff=q_value_cutoff, db_dir=search_config.db_dir
-        )
-        pmsm_df = fdr_analyzer.perform_global_analysis(pmsm_df)
-        pmsm_df = fdr_analyzer.batch_run_specific_analysis(pmsm_df)
-
-        ## add auxiliary columns
-        pmsm_df = fdr_analyzer.add_fasta_id_column(pmsm_df)
-        pmsm_df = pmsm_df.join(
-            result_aggregator.get_run_df(), on="run_index", how="left"
-        )
-
+        pmsm_df = processor.run_global(result_aggregator, group_key)
         self.log_id_statistics_table(pmsm_df, q_value_cutoff)
-
         return pmsm_df
+
+    # def perform_global_tda(self) -> None:
+
+    #     # [TODO] handle potential memory issue in case of many runs
+
+    #     self.state = SearchState.SECOND_TDA
+    #     logger.info("Performing global target-decoy analysis")
+
+    #     search_config = self.search_config
+    #     group_key = self.get_results_group_key()
+    #     q_value_cutoff = search_config.config.get(
+    #         "q_value_cutoff", DEFAULT_Q_VALUE_CUTOFF
+    #     )
+
+    #     result_aggregator = ResultsAggregator(
+    #         db_dir=self.get_db_dir(), search_config=search_config
+    #     )
+
+    #     hdf_files = result_aggregator.get_hdf_files()
+
+    #     # [TODO] load features conditionally based on num_runs and available memory
+    #     total_hdf_size = sum(f.stat().st_size for f in hdf_files)
+    #     available_memory = psutil.virtual_memory().available
+    #     load_features = total_hdf_size * 0.4 < available_memory
+    #     # load_features = num_runs <= 64
+    #     logger.info(
+    #         f"Total HDF size: {total_hdf_size / (1024**3):.2f} GB, "
+    #         f"Available RAM: {available_memory / (1024**3):.2f} GB. "
+    #         f"Load features: {load_features}"
+    #     )
+
+    #     pmsm_df, data_dict = result_aggregator.get_search_results(
+    #         group_key, load_features=load_features
+    #     )
+
+    #     num_decoys = pmsm_df["is_decoy"].sum()
+    #     num_targets = len(pmsm_df) - num_decoys
+    #     logger.info(
+    #         f"Training a classifier with {num_targets:,} positive and {num_decoys:,} negative PmSMs"
+    #     )
+
+    #     # Train classifier and rescore PmSMs
+    #     splitter = DatasetSplitter()
+    #     train_df, test_df = splitter.split_by_peptide(
+    #         pmsm_df.select(
+    #             pl.col(
+    #                 "run_index",
+    #                 "pmsm_index",
+    #                 "peptide_index",
+    #                 "is_decoy",
+    #                 "observed_rt",
+    #                 "predicted_rt",
+    #                 "cluster",
+    #             )
+    #         )
+    #     )
+
+    #     train_dataset = PMSMDataset(
+    #         pmsm_df=train_df,
+    #         hdf_files=hdf_files,
+    #         hdf_group_key=group_key,
+    #         data_dict=data_dict,
+    #     )
+    #     test_dataset = PMSMDataset(
+    #         pmsm_df=test_df,
+    #         hdf_files=hdf_files,
+    #         hdf_group_key=group_key,
+    #         data_dict=data_dict,
+    #     )
+
+    #     trainer = TargetDecoyTrainer()
+    #     test_score_arr = trainer.train(
+    #         model_version="global_tda",
+    #         train_dataset=train_dataset,
+    #         test_dataset=test_dataset,
+    #         output_dir=search_config.output_dir,
+    #         device=self.device,
+    #     )
+
+    #     # Cleanup (make sure hdf files are closed)
+    #     del test_dataset
+    #     del train_dataset
+    #     data_dict = None
+
+    #     ## select best-scoring PmSM per cluster of each run
+    #     pmsm_df = (
+    #         test_df.select(
+    #             pl.col("run_index", "pmsm_index", "cluster"),
+    #             pl.Series(values=test_score_arr, name="score"),
+    #         )
+    #         .group_by(["run_index", "cluster"])
+    #         .agg(pl.all().sort_by("score").last())
+    #         .join(
+    #             pmsm_df.select(pl.exclude("cluster")),
+    #             how="left",
+    #             on=["run_index", "pmsm_index"],
+    #         )
+    #         .drop("cluster")
+    #     )
+    #     logger.info(
+    #         f"Selected {pmsm_df.shape[0]} non-redundant PmSMs (one per cluster) from {len(test_score_arr)} PmSMs"
+    #     )
+
+    #     ## Perform global and run-specific FDR analysis
+    #     fdr_analyzer = FDRAnalyzer(
+    #         q_value_cutoff=q_value_cutoff, db_dir=search_config.db_dir
+    #     )
+    #     pmsm_df = fdr_analyzer.perform_global_analysis(pmsm_df)
+    #     pmsm_df = fdr_analyzer.batch_run_specific_analysis(pmsm_df)
+
+    #     ## add auxiliary columns
+    #     pmsm_df = fdr_analyzer.add_fasta_id_column(pmsm_df)
+    #     pmsm_df = pmsm_df.join(
+    #         result_aggregator.get_run_df(), on="run_index", how="left"
+    #     )
+
+    #     self.log_id_statistics_table(pmsm_df, q_value_cutoff)
+
+    #     return pmsm_df
 
     def perform_quantification(self, pmsm_df: pl.DataFrame) -> None:
 
@@ -583,22 +605,22 @@ class SearchManager:
         # First search
         self.execute_batch()
 
-        # Transfer learning
-        self.perform_transfer_learning()
+        # # Transfer learning
+        # self.perform_transfer_learning()
 
-        # Second search
-        self.execute_batch()
+        # # Second search
+        # self.execute_batch()
 
-        # FDR control and quantification
-        pmsm_df = self.perform_global_tda()
+        # # FDR control and quantification
+        # pmsm_df = self.perform_global_tda()
 
-        # Quantification
-        pmsm_df, pg_quant_df = self.perform_quantification(pmsm_df)
+        # # Quantification
+        # pmsm_df, pg_quant_df = self.perform_quantification(pmsm_df)
 
-        # Save final results
-        self.save_pmsm_df(pmsm_df, pg_quant_df)
+        # # Save final results
+        # self.save_pmsm_df(pmsm_df, pg_quant_df)
 
-        logger.info("DelPi workflow completed successfully")
+        # logger.info("DelPi workflow completed successfully")
 
     def log_id_statistics_table(self, pmsm_df, q_value_cutoff):
 

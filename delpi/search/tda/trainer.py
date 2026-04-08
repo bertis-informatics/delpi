@@ -1,20 +1,17 @@
 from pathlib import Path
-from typing import Tuple, Union
+from typing import Tuple
 
 import numpy as np
 import torch
-import tqdm
 
-from torch.utils.data import DataLoader, TensorDataset, random_split
 from lightning.pytorch.callbacks.early_stopping import EarlyStopping
 from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.trainer import Trainer
 from lightning.pytorch.loggers import CSVLogger
-from sklearn.model_selection import train_test_split
+from torch.utils.data import DataLoader, TensorDataset, random_split
 
 from delpi.search.tda.classfier import TargetDecoyClassifier
 from delpi.utils.down_sampler import DownsampleSampler
-from delpi.search.tda.dataset import PMSMDataset
 
 
 # Default training parameters
@@ -25,8 +22,8 @@ DEFAULT_TRAINING_PARAMS = {
     "random_seed": 928,
     "batch_size": 512,
     "train_split": 0.8,
-    "max_val_samples": 120000,
-    "max_train_samples_per_epoch": 2000000,
+    "max_val_samples": 2**17,
+    "max_train_samples_per_epoch": 2**21,
     "test_split": 0.5,  # only half of target peptides are used for training
     "early_stopping_patience": 3,
     "early_stopping_min_delta": 1e-6,
@@ -34,6 +31,7 @@ DEFAULT_TRAINING_PARAMS = {
 
 # Default model parameters
 DEFAULT_MODEL_PARAMS = {
+    "input_size": 193,
     "layers": [64, 32],
     "dropout": 0,
     "focal_loss_gamma_pos": 0.0,
@@ -48,12 +46,12 @@ class TargetDecoyTrainer:
     def __init__(self, model_params: dict = None, training_params: dict = None):
         self.model_params = {**DEFAULT_MODEL_PARAMS, **(model_params or {})}
         self.training_params = {**DEFAULT_TRAINING_PARAMS, **(training_params or {})}
+        self.best_model_path = None
 
     def train(
         self,
         model_version: str,
-        train_dataset: Union[PMSMDataset, TensorDataset],
-        test_dataset: Union[PMSMDataset, TensorDataset],
+        train_dataset: TensorDataset,
         output_dir: Path,
         device: torch.device,
     ) -> np.ndarray:
@@ -62,14 +60,12 @@ class TargetDecoyTrainer:
 
         Args:
             train_dataset: Training dataset
-            test_dataset: Test dataset for scoring
             model_log_dir: Directory to save model logs
             device: PyTorch device for training
 
         Returns:
             Array of scores for the test dataset
         """
-        input_size = PMSMDataset.PMSM_EMBEDDING_DIM
         num_workers = (
             0
             if isinstance(train_dataset, TensorDataset) or train_dataset.use_memory
@@ -101,7 +97,7 @@ class TargetDecoyTrainer:
         )
 
         # Create model
-        model = self._create_model(input_size)
+        model = self._create_model()
 
         # Setup callbacks
         callbacks = self._setup_callbacks()
@@ -124,13 +120,16 @@ class TargetDecoyTrainer:
             train_dataloaders=train_loader,
             val_dataloaders=val_loader,
         )
+        self.best_model_path = callbacks[1].best_model_path
 
-        # Score test dataset
-        return self._score_dataset(test_dataset, callbacks[1].best_model_path, device)
+    def get_best_model(self) -> TargetDecoyClassifier:
+        return TargetDecoyClassifier.load_from_checkpoint(
+            self.best_model_path,
+        ).eval()
 
     def _split_training_data(
-        self, train_dataset: Union[PMSMDataset, TensorDataset]
-    ) -> Union[Tuple[PMSMDataset, PMSMDataset], Tuple[TensorDataset, TensorDataset]]:
+        self, train_dataset: TensorDataset
+    ) -> Tuple[TensorDataset, TensorDataset]:
         """Split training dataset into train and validation sets."""
 
         train_split = self.training_params["train_split"]
@@ -143,42 +142,16 @@ class TargetDecoyTrainer:
         else:
             split_lens = [train_split, 1 - train_split]
 
-        if isinstance(train_dataset, TensorDataset):
-            generator = torch.Generator()
-            if self.training_params["random_seed"] is not None:
-                generator = generator.manual_seed(self.training_params["random_seed"])
-            return random_split(train_dataset, split_lens, generator=generator)
+        generator = torch.Generator()
+        if self.training_params["random_seed"] is not None:
+            generator = generator.manual_seed(self.training_params["random_seed"])
+        return random_split(train_dataset, split_lens, generator=generator)
 
-        train_df, val_df = train_test_split(
-            train_dataset.pmsm_df,
-            test_size=split_lens[-1],
-            shuffle=True,
-            random_state=self.training_params["random_seed"],
-        )
-
-        train_ds = PMSMDataset(
-            train_df,
-            hdf_files=train_dataset.hdf_files,
-            hdf_group_key=train_dataset.group_key,
-            rt_scale=train_dataset.rt_scale,
-            data_dict=train_dataset.data_dict,
-        )
-
-        val_ds = PMSMDataset(
-            val_df,
-            hdf_files=train_dataset.hdf_files,
-            hdf_group_key=train_dataset.group_key,
-            rt_scale=train_dataset.rt_scale,
-            data_dict=train_dataset.data_dict,
-        )
-
-        return train_ds, val_ds
-
-    def _create_model(self, input_size: int) -> TargetDecoyClassifier:
+    def _create_model(self) -> TargetDecoyClassifier:
         """Create a target-decoy classifier model."""
         torch.manual_seed(self.training_params["random_seed"])
         return TargetDecoyClassifier(
-            input_size=input_size,
+            input_size=self.model_params["input_size"],
             layers=self.model_params["layers"],
             dropout=self.model_params["dropout"],
             focal_loss_gamma_pos=self.model_params["focal_loss_gamma_pos"],
@@ -199,32 +172,7 @@ class TargetDecoyTrainer:
             monitor="val_loss",
             mode="min",
             save_top_k=1,
-            filename="{epoch}-{val_loss:.4f}",
+            filename="val_best",
+            # filename="{epoch}-{val_loss:.4f}",
         )
         return [early_stop_callback, checkpoint_callback]
-
-    def _score_dataset(
-        self, test_dataset: TensorDataset, model_path: str, device: torch.device
-    ) -> np.ndarray:
-        """Score a dataset using the trained model."""
-        test_loader = DataLoader(
-            test_dataset, shuffle=False, batch_size=self.training_params["batch_size"]
-        )
-
-        trained_model = TargetDecoyClassifier.load_from_checkpoint(
-            model_path, map_location=device
-        ).eval()
-
-        test_score_arr = np.empty(len(test_dataset), dtype=np.float32)
-
-        st = 0
-        with torch.inference_mode():
-            for batch in tqdm.tqdm(test_loader, desc="Scoring test dataset"):
-                X, y_true = batch
-                logits = trained_model(X.to(device))
-                logits = logits.flatten().detach().cpu().numpy()
-                ed = st + logits.shape[0]
-                test_score_arr[st:ed] = logits
-                st = ed
-
-        return test_score_arr

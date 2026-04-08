@@ -22,7 +22,10 @@ class FDRAnalyzer:
         )
 
     def perform_global_analysis(
-        self, pmsm_df: pl.DataFrame, protein_inference: bool = True
+        self,
+        pmsm_df: pl.DataFrame,
+        protein_inference: bool = True,
+        target_to_decoy_size_ratio: float = 1.0,
     ) -> pl.DataFrame:
 
         g_pmsm_df = (
@@ -43,14 +46,14 @@ class FDRAnalyzer:
             g_pmsm_df,
             group_keys=["precursor_index"],
             out_column="global_precursor_q_value",
-            target_to_decoy_size_ratio=2.0,
+            target_to_decoy_size_ratio=target_to_decoy_size_ratio,
         )
 
         g_pmsm_df = self._update_q_values(
             g_pmsm_df,
             group_keys=["peptidoform_index"],
             out_column="global_peptide_q_value",
-            target_to_decoy_size_ratio=2.0,
+            target_to_decoy_size_ratio=target_to_decoy_size_ratio,
         )
 
         if protein_inference:
@@ -89,21 +92,24 @@ class FDRAnalyzer:
         return pmsm_df
 
     def perform_run_specific_analysis(
-        self, pmsm_df: pl.DataFrame, protein_inference: bool = True
+        self,
+        pmsm_df: pl.DataFrame,
+        protein_inference: bool = True,
+        target_to_decoy_size_ratio: float = 1.0,
     ) -> pl.DataFrame:
 
         pmsm_df = self._update_q_values(
             pmsm_df,
             group_keys=["precursor_index"],
             out_column="precursor_q_value",
-            target_to_decoy_size_ratio=2.0,
+            target_to_decoy_size_ratio=target_to_decoy_size_ratio,
         )
 
         pmsm_df = self._update_q_values(
             pmsm_df,
             group_keys=["peptidoform_index"],
             out_column="peptide_q_value",
-            target_to_decoy_size_ratio=2.0,
+            target_to_decoy_size_ratio=target_to_decoy_size_ratio,
         )
 
         if protein_inference:
@@ -117,14 +123,13 @@ class FDRAnalyzer:
                 pl.exclude("protein_group", "master_protein")
             ).join(pg_df, on="precursor_index", how="left")
 
-        # Calculate protein group-level Q-values
-
-        pmsm_df = self._update_q_values(
-            pmsm_df,
-            group_keys=["protein_group", "is_decoy"],
-            out_column="protein_group_q_value",
-            target_to_decoy_size_ratio=1.0,
-        )
+            # Calculate protein group-level Q-values
+            pmsm_df = self._update_q_values(
+                pmsm_df,
+                group_keys=["protein_group", "is_decoy"],
+                out_column="protein_group_q_value",
+                target_to_decoy_size_ratio=1.0,
+            )
 
         return pmsm_df
 

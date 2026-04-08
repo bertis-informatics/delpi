@@ -125,6 +125,70 @@ class ResultsAggregator:
         )
         return run_df
 
+    def load_pmsm_df(
+        self,
+        group_key: str = "second_results",
+        data_keys: List[str] = [
+            "precursor_index",
+            "frame_num",
+            "cluster",
+            "predicted_rt",
+            "observed_rt",
+            "logit",
+        ],
+    ) -> pl.DataFrame:
+
+        assert group_key in ["first_results", "second_results"]
+
+        results_dict = defaultdict(list)
+        for run_index, result_manager in self._results_dict.items():
+            run_results_dict = result_manager.read_dict(
+                group_key,
+                data_keys=data_keys,
+            )
+            n = run_results_dict["precursor_index"].shape[0]
+            if n > 0:
+                run_results_dict["run_index"] = np.full(n, run_index, dtype=np.uint32)
+                run_results_dict["pmsm_index"] = np.arange(n, dtype=np.uint32)
+                for k, v in run_results_dict.items():
+                    results_dict[k].append(v)
+
+        for k, v in results_dict.items():
+            results_dict[k] = np.concatenate(v) if len(v) > 0 else v
+
+        pmsm_df = pl.DataFrame(results_dict)
+        # pmsm_df = PeptideDatabase.join(
+        #     self.db_dir,
+        #     pmsm_df,
+        #     precursor_columns=[],
+        #     modification_columns=[],
+        #     peptide_columns=["is_decoy"],
+        # )
+        return pmsm_df
+
+    def load_features(
+        self,
+        pmsm_df: pl.DataFrame,
+        group_key: str = "second_results",
+        feature_dim: int = 193,
+    ) -> np.ndarray:
+
+        feature_arr = np.empty((pmsm_df.shape[0], feature_dim), dtype=np.float32)
+
+        pmsm_df = pmsm_df.with_row_index("index_")
+        for run_index, result_manager in self._results_dict.items():
+            sub_df = pmsm_df.filter(pl.col("run_index") == run_index)
+            if sub_df.shape[0] == 0:
+                continue
+            result_manager.load_features(
+                group_key,
+                feature_dim=feature_dim,
+                out=feature_arr[sub_df["index_"]],
+                row_indices=sub_df["pmsm_index"].to_numpy(),
+            )
+
+        return feature_arr
+
     def get_search_results(
         self,
         group_key: str,

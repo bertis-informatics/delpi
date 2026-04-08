@@ -2,7 +2,10 @@ import torch
 import torch.nn as nn
 import torchmetrics
 
+import tqdm
 import lightning.pytorch as pl
+import numpy as np
+from torch.utils.data import DataLoader, TensorDataset
 
 from delpi.model.focal_loss import AsymmetricFocalLoss
 from delpi.utils.metric import RecallAtFDR
@@ -32,7 +35,7 @@ class TargetDecoyClassifier(pl.LightningModule):
         num_neurons = [input_size] + layers
         for i in range(len(num_neurons) - 1):
             fc_layers.append(nn.Linear(num_neurons[i], num_neurons[i + 1]))
-            fc_layers.append(nn.ReLU())
+            fc_layers.append(nn.GELU())
             fc_layers.append(nn.Dropout(dropout))
         fc_layers.append(nn.Linear(num_neurons[-1], 1))
 
@@ -154,3 +157,28 @@ class TargetDecoyClassifier(pl.LightningModule):
         )
 
         return ({"optimizer": optimizer, "lr_scheduler": scheduler},)
+
+    def compute_score(
+        self,
+        feature_arr: np.ndarray,
+        batch_size: int = 512,
+    ) -> np.ndarray:
+
+        self.eval()
+        test_loader = DataLoader(
+            TensorDataset(torch.from_numpy(feature_arr)),
+            shuffle=False,
+            batch_size=batch_size,
+        )
+        logit_arr = np.empty(len(feature_arr), dtype=np.float32)
+        st = 0
+        with torch.inference_mode():
+            for batch in tqdm.tqdm(test_loader, desc="Scoring"):
+                x_batch = batch[0]
+                logits = self(x_batch.to(self.device))
+                logits = logits.flatten().detach().cpu().numpy()
+                ed = st + logits.shape[0]
+                logit_arr[st:ed] = logits
+                st = ed
+
+        return logit_arr

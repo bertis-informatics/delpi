@@ -18,12 +18,9 @@ from delpi.lcms.dda_run import DDARun
 from delpi.lcms.dia_run import DIARun
 from delpi.model.classifier import DelPiModel
 from delpi.search.config import SearchConfig
-from delpi.search.result_aggregator import ResultsAggregator
 from delpi.search.result_manager import ResultManager
 from delpi.database.peptide_database import PeptideDatabase
-from delpi.search.tda.dataset import DatasetSplitter, PMSMDataset
-from delpi.search.tda.fdr_analyzer import FDRAnalyzer
-from delpi.search.tda.trainer import TargetDecoyTrainer
+from delpi.search.tda.tda_processor import TDAProcessor
 from delpi.model.pmsm_scale import PeptideMultiSpectraMatchScaler
 from delpi.model.rt_calibrator import RetentionTimeCalibrator
 from delpi.search.tl.data_prep import (
@@ -36,6 +33,7 @@ from delpi.utils.log_config import configure_logging
 from delpi.search.progress.tracker import ProgressTracker
 from delpi.search.progress.tqdm_tracker import TqdmProgressTracker
 from delpi.search.progress.callback_tracker import CallbackProgressTracker
+from delpi.constants import DEFAULT_Q_VALUE_CUTOFF
 from delpi import MODEL_DIR
 
 
@@ -244,79 +242,105 @@ class BaseSearchEngine(ABC):
             if progress_queue is not None:
                 progress_queue.put(None)  # sentinel — tells parent we're done
 
-    def perform_tda(self, result_manager: ResultManager) -> pl.DataFrame:
+    # def perform_tda(self, result_manager: ResultManager) -> pl.DataFrame:
 
+    #     logger.info("Target-decoy analysis started")
+
+    #     # Extract parameters from config
+    #     q_value_cutoff = self.search_config.config["q_value_cutoff"]
+
+    #     # Load search results
+    #     group_key = self.get_results_group_key()
+    #     result_aggregator = ResultsAggregator(
+    #         db_dir=self.get_db_dir()
+    #     ).add_result_manager(0, result_manager)
+
+    #     pmsm_df, data_dict = result_aggregator.get_search_results(
+    #         group_key, load_features=True
+    #     )
+
+    #     num_decoys = pmsm_df["is_decoy"].sum()
+    #     num_targets = len(pmsm_df) - num_decoys
+    #     logger.info(
+    #         f"Training a classifier with {num_targets:,} positive and {num_decoys:,} negative PmSMs"
+    #     )
+
+    #     # Train classifier and rescore PmSMs
+    #     splitter = DatasetSplitter()
+    #     train_df, test_df = splitter.split_by_peptide(pmsm_df)
+    #     train_dataset = PMSMDataset.create_tensor_dataset(train_df, data_dict)
+    #     test_dataset = PMSMDataset.create_tensor_dataset(test_df, data_dict)
+    #     trainer = TargetDecoyTrainer()
+    #     test_score_arr = trainer.train(
+    #         result_manager.run_name,
+    #         train_dataset,
+    #         test_dataset,
+    #         output_dir=self.search_config.output_dir,
+    #         device=self.device,
+    #     )
+
+    #     ###############################################################################
+    #     # select only one PmSM per cluster (sharing the same peaks)
+    #     # then select only one PmSM per precursor
+    #     # the order of these two steps does matter
+    #     # because low-scoring PmSMs of precursor may not share peaks with other PmSMs
+    #     ################################################################################
+    #     pmsm_df = (
+    #         test_df.with_columns(score=test_score_arr)
+    #         .group_by(["cluster"])
+    #         .agg(pl.all().sort_by("score").last())
+    #     )
+    #     logger.info(
+    #         f"Selected {pmsm_df.shape[0]} non-redundant PmSMs (one per cluster) from {test_df.shape[0]} PmSMs"
+    #     )
+
+    #     ## Now select only one PmSM per precursor
+    #     pmsm_df = pmsm_df.group_by(["precursor_index"]).agg(
+    #         pl.all().sort_by("score").last()
+    #     )
+
+    #     logger.debug(
+    #         f"Selected {pmsm_df.shape[0]} best-scoring PmSMs (one per Precursor)"
+    #     )
+
+    #     fdr_analyzer = FDRAnalyzer(
+    #         q_value_cutoff=q_value_cutoff, db_dir=self.search_config.db_dir
+    #     )
+    #     pmsm_df = fdr_analyzer.perform_run_specific_analysis(pmsm_df)
+    #     counts = ResultManager.compute_id_statistics(pmsm_df, q_value_cutoff)
+    #     logger.info(
+    #         "FDR estimated: "
+    #         f"#Precursors: {counts['precursors']}, "
+    #         f"#Peptides: {counts['peptides']}, "
+    #         f"#Protein Groups: {counts['protein_groups']} at {q_value_cutoff:.2f} FDR"
+    #     )
+
+    #     return pmsm_df.filter(pl.col("precursor_q_value") <= q_value_cutoff)
+
+    def perform_tda(self, result_manager: ResultManager) -> pl.DataFrame:
+        """Run-specific TDA using TensorDataset for fast training/inference."""
         logger.info("Target-decoy analysis started")
 
-        # Extract parameters from config
-        q_value_cutoff = self.search_config.config["q_value_cutoff"]
-
-        # Load search results
+        q_value_cutoff = self.search_config.config.get(
+            "q_value_cutoff", DEFAULT_Q_VALUE_CUTOFF
+        )
         group_key = self.get_results_group_key()
-        result_aggregator = ResultsAggregator(
-            db_dir=self.get_db_dir()
-        ).add_result_manager(0, result_manager)
-
-        pmsm_df, data_dict = result_aggregator.get_search_results(
-            group_key, load_features=True
-        )
-
-        num_decoys = pmsm_df["is_decoy"].sum()
-        num_targets = len(pmsm_df) - num_decoys
-        logger.info(
-            f"Training a classifier with {num_targets:,} positive and {num_decoys:,} negative PmSMs"
-        )
-
-        # Train classifier and rescore PmSMs
-        splitter = DatasetSplitter()
-        train_df, test_df = splitter.split_by_peptide(pmsm_df)
-        train_dataset = PMSMDataset.create_tensor_dataset(train_df, data_dict)
-        test_dataset = PMSMDataset.create_tensor_dataset(test_df, data_dict)
-        trainer = TargetDecoyTrainer()
-        test_score_arr = trainer.train(
-            result_manager.run_name,
-            train_dataset,
-            test_dataset,
+        processor = TDAProcessor(
+            db_dir=self.get_db_dir(),
             output_dir=self.search_config.output_dir,
             device=self.device,
+            q_value_cutoff=q_value_cutoff,
         )
+        pmsm_df = processor.run_single(result_manager, group_key)
 
-        ###############################################################################
-        # select only one PmSM per cluster (sharing the same peaks)
-        # then select only one PmSM per precursor
-        # the order of these two steps does matter
-        # because low-scoring PmSMs of precursor may not share peaks with other PmSMs
-        ################################################################################
-        pmsm_df = (
-            test_df.with_columns(score=test_score_arr)
-            .group_by(["cluster"])
-            .agg(pl.all().sort_by("score").last())
-        )
-        logger.info(
-            f"Selected {pmsm_df.shape[0]} non-redundant PmSMs (one per cluster) from {test_df.shape[0]} PmSMs"
-        )
-
-        ## Now select only one PmSM per precursor
-        pmsm_df = pmsm_df.group_by(["precursor_index"]).agg(
-            pl.all().sort_by("score").last()
-        )
-
-        logger.debug(
-            f"Selected {pmsm_df.shape[0]} best-scoring PmSMs (one per Precursor)"
-        )
-
-        fdr_analyzer = FDRAnalyzer(
-            q_value_cutoff=q_value_cutoff, db_dir=self.search_config.db_dir
-        )
-        pmsm_df = fdr_analyzer.perform_run_specific_analysis(pmsm_df)
         counts = ResultManager.compute_id_statistics(pmsm_df, q_value_cutoff)
         logger.info(
             "FDR estimated: "
             f"#Precursors: {counts['precursors']}, "
             f"#Peptides: {counts['peptides']}, "
-            f"#Protein Groups: {counts['protein_groups']} at {q_value_cutoff:.2f} FDR"
+            f"#Protein Groups: {counts['protein_groups']} "
+            f"at {q_value_cutoff:.2f} FDR"
         )
-
         return pmsm_df.filter(pl.col("precursor_q_value") <= q_value_cutoff)
 
     def _perform_rt_calibration(

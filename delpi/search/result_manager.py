@@ -104,6 +104,51 @@ class ResultManager:
 
         return results
 
+    def load_features(
+        self,
+        group_key: str,
+        feature_dim: int,
+        out: np.ndarray = None,
+        row_indices: np.ndarray = None,
+    ) -> np.ndarray:
+        """Read embedding features from HDF into a (N, feature_dim) array.
+
+        Parameters
+        ----------
+        group_key : str
+            HDF group name (e.g. "second_results").
+        feature_dim : int
+            Width of the output array (embedding + extra columns).
+        out : np.ndarray, optional
+            Pre-allocated destination array.  When provided, embeddings are
+            written into the rows given by *row_indices* (or all rows if
+            *row_indices* is ``None``).  Columns beyond the embedding dim
+            are left untouched.
+        row_indices : np.ndarray, optional
+            HDF row indices to read (fancy-indexing into the dataset).
+            Only used when *out* is provided.
+
+        Returns
+        -------
+        np.ndarray
+            The filled array — either *out* or a freshly allocated one.
+        """
+        with h5py.File(self.hdf_file_path, mode="r") as hdf_file:
+            ds = hdf_file[group_key]["features"]
+            embed_dim = ds.shape[1]
+
+            if out is None:
+                n = ds.shape[0]
+                out = np.empty((n, feature_dim), dtype=np.float32)
+                ds.read_direct(out, dest_sel=np.s_[:, :embed_dim])
+            elif row_indices is not None:
+                all_embeddings = ds[:]
+                out[:, :embed_dim] = all_embeddings[row_indices]
+            else:
+                ds.read_direct(out, dest_sel=np.s_[:, :embed_dim])
+
+        return out
+
     def write_dict(
         self,
         group_key: str,
