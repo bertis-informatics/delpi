@@ -40,8 +40,7 @@ from delpi.constants import DIA_MATCHED_PEAKS_CUTOFF
 
 logger = logging.getLogger(__name__)
 
-# LOGIT_CUTOFF = 1.0
-LOGIT_CUTOFF = 0.0
+LOGIT_CUTOFF = 1.0
 TOPK_PER_PRECURSOR = 10
 
 
@@ -95,8 +94,7 @@ class DIASearchEngine(BaseSearchEngine):
             frame_num_map=frame_num_map,
             ms1_mass_tol=ms1_tol,
             ms2_mass_tol=ms2_tol,
-            # min_peak_count=DIA_MATCHED_PEAKS_CUTOFF,
-            min_peak_count=12,
+            min_peak_count=DIA_MATCHED_PEAKS_CUTOFF,
             topk=peak_group_topk,
         )
         total_batches = count_total_batches(

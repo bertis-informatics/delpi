@@ -38,7 +38,7 @@ from delpi.search.progress.dummy_tracker import DummyProgressTracker
 
 logger = logging.getLogger(__name__)
 
-LOGIT_CUTOFF = 1.0
+LOGIT_CUTOFF = 0.0
 TOPK_PER_PRECURSOR = 10
 
 
