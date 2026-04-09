@@ -15,6 +15,7 @@ THEO_TOKEN_DIM = len(TheoPeakInput)
 EXP_TOKEN_DIM = len(ExpPeakInput)
 
 THEO_PRED_INTENSITY_IDX = TheoPeakInput.PRED_INTENSITY.index
+THEO_MZ_IDX = TheoPeakInput.MZ.index
 THEO_IS_PRECURSOR_IDX = TheoPeakInput.IS_PRECURSOR.index
 THEO_IS_PREFIX_IDX = TheoPeakInput.IS_PREFIX.index
 THEO_CHARGE_IDX = TheoPeakInput.CHARGE.index
@@ -48,6 +49,7 @@ def get_x_theo(theo_peaks: TheoreticalPeakContainer, x_theo: np.ndarray = None):
 
     # precursor peaks
     x_theo[:m, THEO_PRED_INTENSITY_IDX] = theo_peaks.precursor_intensity_arr
+    x_theo[:m, THEO_MZ_IDX] = theo_peaks.precursor_mz_arr
     x_theo[:m, THEO_IS_PRECURSOR_IDX] = 1.0
     x_theo[:m, THEO_IS_PREFIX_IDX] = 0.0
     x_theo[:m, THEO_CHARGE_IDX] = nb.float32(theo_peaks.precursor_charge)
@@ -61,6 +63,7 @@ def get_x_theo(theo_peaks: TheoreticalPeakContainer, x_theo: np.ndarray = None):
     cleavage_index_arr = theo_peaks.fragment_cleavage_index_arr
 
     x_theo[m:, THEO_PRED_INTENSITY_IDX] = theo_peaks.fragment_intensity_arr
+    x_theo[m:, THEO_MZ_IDX] = theo_peaks.fragment_mz_arr[0]  # only monoisotopic peaks
     x_theo[m:, THEO_IS_PRECURSOR_IDX] = 0.0
     x_theo[m:, THEO_IS_PREFIX_IDX] = theo_peaks.fragment_is_prefix_arr
     x_theo[m:, THEO_CHARGE_IDX] = theo_peaks.fragment_charge_arr

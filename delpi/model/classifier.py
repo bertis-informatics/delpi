@@ -63,7 +63,7 @@ class DelPiModel(pl.LightningModule):
         num_neurons = [embed_dim] + list(layers)
         for i in range(len(num_neurons) - 1):
             fc_layers.append(nn.Linear(num_neurons[i], num_neurons[i + 1]))
-            fc_layers.append(nn.GELU())
+            fc_layers.append(nn.ReLU())
             fc_layers.append(nn.Dropout(dropout))
         fc_layers.append(nn.Linear(num_neurons[-1], 1))
         self.classifier = nn.Sequential(*fc_layers)
