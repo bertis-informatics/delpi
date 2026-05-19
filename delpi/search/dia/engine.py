@@ -343,7 +343,7 @@ class DIASearchEngine(BaseSearchEngine):
             logit_cutoff = LOGIT_CUTOFF
             save_quant = False
         else:
-            logit_cutoff = LOGIT_CUTOFF - 1.0
+            logit_cutoff = LOGIT_CUTOFF - 3.0
             save_quant = True
 
         batch_size = self.search_config.config.get("batch_size", 512)

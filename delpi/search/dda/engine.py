@@ -35,7 +35,6 @@ from delpi.model.input import THEORETICAL_PEAK, EXPERIMENTAL_PEAK
 from delpi.search.progress.tracker import ProgressTracker
 from delpi.search.progress.dummy_tracker import DummyProgressTracker
 
-
 logger = logging.getLogger(__name__)
 
 LOGIT_CUTOFF = 0.0

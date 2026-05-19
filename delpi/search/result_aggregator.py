@@ -180,12 +180,17 @@ class ResultsAggregator:
             sub_df = pmsm_df.filter(pl.col("run_index") == run_index)
             if sub_df.shape[0] == 0:
                 continue
-            result_manager.load_features(
+
+            # NOTE: feature_arr[sub_df["index_"]] uses advanced indexing and returns
+            # a copy, so writing into it does not update feature_arr in-place.
+            # Load per-run features and assign back explicitly to preserve row order.
+            run_feature_arr = result_manager.load_features(
                 group_key,
                 feature_dim=feature_dim,
-                out=feature_arr[sub_df["index_"]],
-                row_indices=sub_df["pmsm_index"].to_numpy(),
             )
+            out_idx = sub_df["index_"].to_numpy()
+            row_idx = sub_df["pmsm_index"].to_numpy()
+            feature_arr[out_idx] = run_feature_arr[row_idx]
 
         return feature_arr
 

@@ -14,11 +14,10 @@ from delpi.search.tl.dataset import TransferLearningDataset, LABEL_DTYPE
 from delpi.search.result_aggregator import ResultsAggregator
 from delpi import MODEL_DIR
 
-
 # Default training parameters
 DEFAULT_TRAINING_PARAMS = {
-    "max_epochs": 40,
-    "num_warmup_steps": 4,
+    "max_epochs": 20,
+    "num_warmup_steps": 10,
     "random_seed": 928,
     "batch_size": 512,
     "train_split": 0.8,
@@ -85,13 +84,11 @@ class TransferLearningTrainer:
             transformer_num_heads=12,
             transformer_qkv_bias=True,
             transformer_drop_path_rate=0.1,
-            fine_tuning=True,
+            layer_decay=0.9,
         )
 
-        pretrained_weights = torch.load(
-            MODEL_DIR / "delpi.ms2_predictor.pth",
-            weights_only=False,
-            map_location=device,
+        pretrained_weights = Ms2SpectrumPredictor.load(
+            MODEL_DIR / "delpi.ms2_predictor.pth"
         ).state_dict()
         _ = model.load_state_dict(pretrained_weights, strict=False)
 
@@ -136,10 +133,8 @@ class TransferLearningTrainer:
             min_delta=self.training_params["early_stopping_min_delta"],
         )
         checkpoint_callback = ModelCheckpoint(
-            # monitor="val_loss",
-            # mode="min",
-            monitor="val_sa",
-            mode="max",
+            monitor="val_loss",
+            mode="min",
             save_top_k=1,
             save_last=False,
             filename="{epoch}",

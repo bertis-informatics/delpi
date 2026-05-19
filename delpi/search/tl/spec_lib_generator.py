@@ -80,6 +80,8 @@ class RefinedSpectralLibGenerator(SpectralLibGenerator):
             }
         )
 
+        sequence_df = pl.read_parquet(db_dir / "sequence_df.parquet")
+
         peptide_df = (
             pmsm_df.unique(subset="g_peptide_index", keep="first")
             .select(
@@ -143,6 +145,7 @@ class RefinedSpectralLibGenerator(SpectralLibGenerator):
             .with_row_index("precursor_index")
         )
 
+        self.sequence_df = sequence_df
         self.peptide_df = peptide_df
         self.modification_df = modification_df
         self.precursor_df = precursor_df
@@ -179,6 +182,7 @@ class RefinedSpectralLibGenerator(SpectralLibGenerator):
     def save(self, save_dir: Path):
         """Save spectral library to parquet files."""
         save_dir.mkdir(parents=True, exist_ok=True)
+        self.sequence_df.write_parquet(save_dir / "sequence_df.parquet")
         self.peptide_df.write_parquet(save_dir / "peptide_df.parquet")
         self.modification_df.write_parquet(save_dir / "modification_df.parquet")
         self.precursor_df.write_parquet(save_dir / "precursor_df.parquet")

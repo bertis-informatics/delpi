@@ -15,7 +15,6 @@ from delpi.search.result_aggregator import ResultsAggregator
 from delpi.model.rt_calibrator import RetentionTimeCalibrator
 from delpi import MODEL_DIR
 
-
 # Default training parameters
 DEFAULT_TRAINING_PARAMS = {
     "max_epochs": 40,
@@ -94,10 +93,8 @@ class TransferLearningTrainerForRT:
         train_ds = TransferLearningDatasetForRT(train_labels, data_dict=data_dict)
         val_ds = TransferLearningDatasetForRT(val_labels, data_dict=data_dict)
 
-        pretrained_weights = torch.load(
-            MODEL_DIR / "delpi.rt_predictor.pth",
-            weights_only=False,
-            map_location=device,
+        pretrained_weights = RetentionTimePredictor.load(
+            MODEL_DIR / "delpi.rt_predictor.pth"
         ).state_dict()
 
         model = RetentionTimePredictor(

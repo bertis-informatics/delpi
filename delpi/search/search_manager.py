@@ -647,16 +647,16 @@ class SearchManager:
         # Second search
         self.execute_batch()
 
-        # # FDR control and quantification
-        # pmsm_df = self.perform_global_tda()
+        # FDR control and quantification
+        pmsm_df = self.perform_global_tda()
 
-        # # Quantification
-        # pmsm_df, pg_quant_df = self.perform_quantification(pmsm_df)
+        # Quantification
+        pmsm_df, pg_quant_df = self.perform_quantification(pmsm_df)
 
-        # # Save final results
-        # self.save_pmsm_df(pmsm_df, pg_quant_df)
+        # Save final results
+        self.save_pmsm_df(pmsm_df, pg_quant_df)
 
-        # logger.info("DelPi workflow completed successfully")
+        logger.info("DelPi workflow completed successfully")
 
     def log_id_statistics_table(self, pmsm_df, q_value_cutoff):
 

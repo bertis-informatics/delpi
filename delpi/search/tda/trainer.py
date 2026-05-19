@@ -24,9 +24,7 @@ DEFAULT_TRAINING_PARAMS = {
     "train_split": 0.8,
     "max_val_samples": 2**17,
     "max_train_samples_per_epoch": 2**21,
-    "test_split": 0.5,  # only half of target peptides are used for training
     "early_stopping_patience": 3,
-    "early_stopping_min_delta": 1e-6,
 }
 
 # Default model parameters
@@ -166,7 +164,6 @@ class TargetDecoyTrainer:
         early_stop_callback = EarlyStopping(
             monitor="val_loss",
             patience=self.training_params["early_stopping_patience"],
-            min_delta=self.training_params["early_stopping_min_delta"],
         )
         checkpoint_callback = ModelCheckpoint(
             monitor="val_loss",

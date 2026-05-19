@@ -36,7 +36,6 @@ from delpi.utils.log_config import configure_logging
 from delpi.constants import DEFAULT_Q_VALUE_CUTOFF
 from delpi import MODEL_DIR
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -69,8 +68,9 @@ class BaseSearchEngine(ABC):
 
     def _load_model(self) -> DelPiModel:
         acq_method = self.get_acquisition_method()
-        model = DelPiModel.load(MODEL_DIR / f"delpi.{acq_method.lower()}.pth")
-        model = model.to(self.device).eval()
+        model = DelPiModel.load(MODEL_DIR / f"delpi.{acq_method.lower()}.pth").to(
+            self.device
+        )
         model.transform = PeptideMultiSpectraMatchScaler()
         return model
 
@@ -450,7 +450,6 @@ class BaseSearchEngine(ABC):
             ref_rt=target_df["ref_rt"].to_numpy(),
             obs_rt=target_df["observed_rt"].to_numpy(),
             degree=5 if self.state < SearchState.SECOND_SEARCH else 2,
-            # figure_path=fig_path,
         )
 
         if after_full_search:

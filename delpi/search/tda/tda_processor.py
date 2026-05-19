@@ -99,10 +99,14 @@ class TDAProcessor:
         scored_b = fold_b.with_columns(pl.Series(values=scores_b, name="score"))
         pmsm_df = pl.concat([scored_a, scored_b], how="vertical")
 
-        # Best per cluster, then best per precursor
-        pmsm_df = pmsm_df.group_by("cluster").agg(pl.all().sort_by("score").last())
+        # Best per cluster, then best per precursor.
+        # Tie-break on pmsm_index to make selection deterministic when
+        # multiple PmSMs in a group share the same score.
+        pmsm_df = pmsm_df.group_by("cluster").agg(
+            pl.all().sort_by(["score", "pmsm_index"]).last()
+        )
         pmsm_df = pmsm_df.group_by("precursor_index").agg(
-            pl.all().sort_by("score").last()
+            pl.all().sort_by(["score", "pmsm_index"]).last()
         )
         logger.debug(
             f"Selected {pmsm_df.shape[0]} best-scoring PmSMs (one per precursor)"
@@ -155,7 +159,7 @@ class TDAProcessor:
         scored_df = pl.concat([scored_a, scored_b], how="vertical")
 
         pmsm_df = scored_df.group_by(["run_index", "cluster"]).agg(
-            pl.all().sort_by("score").last()
+            pl.all().sort_by(["score", "pmsm_index"]).last()
         )
         pmsm_df = pmsm_df.join(
             full_pmsm_df.select(pl.exclude("cluster")),
@@ -308,28 +312,41 @@ class TDAProcessor:
         that never saw its peptide during training.
         """
         peptide_ids = (
-            pmsm_df.select("peptide_index").unique()["peptide_index"].shuffle(seed=seed)
+            pmsm_df.select("peptide_index")
+            .unique()
+            .sort("peptide_index")["peptide_index"]
+            .shuffle(seed=seed)
         )
         mid = len(peptide_ids) // 2
         fold_a_ids = peptide_ids[:mid].to_frame()
         fold_b_ids = peptide_ids[mid:].to_frame()
 
-        fold_a_df = pmsm_df.join(fold_a_ids, on="peptide_index", how="inner")
-        fold_b_df = pmsm_df.join(fold_b_ids, on="peptide_index", how="inner")
+        sort_keys = (
+            ["run_index", "pmsm_index"]
+            if "run_index" in pmsm_df.columns
+            else ["pmsm_index"]
+        )
+        fold_a_df = pmsm_df.join(fold_a_ids, on="peptide_index", how="inner").sort(
+            sort_keys
+        )
+        fold_b_df = pmsm_df.join(fold_b_ids, on="peptide_index", how="inner").sort(
+            sort_keys
+        )
         return fold_a_df, fold_b_df
 
     @staticmethod
     def _subsample_train(train_df: pl.DataFrame) -> pl.DataFrame:
         """Subsample high-scoring PmSMs per precursor when dataset is too large."""
-        if train_df.shape[0] <= TDA_MAX_TRAIN_SIZE:
-            return train_df.sort(["run_index", "pmsm_index"])
-
-        train_df = (
-            train_df.sort(["precursor_index", "logit"], descending=[False, True])
-            .with_columns(pl.int_range(pl.len()).over("precursor_index").alias("rank"))
-            .sort(["rank", "logit"], descending=[False, True])
-            .head(TDA_MAX_TRAIN_SIZE)
-        )
+        if train_df.shape[0] > TDA_MAX_TRAIN_SIZE:
+            train_df = train_df.sample(
+                n=TDA_MAX_TRAIN_SIZE, with_replacement=False, shuffle=True, seed=1221
+            )
+            # train_df = (
+            #     train_df.sort(["precursor_index", "logit"], descending=[False, True])
+            #     .with_columns(pl.int_range(pl.len()).over("precursor_index").alias("rank"))
+            #     .sort(["rank", "logit"], descending=[False, True])
+            #     .head(TDA_MAX_TRAIN_SIZE)
+            # )
         return train_df.sort(["run_index", "pmsm_index"])
 
     @staticmethod
@@ -440,7 +457,9 @@ class TDAProcessor:
             # Global: select minimal columns, join back after grouping
             scored = scored.select("run_index", "pmsm_index", "cluster", "score")
 
-        pmsm_df = scored.group_by(group_keys).agg(pl.all().sort_by("score").last())
+        pmsm_df = scored.group_by(group_keys).agg(
+            pl.all().sort_by(["score", "pmsm_index"]).last()
+        )
 
         if full_pmsm_df is not None:
             pmsm_df = pmsm_df.join(
