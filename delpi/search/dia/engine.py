@@ -118,7 +118,11 @@ class DIASearchEngine(BaseSearchEngine):
 
         if progress is None:
             progress = DummyProgressTracker()
-        batch_progress = progress.create_child("PmSMs", total=total_batches, portion=1)
+        # portion=0: this child reports its own bar but does NOT advance the
+        # parent automatically. _search_spectra is invoked once per
+        # (dia_win, speclib chunk); the parent (which counts dia_wins) is
+        # advanced manually in _perform_full_search when a dia_win completes.
+        batch_progress = progress.create_child("PmSMs", total=total_batches, portion=0)
 
         results = defaultdict(list)
         for tensors in Prefetcher(batch_iter, transform=pin_numpy_tuple):
@@ -268,6 +272,8 @@ class DIASearchEngine(BaseSearchEngine):
                             prev_dia_win, chunk_results, cluster_count
                         )
                         chunk_results = []
+                    # Previous dia_win fully processed -> advance parent by 1.
+                    progress.advance(1)
                 prev_dia_win = dia_win
 
                 results = self._search_spectra(
@@ -291,9 +297,11 @@ class DIASearchEngine(BaseSearchEngine):
                 ):
                     chunk_results.append(results)
 
-            # flush last group
+            # flush last group and advance parent for the final dia_win
             if chunk_results:
                 cluster_count = _flush(prev_dia_win, chunk_results, cluster_count)
+            if prev_dia_win is not None:
+                progress.advance(1)
 
         self.empty_device_cache()
 

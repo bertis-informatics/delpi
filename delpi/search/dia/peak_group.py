@@ -349,12 +349,6 @@ def find_peak_groups(
             + 0.5 * comb_count_arr[peak_group_arr]
             + 0.25 * comb_count_arr[peak_group_arr + 1]
         )
-        # peak_group_weights = (
-        #     0.5 * xic_peak_count_arr[peak_group_arr - 1]
-        #     + 0.5 * xic_peak_count_arr[peak_group_arr + 1]
-        #     + xic_peak_count_arr[peak_group_arr]
-        #     + 2 * np.log2(apex_median_intensity)
-        # )
         peak_group_arr = cluster_peaks_with_weights(
             peak_group_arr,
             peak_group_weights,

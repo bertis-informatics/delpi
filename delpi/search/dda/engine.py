@@ -112,7 +112,7 @@ class DDASearchEngine(BaseSearchEngine):
             )
 
         total_batches = count_total_batches(
-            peak_group_container.peak_count_arr, batch_size=512
+            peak_group_container.peak_count_arr, batch_size=batch_size
         )
 
         batch_iter = generate_batches(
@@ -130,7 +130,11 @@ class DDASearchEngine(BaseSearchEngine):
 
         if progress is None:
             progress = DummyProgressTracker()
-        batch_progress = progress.create_child("PmSMs", total=total_batches, portion=1)
+        # portion=0: this child reports its own bar but does NOT advance the
+        # parent automatically. _search_spectra is invoked once per
+        # (ms2_map, speclib chunk); the parent (which counts ms2_maps) is
+        # advanced manually in _perform_full_search when an ms2_map completes.
+        batch_progress = progress.create_child("PmSMs", total=total_batches, portion=0)
 
         results = defaultdict(list)
         for tensors in Prefetcher(batch_iter, transform=pin_numpy_tuple):
@@ -290,6 +294,8 @@ class DDASearchEngine(BaseSearchEngine):
                             prev_ms2_map, chunk_results, cluster_count
                         )
                         chunk_results = []
+                    # Previous ms2_map fully processed -> advance parent by 1.
+                    progress.advance(1)
                 prev_ms2_map = ms2_map
 
                 results = self._search_spectra(
@@ -314,9 +320,11 @@ class DDASearchEngine(BaseSearchEngine):
                 ):
                     chunk_results.append(results)
 
-            # flush last group
+            # flush last group and advance parent for the final ms2_map
             if chunk_results:
                 cluster_count = _flush(prev_ms2_map, chunk_results, cluster_count)
+            if prev_ms2_map is not None:
+                progress.advance(1)
 
         self.empty_device_cache()
 
