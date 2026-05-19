@@ -64,16 +64,16 @@ class SpectralLibGenerator:
     @property
     def ms2_predictor(self):
         if self._ms2_predictor is None:
-            self._ms2_predictor = torch.load(
-                MODEL_DIR / "delpi.ms2_predictor.pth", weights_only=False
+            self._ms2_predictor = Ms2SpectrumPredictor.load(
+                MODEL_DIR / "delpi.ms2_predictor.pth"
             )
         return self._ms2_predictor.to(self.device).eval()
 
     @property
     def rt_predictor(self):
         if self._rt_predictor is None:
-            self._rt_predictor = torch.load(
-                MODEL_DIR / "delpi.rt_predictor.pth", weights_only=False
+            self._rt_predictor = RetentionTimePredictor.load(
+                MODEL_DIR / "delpi.rt_predictor.pth"
             )
         return self._rt_predictor.to(self.device).eval()
 

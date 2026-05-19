@@ -109,12 +109,16 @@ class RetentionTimeCalibrator(LinearProjectionCalibrator):
         ref_rt: Union[np.ndarray, List, pl.Series],
         obs_rt: Union[np.ndarray, List, pl.Series],
     ):
-        x_train = self._to_array(ref_rt).reshape(-1, 1)
-        y_train = self._to_array(obs_rt)
+        # Use float64 to make polynomial regression numerically stable across
+        # sklearn / LAPACK implementations.
+        x_train = self._to_array(ref_rt).astype(np.float64).reshape(-1, 1)
+        y_train = self._to_array(obs_rt).astype(np.float64)
 
         # fitting calibrator model
         estimator = make_pipeline(
-            PolynomialFeatures(degree=self.degree),
+            # include_bias=False avoids duplicating the intercept term because
+            # LinearRegression already fits an intercept by default.
+            PolynomialFeatures(degree=self.degree, include_bias=False),
             LinearRegression(),
         ).fit(x_train, y_train)
 
@@ -132,13 +136,13 @@ class RetentionTimeCalibrator(LinearProjectionCalibrator):
         #### Residual Modeling with Heteroscedasticity-Aware Error Modeling
         mask = residuals > 0
         upper_residual_estimator = make_pipeline(
-            PolynomialFeatures(degree=self.degree),
+            PolynomialFeatures(degree=self.degree, include_bias=False),
             LinearRegression(),
         ).fit(y_pred[mask].reshape((-1, 1)), residuals[mask])
 
         mask = residuals < 0
         lower_residual_estimator = make_pipeline(
-            PolynomialFeatures(degree=self.degree),
+            PolynomialFeatures(degree=self.degree, include_bias=False),
             LinearRegression(),
         ).fit(y_pred[mask].reshape((-1, 1)), np.abs(residuals[mask]))
 
@@ -200,7 +204,7 @@ class RetentionTimeCalibrator(LinearProjectionCalibrator):
         if self.estimator is None:
             raise NotFittedError()
 
-        x = self._to_array(ref_rt).reshape(-1, 1)
+        x = self._to_array(ref_rt).astype(np.float64).reshape(-1, 1)
         rt_pred = self.estimator.predict(x)
         # rt_scale = self.get_rt_scale(rt_pred)
         lower_interval, upper_interval = self.get_confident_interval(
@@ -332,7 +336,7 @@ class RetentionTimeCalibrator(LinearProjectionCalibrator):
         df = ref_df.join(rt_df, on="precursor_index", how="inner")
 
         estimator = make_pipeline(
-            PolynomialFeatures(degree=degree),
+            PolynomialFeatures(degree=degree, include_bias=False),
             LinearRegression(),
         ).fit(
             df[f"{rt_column}_right"].to_numpy().reshape((-1, 1)),

@@ -1,4 +1,5 @@
-from typing import Dict, List
+from typing import Dict, List, Self
+from pathlib import Path
 
 import numpy as np
 import polars as pl
@@ -48,7 +49,7 @@ class Ms2SpectrumPredictor(LightningModule):
         transformer_num_heads: int = 8,
         transformer_qkv_bias: bool = True,
         transformer_drop_path_rate: float = 0.0,
-        fine_tuning: bool = False,
+        layer_decay: float = 1.0,
         *args,
         **kwargs,
     ):
@@ -123,9 +124,31 @@ class Ms2SpectrumPredictor(LightningModule):
         self.max_lr = max_lr
         self.num_warmup_steps = num_warmup_steps
         self.num_training_steps = num_training_steps
-        self.fine_tuning = fine_tuning
+        self.layer_decay = layer_decay
 
         self.save_hyperparameters()
+
+    @classmethod
+    def load(cls, path: str | Path) -> Self:
+        """Load an Ms2SpectrumPredictor from a file exported by :meth:`export`."""
+        from delpi.utils.model_io import load_model
+
+        return load_model(cls, path)
+
+    def export(
+        self,
+        save_path: str | Path,
+        model_version: str = "v1.0",
+    ) -> None:
+        """Export weights + hyperparameters + meta to ``save_path``.
+
+        The exported file can be reconstructed without Lightning::
+
+            model = Ms2SpectrumPredictor.load(save_path)
+        """
+        from delpi.utils.model_io import save_model
+
+        save_model(self, save_path, model_version=model_version)
 
     def forward(self, x_aa, x_mod, x_meta):
         """
@@ -262,8 +285,9 @@ class Ms2SpectrumPredictor(LightningModule):
         #     )
         y_pred = y_pred[..., : y_true.size(-1)]
 
-        # Use MSE loss for intensity prediction
-        loss = nn.functional.mse_loss(y_pred, y_true)
+        # Use L1 loss for intensity prediction (matches Carafe / AlphaPeptDeep
+        # fine-tuning recipe; more robust than MSE for sparse non-negative targets)
+        loss = nn.functional.l1_loss(y_pred, y_true)
 
         return loss, y_true, y_pred
 
@@ -354,14 +378,17 @@ class Ms2SpectrumPredictor(LightningModule):
 
     def configure_optimizers(self):
         """Configure optimizer and learning rate scheduler."""
-        if self.fine_tuning:
+        if self.layer_decay < 1.0:
             param_groups = param_groups_lrd(
-                model=self, weight_decay=0.05, layer_decay=0.75, max_lr=self.max_lr
+                model=self,
+                weight_decay=0.05,
+                layer_decay=self.layer_decay,
+                max_lr=self.max_lr,
             )
         else:
             param_groups = self.parameters()
 
-        optimizer = torch.optim.AdamW(param_groups, lr=self.max_lr, weight_decay=0.01)
+        optimizer = torch.optim.AdamW(param_groups, lr=self.max_lr, weight_decay=0.05)
         scheduler = get_cosine_schedule_with_warmup(
             optimizer,
             num_warmup_steps=self.num_warmup_steps,

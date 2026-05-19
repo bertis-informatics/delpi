@@ -1,4 +1,5 @@
-from typing import Dict
+from typing import Dict, Self
+from pathlib import Path
 
 import polars as pl
 import numpy as np
@@ -111,6 +112,28 @@ class RetentionTimePredictor(LightningModule):
 
         self.save_hyperparameters()
 
+    @classmethod
+    def load(cls, path: str | Path) -> Self:
+        """Load a RetentionTimePredictor from a file exported by :meth:`export`."""
+        from delpi.utils.model_io import load_model
+
+        return load_model(cls, path)
+
+    def export(
+        self,
+        save_path: str | Path,
+        model_version: str = "v1.0",
+    ) -> None:
+        """Export weights + hyperparameters + meta to ``save_path``.
+
+        The exported file can be reconstructed without Lightning::
+
+            model = RetentionTimePredictor.load(save_path)
+        """
+        from delpi.utils.model_io import save_model
+
+        save_model(self, save_path, model_version=model_version)
+
     def forward(self, x_aa, x_mod):
         """
         Forward pass for RT prediction.
@@ -154,8 +177,8 @@ class RetentionTimePredictor(LightningModule):
     def _compute_loss(self, x_aa, x_mod, y_true):
 
         y_pred = self(x_aa, x_mod)
-        # loss = nn.functional.mse_loss(y_pred, y_true)
-        loss = nn.functional.huber_loss(y_pred, y_true, delta=10)
+        # Use L1 loss for RT prediction (matches Carafe / AlphaPeptDeep recipe)
+        loss = nn.functional.l1_loss(y_pred, y_true)
 
         return loss, y_true, y_pred
 

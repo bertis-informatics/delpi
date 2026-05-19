@@ -91,22 +91,10 @@ class DelPiModel(pl.LightningModule):
 
     @classmethod
     def load(cls, path: str | Path) -> Self:
-        """Load a DelPiModel from a file exported by ``DelPiClassifier.export``.
+        """Load a DelPiModel from a file exported by ``DelPiClassifier.export``."""
+        from delpi.utils.model_io import load_model
 
-        Args:
-            path: Path to the exported ``.pth`` file containing
-                  ``model_state_dict`` and ``hyper_parameters``.
-
-        Returns:
-            A :class:`DelPiModel` instance with loaded weights (eval mode, CPU).
-        """
-
-        payload = torch.load(Path(path), weights_only=True)
-        model = cls(**payload["hyper_parameters"])
-        model.load_state_dict(payload["model_state_dict"])
-        model.meta = payload.get("meta", {})
-        model.eval()
-        return model
+        return load_model(cls, path)
 
     def forward(
         self,
