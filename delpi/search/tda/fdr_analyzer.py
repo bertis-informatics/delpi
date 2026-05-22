@@ -123,6 +123,7 @@ class FDRAnalyzer:
                 pl.exclude("protein_group", "master_protein")
             ).join(pg_df, on="precursor_index", how="left")
 
+        if "protein_group" in pmsm_df.columns:
             # Calculate protein group-level Q-values
             pmsm_df = self._update_q_values(
                 pmsm_df,
