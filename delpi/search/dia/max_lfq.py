@@ -117,9 +117,10 @@ def maxlfq(
     df = df.filter(pl.col(intensity_col).is_not_null() & (pl.col(intensity_col) > 0))
 
     protein_dtype = df.schema[protein_col]
+    run_dtype = df.schema[run_col]
     result_schema = {
         protein_col: protein_dtype,
-        run_col: pl.UInt32,
+        run_col: run_dtype,
         "abundance": pl.Float32,
     }
 

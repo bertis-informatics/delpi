@@ -394,10 +394,9 @@ class DDASearchEngine(BaseSearchEngine):
             #     df=run.meta_df.select(pl.exclude("peak_start", "peak_stop")),
             #     key="meta_df",
             # )
-            run.meta_df.select(pl.exclude("peak_start", "peak_stop")).write_parquet(
-                result_manager.output_dir / f"{result_manager.run_name}.meta_df.parquet"
-            )
-
+            # run.meta_df.select(pl.exclude("peak_start", "peak_stop")).write_parquet(
+            #     result_manager.output_dir / f"{result_manager.run_name}.meta_df.parquet"
+            # )
             result_manager.write_attr("lc_peak_width", self.lc_peak_width)
             result_manager.write_attr(
                 "gradient_length_in_seconds", run.gradient_length_in_seconds

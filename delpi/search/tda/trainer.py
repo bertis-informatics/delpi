@@ -13,7 +13,6 @@ from torch.utils.data import DataLoader, TensorDataset, random_split
 from delpi.search.tda.classfier import TargetDecoyClassifier
 from delpi.utils.down_sampler import DownsampleSampler
 
-
 # Default training parameters
 DEFAULT_TRAINING_PARAMS = {
     "min_epochs": 10,

@@ -63,13 +63,10 @@ class TransferLearningTrainer:
 
         train_ds = TransferLearningDataset(hdf_files, train_labels, data_dict=data_dict)
         val_ds = TransferLearningDataset(hdf_files, val_labels, data_dict=data_dict)
-
-        if len(train_labels) < 50000:
-            fraction = None
-            max_epochs = self.training_params["max_epochs"]
-        else:
-            fraction = min(50000 / len(train_labels), 0.5)
-            max_epochs = self.training_params["max_epochs"] * 2
+        max_epochs = self.training_params["max_epochs"]
+        fraction = (
+            None if len(train_labels) < 100000 else min(100000 / len(train_labels), 0.5)
+        )
 
         model = Ms2SpectrumPredictor(
             encoder_type="transformer",

@@ -8,7 +8,9 @@ the two entry points differ only in data loading, cluster grouping, and FDR scop
 
 import logging
 from pathlib import Path
-from typing import Callable, List, Tuple
+from typing import Callable, List, Literal, Tuple
+
+SplitLevel = Literal["pmsm", "precursor", "peptide"]
 
 import numpy as np
 import polars as pl
@@ -47,6 +49,7 @@ class TDAProcessor:
         n_ensemble: int = 1,
         ensemble_train_ratio: float = 0.8,
         batch_size: int = 2048,
+        split_level: SplitLevel = "peptide",
     ):
         self.db_dir = db_dir
         self.output_dir = output_dir
@@ -55,6 +58,7 @@ class TDAProcessor:
         self.n_ensemble = n_ensemble
         self.ensemble_train_ratio = ensemble_train_ratio
         self.batch_size = batch_size
+        self.split_level = split_level
 
     # ==================================================================
     # Public entry points
@@ -64,9 +68,11 @@ class TDAProcessor:
         self,
         result_manager: ResultManager,
         group_key: str,
+        training_params: dict = None,
     ) -> pl.DataFrame:
-        """Run-specific TDA for a single LC-MS run (2-fold peptide-level CV).
+        """Run-specific TDA for a single LC-MS run (2-fold CV).
 
+        Split granularity is controlled by ``self.split_level``.
         All features fit in memory, so no subsampling is applied.
         Returns a q-value-filtered PmSM DataFrame.
         """
@@ -82,16 +88,24 @@ class TDAProcessor:
 
         feature_fn = self._make_array_feature_fn(feature_arr)
 
-        fold_a, fold_b = self._split_by_peptide(pmsm_df)
+        fold_a, fold_b = self._split_pmsm_df(pmsm_df, level=self.split_level)
 
         # Fold A trains → score Fold B
         ds_a = self._build_tensor_dataset(fold_a, feature_fn)
-        model_a = self._train_model(ds_a, model_version=f"{result_manager.run_name}_f0")
+        model_a = self._train_model(
+            ds_a,
+            model_version=f"{result_manager.run_name}_f0",
+            training_params=training_params,
+        )
         scores_b = self._score(fold_b, model_a, feature_fn)
 
         # Fold B trains → score Fold A
         ds_b = self._build_tensor_dataset(fold_b, feature_fn)
-        model_b = self._train_model(ds_b, model_version=f"{result_manager.run_name}_f1")
+        model_b = self._train_model(
+            ds_b,
+            model_version=f"{result_manager.run_name}_f1",
+            training_params=training_params,
+        )
         scores_a = self._score(fold_a, model_b, feature_fn)
 
         # Merge scored folds
@@ -121,9 +135,11 @@ class TDAProcessor:
         self,
         result_aggregator: ResultsAggregator,
         group_key: str,
+        training_params: dict = None,
     ) -> pl.DataFrame:
-        """Cross-run TDA across multiple LC-MS runs (2-fold peptide-level CV).
+        """Cross-run TDA across multiple LC-MS runs (2-fold CV).
 
+        Split granularity is controlled by ``self.split_level``.
         Features are loaded on-demand per subset.  Training data in each
         fold is subsampled when it exceeds ``TDA_MAX_TRAIN_SIZE``.
 
@@ -137,16 +153,24 @@ class TDAProcessor:
         pmsm_df = self._load_multi_run(result_aggregator, group_key)
         feature_fn = self._make_aggregator_feature_fn(result_aggregator, group_key)
 
-        fold_a, fold_b = self._split_by_peptide(pmsm_df)
+        fold_a, fold_b = self._split_pmsm_df(pmsm_df, level=self.split_level)
         full_pmsm_df = pmsm_df  # keep reference for join-back after scoring
 
         # Fold A trains → score Fold B
         scores_b = self._train_and_score_fold(
-            fold_a, fold_b, feature_fn, fold_label="f0"
+            fold_a,
+            fold_b,
+            feature_fn,
+            fold_label="f0",
+            training_params=training_params,
         )
         # Fold B trains → score Fold A
         scores_a = self._train_and_score_fold(
-            fold_b, fold_a, feature_fn, fold_label="f1"
+            fold_b,
+            fold_a,
+            feature_fn,
+            fold_label="f1",
+            training_params=training_params,
         )
 
         # Merge scored folds, then select best per (run, cluster)
@@ -189,6 +213,7 @@ class TDAProcessor:
         test_fold: pl.DataFrame,
         feature_fn: FeatureLoader,
         fold_label: str,
+        training_params: dict = None,
     ) -> np.ndarray:
         """Train on *train_fold*, score *test_fold*.
 
@@ -200,12 +225,18 @@ class TDAProcessor:
         if self.n_ensemble <= 1:
             train_dataset = self._build_tensor_dataset(train_df, feature_fn)
             model = self._train_model(
-                train_dataset, model_version=f"global_tda_{fold_label}"
+                train_dataset,
+                model_version=f"global_tda_{fold_label}",
+                training_params=training_params,
             )
             return self._score(test_fold, model, feature_fn)
 
         return self._ensemble_score(
-            train_df, test_fold, feature_fn, fold_label=fold_label
+            train_df,
+            test_fold,
+            feature_fn,
+            fold_label=fold_label,
+            training_params=training_params,
         )
 
     # ==================================================================
@@ -301,37 +332,63 @@ class TDAProcessor:
     # ==================================================================
 
     @staticmethod
-    def _split_by_peptide(
+    def _split_pmsm_df(
         pmsm_df: pl.DataFrame,
+        level: SplitLevel = "pmsm",
         seed: int = 42,
     ) -> Tuple[pl.DataFrame, pl.DataFrame]:
-        """2-fold peptide-level CV: split ALL peptides into two folds.
+        """2-fold split of PmSMs at the requested granularity.
 
-        Both targets and decoys are split so that each fold contains
-        ~50% of unique peptides.  Every PmSM is scored only by a model
-        that never saw its peptide during training.
+        Parameters
+        ----------
+        level
+            ``"pmsm"`` (default): random row-level split.  Same peptide/
+            precursor can appear in both folds.  Cheapest but allows mild
+            information leakage through shared sequence embeddings.
+            ``"precursor"``: split on ``precursor_index`` so that every
+            (peptide, charge, mod) variant is confined to one fold.
+            ``"peptide"``: split on ``peptide_index`` so that every
+            sequence is confined to one fold (most conservative, à la
+            Percolator).
+        seed
+            RNG seed for the shuffle.
         """
-        peptide_ids = (
-            pmsm_df.select("peptide_index")
+        if level == "pmsm":
+            shuffled = pmsm_df.sample(
+                fraction=1.0, with_replacement=False, shuffle=True, seed=seed
+            )
+            mid = shuffled.shape[0] // 2
+            return shuffled.head(mid), shuffled.slice(mid)
+
+        if level == "precursor":
+            group_col = "precursor_index"
+        elif level == "peptide":
+            group_col = "peptide_index"
+        else:
+            raise ValueError(
+                f"Unknown split level: {level!r}. "
+                "Expected one of 'pmsm', 'precursor', 'peptide'."
+            )
+
+        # Sort before shuffle: unique() returns rows in a non-deterministic
+        # order, so we canonicalise first to make the seeded shuffle reproducible.
+        group_ids = (
+            pmsm_df.select(group_col)
             .unique()
-            .sort("peptide_index")["peptide_index"]
+            .sort(group_col)[group_col]
             .shuffle(seed=seed)
         )
-        mid = len(peptide_ids) // 2
-        fold_a_ids = peptide_ids[:mid].to_frame()
-        fold_b_ids = peptide_ids[mid:].to_frame()
+        mid = len(group_ids) // 2
+        fold_a_ids = group_ids[:mid].to_frame()
+        fold_b_ids = group_ids[mid:].to_frame()
 
-        sort_keys = (
-            ["run_index", "pmsm_index"]
-            if "run_index" in pmsm_df.columns
-            else ["pmsm_index"]
+        fold_a_df = pmsm_df.join(
+            fold_a_ids, on=group_col, how="inner", maintain_order="left"
         )
-        fold_a_df = pmsm_df.join(fold_a_ids, on="peptide_index", how="inner").sort(
-            sort_keys
+        fold_b_df = pmsm_df.join(
+            fold_b_ids, on=group_col, how="inner", maintain_order="left"
         )
-        fold_b_df = pmsm_df.join(fold_b_ids, on="peptide_index", how="inner").sort(
-            sort_keys
-        )
+
         return fold_a_df, fold_b_df
 
     @staticmethod
@@ -341,12 +398,6 @@ class TDAProcessor:
             train_df = train_df.sample(
                 n=TDA_MAX_TRAIN_SIZE, with_replacement=False, shuffle=True, seed=1221
             )
-            # train_df = (
-            #     train_df.sort(["precursor_index", "logit"], descending=[False, True])
-            #     .with_columns(pl.int_range(pl.len()).over("precursor_index").alias("rank"))
-            #     .sort(["rank", "logit"], descending=[False, True])
-            #     .head(TDA_MAX_TRAIN_SIZE)
-            # )
         return train_df.sort(["run_index", "pmsm_index"])
 
     @staticmethod
@@ -364,10 +415,18 @@ class TDAProcessor:
         self,
         train_dataset: TensorDataset,
         model_version: str,
+        training_params: dict = None,
         seed: int = None,
     ):
-        """Train the TDA classifier and return the best model on self.device."""
-        training_params = {"random_seed": seed} if seed is not None else None
+        """Train the TDA classifier and return the best model on self.device.
+
+        ``training_params`` is forwarded to :class:`TargetDecoyTrainer`.
+        When ``seed`` is provided, it overrides ``random_seed`` in the dict.
+        """
+        training_params = dict(training_params) if training_params else {}
+        if seed is not None:
+            training_params["random_seed"] = seed
+
         trainer = TargetDecoyTrainer(training_params=training_params)
         trainer.train(
             model_version=model_version,
@@ -393,6 +452,7 @@ class TDAProcessor:
         test_df: pl.DataFrame,
         feature_fn: FeatureLoader,
         fold_label: str = "",
+        training_params: dict = None,
     ) -> np.ndarray:
         """Train K models via bootstrap from *train_df* and average logits."""
         test_feature_arr = feature_fn(test_df)
@@ -411,6 +471,7 @@ class TDAProcessor:
             model = self._train_model(
                 train_dataset,
                 model_version=f"global_tda_{fold_label}_e{k}",
+                training_params=training_params,
                 seed=seed,
             )
             scores = self._batched_inference(model, test_feature_arr, self.batch_size)

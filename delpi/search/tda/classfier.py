@@ -25,7 +25,7 @@ class TargetDecoyClassifier(pl.LightningModule):
         focal_loss_gamma_pos=0.0,
         focal_loss_gamma_neg=4.0,
         focal_loss_clip=0.05,
-        weight_decay=0.01,
+        weight_decay=0.05,
         *args,
         **kwargs,
     ):

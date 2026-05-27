@@ -40,7 +40,7 @@ from delpi.constants import DIA_MATCHED_PEAKS_CUTOFF
 
 logger = logging.getLogger(__name__)
 
-LOGIT_CUTOFF = 1.0
+LOGIT_CUTOFF = 0.8
 TOPK_PER_PRECURSOR = 10
 
 

@@ -14,7 +14,6 @@ import numpy as np
 import polars as pl
 import pandas as pd
 
-
 TL_DATA_GROUP = "tl_data"
 
 
@@ -265,7 +264,7 @@ class ResultManager:
         col_map = {
             "precursors": (f"{prefix}precursor_q_value", "precursor_index"),
             "peptides": (f"{prefix}peptide_q_value", "peptidoform_index"),
-            "protein_groups": (f"{prefix}precursor_q_value", "protein_group"),
+            "protein_groups": (f"{prefix}protein_group_q_value", "protein_group"),
         }
 
         counts = {
