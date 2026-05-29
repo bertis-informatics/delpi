@@ -139,7 +139,7 @@ class SearchManager:
         """Prepare the peptide database if it doesn't exist."""
         self.state = SearchState.DB_PREP
         if not self.search_config.check_database_exists():
-            if self.search_config.get_param("fasta_file") is None:
+            if self.search_config.config.get("fasta_file") is None:
                 raise ValueError("FASTA file is not specified in configuration")
 
             from delpi.search.database import build_database_in_subprocess

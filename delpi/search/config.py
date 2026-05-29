@@ -39,9 +39,6 @@ class SearchConfig:
 
         return input_files
 
-    def get_param(self, key: str):
-        return self.config.get(key)
-
     def __getitem__(self, key):
         return self.config[key]
 
@@ -111,14 +108,14 @@ class SearchConfig:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         # Validate q-value cutoff
-        q_value_cutoff = self.get_param("q_value_cutoff") or 0.01
+        q_value_cutoff = self.config.get("q_value_cutoff", 0.01)
         if not 0 <= q_value_cutoff <= 1:
             raise ValueError(
                 f"q_value_cutoff must be between 0 and 1, got {q_value_cutoff}"
             )
 
         # Validate decoy method
-        decoy_method = self.get_param("decoy") or "mutation"
+        decoy_method = self.config.get("decoy") or "mutation"
         if decoy_method not in DecoyGenerator.supported_methods:
             raise ValueError(
                 f"Unsupported decoy method '{decoy_method}'. "
