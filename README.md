@@ -25,7 +25,7 @@ DelPi is an open-source peptide identification tool for mass spectrometry–base
 - Recommended available memory: **(single run file size + ~16 GB)** to accommodate intermediate data structures, model execution, and OS overhead
 
 **Runtime:**
-- For a 25 min DIA gradient (human sample, Astral Orbitrap), DelPi completes peptide identification in approximately 20 minutes on a single NVIDIA RTX 4090 GPU
+- For a 25 min DIA gradient (human sample, Astral Orbitrap), DelPi completes peptide identification in approximately 15 minutes on a single NVIDIA RTX 4090 GPU
     
 
 ## Supported LC-MS/MS Data
@@ -36,15 +36,26 @@ DelPi is an open-source peptide identification tool for mass spectrometry–base
 
 ## Installation
 
+DelPi is available in two flavors:
+
+- **Windows GUI application** — recommended for Windows users who prefer a graphical interface.
+- **Command-line tool** — cross-platform (Linux/Windows) installation from source.
+
+### Option 1: Windows GUI Application
+
+Download the latest Windows installer (`.exe`) from the [Releases page](https://github.com/bertis-informatics/delpi/releases) and run it. The installer bundles all required dependencies; no additional setup is needed.
+
+### Option 2: Command-Line Tool
+
 > **Windows users:** Please use **PowerShell** (not Command Prompt/cmd) for all installation steps. The install scripts (`.ps1`) require PowerShell to run.
 
-### Step 1: Clone the Repository
+#### Step 1: Clone the Repository
 ```bash
 git clone https://github.com/bertis-informatics/delpi.git
 cd delpi
 ```
 
-### Step 2: Set Up Virtual Environment
+#### Step 2: Set Up Virtual Environment
 
 Create a virtual environment using venv (Option A) or conda (Option B). Package installation in later steps uses pip or [uv](https://github.com/astral-sh/uv).
 
@@ -70,7 +81,7 @@ conda create -n delpi_env python=3.12 -y
 conda activate delpi_env
 ```
 
-### Step 3: Install PyTorch
+#### Step 3: Install PyTorch
 
 Visit the [PyTorch official website](https://pytorch.org/get-started/locally/) to obtain the appropriate installation command for your system.
 
@@ -80,7 +91,7 @@ uv pip install torch --index-url https://download.pytorch.org/whl/cu128
 # If using pip: pip install torch --index-url https://download.pytorch.org/whl/cu128
 ```
 
-### Step 4: Install pymsio
+#### Step 4: Install pymsio
 
 [pymsio](https://github.com/bertis-informatics/pymsio) is bundled in the `pymsio/` directory. The install script downloads the Thermo RawFileReader DLLs and installs pymsio in one step. For additional details, see the [pymsio README](pymsio/README.md).
 
@@ -97,14 +108,14 @@ chmod +x pymsio/install.sh
 
 
 
-### Step 5: Install DelPi
+#### Step 5: Install DelPi
 
 ```bash
 uv pip install .
 # If using pip: pip install .
 ```
 
-### Step 6: Verify Installation
+#### Step 6: Verify Installation
 
 ```bash
 delpi --help
@@ -168,7 +179,7 @@ Create a YAML configuration file based on the [example template](data/example_pa
 
 **Optional fields:**
 
-Digestion and modification parameters can be adjusted for your experimental setup. Modification names must follow [PSI-MS controlled vocabulary terms](https://www.unimod.org/fields.html).
+Digestion and modification parameters can be adjusted for your experimental setup. Modifications can be specified either by their [PSI-MS controlled vocabulary names](https://www.unimod.org/fields.html) (e.g., `Oxidation`, `Carbamidomethyl`) or by their UniMod accession numbers in the `UniMod:XX` format (e.g., `UniMod:35`, `UniMod:4`).
 
 
 ### 3. Run the Search
@@ -232,8 +243,6 @@ DelPi generates the following output files:
 If you use DelPi in your research, please cite:
 
 Park, J., Kim, K., Kang, U.-B., & Kim, S. *DelPi Learns Generalizable Peptide–Signal Correspondence for Mass Spectrometry-Based Proteomics.* bioRxiv (2026). https://doi.org/10.64898/2026.01.06.697814
-
-Preprint: https://www.biorxiv.org/content/10.64898/2026.01.06.697814v1
 
 ## License
 
