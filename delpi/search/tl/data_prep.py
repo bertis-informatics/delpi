@@ -95,6 +95,7 @@ class TransferLearningDataPreparator:
     def _validate_dataframe(self, df: pl.DataFrame):
         """Validate required columns in input dataframe"""
         required_columns = [
+            "precursor_index",
             "frame_num",
             "peptide",
             "mod_ids",

@@ -56,36 +56,29 @@ class ResultsAggregator:
         label_dfs = []
         hdf_files = self.get_hdf_files()
         for hdf_index, hdf_path in enumerate(hdf_files):
-            meta = []
             with h5py.File(hdf_path, "r") as hf:
                 tl_data_group = hf[TL_DATA_GROUP]
-                n_tokens = list(tl_data_group)
-                meta.extend(
-                    (int(n), tl_data_group[n]["x_aa"].shape[0])
-                    for n in n_tokens
-                    if n != "config"
-                )
+                for n in tl_data_group:
+                    if n == "config":
+                        continue
 
-            label_df = pl.DataFrame(
-                meta,
-                schema={
-                    "seq_len": pl.UInt16,
-                    "n_samples": pl.UInt32,
-                },
-                orient="row",
-            ).filter(pl.col("n_samples") > 0)
+                    precursor_index = tl_data_group[n]["precursor_index"][:]
+                    if precursor_index.shape[0] == 0:
+                        continue
 
-            label_df = (
-                label_df.with_columns(
-                    pl.int_ranges(pl.col("n_samples"), dtype=pl.UInt32).alias("index")
-                )
-                .drop("n_samples")
-                .explode("index")
-                .with_columns(pl.lit(hdf_index).cast(pl.UInt32).alias("hdf_index"))
-            )
-            label_dfs.append(label_df)
+                    n_samples = precursor_index.shape[0]
+                    label_dfs.append(
+                        pl.DataFrame(
+                            {
+                                "seq_len": np.full(n_samples, int(n), dtype=np.uint16),
+                                "index": np.arange(n_samples, dtype=np.uint32),
+                                "hdf_index": np.full(n_samples, hdf_index, dtype=np.uint32),
+                                "precursor_index": precursor_index.astype(np.uint32, copy=False),
+                            }
+                        )
+                    )
 
-        return pl.concat(label_dfs, how="vertical")
+        return pl.concat(label_dfs, how="vertical") if label_dfs else pl.DataFrame()
 
     def get_tl_data(self, data_keys: List[str]) -> List[Dict[str, np.ndarray]]:
         """Load all data from HDF files into memory with 3-level dict structure"""

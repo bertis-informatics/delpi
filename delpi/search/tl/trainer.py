@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import numpy as np
+import polars as pl
 import torch
 
 from lightning.pytorch.callbacks.early_stopping import EarlyStopping
@@ -9,6 +10,7 @@ from lightning.pytorch.trainer import Trainer
 from lightning.pytorch.loggers import CSVLogger
 from sklearn.model_selection import train_test_split
 
+from delpi.database.peptide_database import PeptideDatabase
 from delpi.model.spec_lib.ms2_predictor import Ms2SpectrumPredictor
 from delpi.search.tl.dataset import TransferLearningDataset, LABEL_DTYPE
 from delpi.search.result_aggregator import ResultsAggregator
@@ -42,23 +44,22 @@ class TransferLearningTrainer:
 
         logger = CSVLogger(save_dir=output_dir, version=f"ms2_predictor_tl")
         hdf_files = result_aggregator.get_hdf_files()
-        label_df = result_aggregator.get_tl_label_df()
-        labels = np.empty(len(label_df), dtype=LABEL_DTYPE)
-        for field in LABEL_DTYPE.names:
-            labels[field] = label_df[field].to_numpy()
+        label_df = PeptideDatabase.join(
+            result_aggregator.db_dir,
+            result_aggregator.get_tl_label_df(),
+            precursor_columns=[],
+            modification_columns=[],
+            peptide_columns=[],
+        )
+        train_labels, val_labels = self._split_labels_by_peptide(label_df)
 
-        in_memory = len(labels) < 1_000_000
+        in_memory = len(label_df) < 1_000_000
         data_dict = (
             result_aggregator.get_tl_data(
                 data_keys=["x_aa", "x_mod", "x_meta", "x_intensity"]
             )
             if in_memory
             else None
-        )
-
-        val_size = min(int(len(labels) * 0.2), 10000)
-        train_labels, val_labels = train_test_split(
-            labels, test_size=val_size, random_state=718, shuffle=True
         )
 
         train_ds = TransferLearningDataset(hdf_files, train_labels, data_dict=data_dict)
@@ -120,6 +121,42 @@ class TransferLearningTrainer:
         )
 
         return trained_model
+
+    def _split_labels_by_peptide(
+        self, label_df
+    ) -> tuple[np.ndarray, np.ndarray]:
+        unique_peptide_indices = label_df["peptide_index"].unique().to_numpy()
+        if unique_peptide_indices.shape[0] < 2:
+            raise ValueError("Need at least two unique peptide indices for TL split")
+
+        val_fraction = 1.0 - self.training_params["train_split"]
+        n_val_peptides = int(round(unique_peptide_indices.shape[0] * val_fraction))
+        n_val_peptides = min(
+            max(n_val_peptides, 1),
+            unique_peptide_indices.shape[0] - 1,
+        )
+
+        train_peptides, val_peptides = train_test_split(
+            unique_peptide_indices,
+            test_size=n_val_peptides,
+            random_state=self.training_params["random_seed"],
+            shuffle=True,
+        )
+
+        train_labels = self._to_labels(
+            label_df.filter(pl.col("peptide_index").is_in(train_peptides))
+        )
+        val_labels = self._to_labels(
+            label_df.filter(pl.col("peptide_index").is_in(val_peptides))
+        )
+        return train_labels, val_labels
+
+    @staticmethod
+    def _to_labels(label_df) -> np.ndarray:
+        labels = np.empty(len(label_df), dtype=LABEL_DTYPE)
+        for field in LABEL_DTYPE.names:
+            labels[field] = label_df[field].to_numpy()
+        return labels
 
     def _setup_callbacks(self) -> list:
         """Setup training callbacks."""

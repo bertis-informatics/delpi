@@ -15,6 +15,7 @@ LABEL_DTYPE = np.dtype(
         ("hdf_index", np.uint32),
         ("seq_len", np.int16),
         ("index", np.uint32),
+        ("precursor_index", np.uint32),
     ]
 )
 
