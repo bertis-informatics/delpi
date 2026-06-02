@@ -20,7 +20,6 @@ class ReaderFactory:
     def get_reader(
         cls,
         filepath: Union[str, Path],
-        show_progress: bool = False,
     ) -> MassSpecFileReader:
         if isinstance(filepath, str):
             filepath = Path(filepath)
@@ -34,9 +33,9 @@ class ReaderFactory:
             )
 
         if ext == ".raw":
-            reader = ThermoRawReader(filepath, show_progress=show_progress)
+            reader = ThermoRawReader(filepath)
         elif ext in (".mzml", ".mzml.gz"):
-            reader = MzmlFileReader(filepath, show_progress=show_progress)
+            reader = MzmlFileReader(filepath)
         else:
             raise ValueError(f"Unsupported file type: {ext}")
 

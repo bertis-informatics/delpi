@@ -16,6 +16,25 @@ COMPRESSION_EXTENSIONS = [".gz", ".zip", ".bz2", ".xz", ".7z", ".tar"]
 MS_EXTENSIONS = [".mzml", ".raw", ".d", ".wiff", ".mgf", ".mzdata", ".mz5"]
 
 
+class _ProgressIterWrapper:
+    """Wraps an iterable to call ``progress.update(1)`` on each step."""
+
+    def __init__(self, iterable, progress):
+        self._it = iter(iterable)
+        self._bar = progress
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        val = next(self._it)  # propagates StopIteration naturally
+        self._bar.update(1)
+        return val
+
+    def __len__(self):
+        return getattr(self._it, "__length_hint__", lambda: 0)()
+
+
 class MassSpecFileReader(ABC):
 
     meta_schema = META_SCHEMA
@@ -24,14 +43,19 @@ class MassSpecFileReader(ABC):
         self,
         file_path: Union[str, Path],
         num_workers: int = 0,
-        show_progress: bool = False,
     ):
-        self.file_path = Path(file_path)
+        file_path = Path(file_path)
+        if not file_path.exists() or not file_path.is_file():
+            raise FileNotFoundError(f"File not found: {file_path}")
+        self.file_path = file_path
         self.num_workers = num_workers
-        self.show_progress = show_progress
 
-    def _progress(self, iterable, **kwargs):
-        return tqdm(iterable, **kwargs) if self.show_progress else iterable
+    def _progress(self, iterable, progress=None, **kwargs):
+        if progress is True:
+            return tqdm(iterable, **kwargs)
+        elif progress:
+            return _ProgressIterWrapper(iterable, progress)
+        return iterable
 
     @staticmethod
     def extract_run_name(filepath: Union[str, Path]):
@@ -55,6 +79,11 @@ class MassSpecFileReader(ABC):
     @property
     def run_name(self) -> str:
         return self.extract_run_name(self.file_path)
+
+    @property
+    def num_spectra(self):
+        """Expected number of spectra, or ``None`` if unknown before parsing."""
+        return None
 
     @abstractmethod
     def get_meta_df(self) -> pl.DataFrame:
@@ -90,5 +119,5 @@ class MassSpecFileReader(ABC):
         return [self.get_frame(fn) for fn in frame_nums]
 
     @abstractmethod
-    def load(self) -> MassSpecData:
+    def load(self, progress=None) -> MassSpecData:
         raise NotImplementedError()

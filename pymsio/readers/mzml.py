@@ -5,11 +5,11 @@ Focus on the actual bottlenecks: XML parsing, zlib decompression, and peak proce
 
 from pathlib import Path
 from typing import Optional, Union, List, Tuple, Dict, Any, Sequence
+import io
 import re
 import binascii
 import zlib
 import gzip
-import io
 from functools import lru_cache
 
 try:
@@ -135,15 +135,71 @@ class MzmlFileReader(MassSpecFileReader):
         build_index: bool = False,
         index_regex: Optional[str] = None,
         buffer_size_mb: int = 8,  # Configurable buffer size in MB
-        show_progress: bool = False,
     ):
         """Initialize optimized mzML reader."""
-        super().__init__(file_path, num_workers, show_progress)
+        super().__init__(file_path, num_workers)
         self._meta_df: Optional[pl.DataFrame] = None
         self._is_gzipped = self.file_path.suffix.lower() == ".gz"
         self.build_index = build_index  # For compatibility
         self.index_regex = index_regex  # For compatibility
         self.buffer_size = buffer_size_mb * 1024 * 1024
+        self._num_spectra: Optional[int] = None
+        self._num_spectra_resolved = False
+
+    # ------------------------------------------------------------------
+    # Fast spectrum-count extraction
+    # ------------------------------------------------------------------
+
+    _RE_OFFSET = re.compile(rb"<offset\b")
+    _RE_INDEX_SPECTRUM = re.compile(
+        rb'<index\s+name\s*=\s*["\']spectrum["\']', re.IGNORECASE
+    )
+    _RE_INDEX_END = re.compile(rb"</index\s*>")
+    _RE_SPECTRUM_LIST_COUNT = re.compile(
+        rb'<spectrumList\s[^>]*count\s*=\s*["\']([0-9]+)["\']'
+    )
+
+    def _count_from_index_tail(self) -> Optional[int]:
+        """Read the trailing index of an indexed mzML and count <offset> entries."""
+        if self._is_gzipped:
+            return None
+        try:
+            size = self.file_path.stat().st_size
+            tail_size = min(size, 1 << 20)  # last 1 MB
+            with open(self.file_path, "rb") as f:
+                f.seek(size - tail_size)
+                tail = f.read()
+            m = self._RE_INDEX_SPECTRUM.search(tail)
+            if m is None:
+                return None
+            end = self._RE_INDEX_END.search(tail, m.end())
+            block = tail[m.end() : end.start()] if end else tail[m.end() :]
+            return len(self._RE_OFFSET.findall(block))
+        except Exception:
+            return None
+
+    def _count_from_spectrum_list(self) -> Optional[int]:
+        """Read enough of the file header to find <spectrumList count="...">."""
+        try:
+            read_size = 1 << 16  # 64 KB — header is small
+            opener = self._open_file_handle
+            with opener() as f:
+                head = f.read(read_size)
+            m = self._RE_SPECTRUM_LIST_COUNT.search(head)
+            if m is None:
+                return None
+            return int(m.group(1))
+        except Exception:
+            return None
+
+    @property
+    def num_spectra(self) -> Optional[int]:
+        if not self._num_spectra_resolved:
+            self._num_spectra = (
+                self._count_from_index_tail() or self._count_from_spectrum_list()
+            )
+            self._num_spectra_resolved = True
+        return self._num_spectra
 
     def _open_file_handle(self):
         """Open file handle with configurable buffering for both regular and gzipped files."""
@@ -354,7 +410,9 @@ class MzmlFileReader(MassSpecFileReader):
         }
 
     def _parse_spectra(
-        self, collect_meta: bool
+        self,
+        collect_meta: bool,
+        progress=None,
     ) -> Tuple[List[PeakArray], List[Dict[str, Any]]]:
         """Fast spectrum parsing with minimal overhead using lxml optimizations."""
         peaks_list: List[PeakArray] = []
@@ -371,7 +429,9 @@ class MzmlFileReader(MassSpecFileReader):
                 context = ET.iterparse(f, events=("end",))
                 use_filter = False
 
-            for event, elem in self._progress(context, desc="parse spectra"):
+            for event, elem in self._progress(
+                context, progress=progress, desc="parse spectra"
+            ):
                 # Quick filtering for non-lxml
                 if not use_filter and self._get_local_tag(elem.tag) != "spectrum":
                     elem.clear()
@@ -427,10 +487,12 @@ class MzmlFileReader(MassSpecFileReader):
             self._meta_df = self._read_meta()
         return self._meta_df
 
-    def load(self) -> MassSpecData:
+    def load(self, progress=None) -> MassSpecData:
         """Load complete mass spectrometry data."""
         need_meta = self._meta_df is None
-        peaks_list, meta_rows = self._parse_spectra(collect_meta=need_meta)
+        peaks_list, meta_rows = self._parse_spectra(
+            collect_meta=need_meta, progress=progress
+        )
 
         if need_meta:
             self._meta_df = pl.DataFrame(meta_rows, schema=META_SCHEMA)
