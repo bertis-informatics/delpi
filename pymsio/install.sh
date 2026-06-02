@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # ──────────────────────────────────────────────────────────────────────────────
-# Downloads Thermo RawFileReader DLLs into the installed pymsio package (Linux).
+# Installs pymsio and downloads Thermo RawFileReader DLLs (Linux).
 #
 #   1. Displays the Thermo RawFileReader license and asks for agreement.
-#   2. Locates the installed pymsio package via the active Python environment.
-#   3. Downloads the required DLLs from GitHub into pymsio/dlls/thermo_fisher/.
-#   4. Optionally installs Mono (required by pythonnet on Linux).
+#   2. Downloads the required DLLs from GitHub into pymsio/dlls/thermo_fisher/.
+#   3. Optionally installs Mono (required by pythonnet on Linux).
+#   4. Installs pymsio via pip.
 #
-# Run this script AFTER installing delpi (uv pip install .) so that the DLLs
-# are placed inside the correct installed pymsio package location.
+# Usage:
+#   ./install.sh                  # full install
+#   ./install.sh --skip-pip       # download DLLs only, skip pip install
 # ──────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -20,6 +21,14 @@ DLL_NAMES=(
 LICENSE_URL="$REPO_BASE/License.doc"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DLL_DIR="$SCRIPT_DIR/pymsio/dlls/thermo_fisher"
+
+SKIP_PIP=false
+for arg in "$@"; do
+    case "$arg" in
+        --skip-pip) SKIP_PIP=true ;;
+    esac
+done
 
 # ── License agreement ────────────────────────────────────────────────────────
 echo ""
@@ -44,19 +53,6 @@ case "$response" in
         exit 1
         ;;
 esac
-
-# ── Locate installed pymsio package ─────────────────────────────────────────
-echo ""
-echo "[*] Locating installed pymsio package..."
-
-PYMSIO_DIR=$(python -c "import pymsio, os; print(os.path.dirname(pymsio.__file__))" 2>&1) || true
-if [ -z "$PYMSIO_DIR" ]; then
-    echo "ERROR: pymsio is not installed. Run 'uv pip install .' first." >&2
-    exit 1
-fi
-echo "    Found pymsio at: $PYMSIO_DIR"
-
-DLL_DIR="$PYMSIO_DIR/dlls/thermo_fisher"
 
 # ── Download DLLs ────────────────────────────────────────────────────────────
 echo ""
@@ -102,8 +98,19 @@ else
     esac
 fi
 
+# ── Install pymsio ───────────────────────────────────────────────────────────
+if [ "$SKIP_PIP" = false ]; then
+    echo ""
+    echo "[*] Installing pymsio ..."
+    cd "$SCRIPT_DIR"
+    python -m pip install .
+else
+    echo ""
+    echo "[*] Skipping pip install (use 'pip install .' manually)."
+fi
+
 echo ""
 echo "============================================================"
-echo "  Thermo DLL installation complete!"
+echo "  Installation complete!"
 echo "============================================================"
 echo ""

@@ -1,14 +1,14 @@
 <#
 .SYNOPSIS
-    Downloads Thermo RawFileReader DLLs into the installed pymsio package.
+    Installs pymsio and downloads Thermo RawFileReader DLLs (Windows).
 .DESCRIPTION
     1. Displays the Thermo RawFileReader license and asks for agreement.
-    2. Locates the installed pymsio package via the active Python environment.
-    3. Downloads the required DLLs from GitHub into pymsio/dlls/thermo_fisher/.
-
-    Run this script AFTER installing delpi (uv pip install .) so that the DLLs
-    are placed inside the correct installed pymsio package location.
+    2. Downloads the required DLLs from GitHub into pymsio/dlls/thermo_fisher/.
+    3. Installs pymsio via pip.
 #>
+param(
+    [switch]$SkipPipInstall
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -19,6 +19,9 @@ $DLL_NAMES = @(
     "ThermoFisher.CommonCore.RawFileReader.dll"
 )
 $LICENSE_URL = "$REPO_BASE/License.doc"
+
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
+$DllDir = Join-Path (Join-Path (Join-Path $ScriptDir "pymsio") "dlls") "thermo_fisher"
 
 # ── License agreement ────────────────────────────────────────────────────────
 Write-Host ""
@@ -41,19 +44,6 @@ if ($response -notin @("y", "Y", "yes", "Yes", "YES")) {
     exit 1
 }
 
-# ── Locate installed pymsio package ─────────────────────────────────────────
-Write-Host ""
-Write-Host "[*] Locating installed pymsio package..." -ForegroundColor Green
-
-$pymsioDir = python -c "import pymsio, os; print(os.path.dirname(pymsio.__file__))" 2>&1
-if ($LASTEXITCODE -ne 0 -or -not $pymsioDir) {
-    Write-Host "ERROR: pymsio is not installed. Run 'uv pip install .' first." -ForegroundColor Red
-    exit 1
-}
-Write-Host "    Found pymsio at: $pymsioDir" -ForegroundColor Green
-
-$DllDir = Join-Path (Join-Path $pymsioDir "dlls") "thermo_fisher"
-
 # ── Download DLLs ────────────────────────────────────────────────────────────
 Write-Host ""
 Write-Host "[*] Downloading Thermo DLLs..." -ForegroundColor Green
@@ -75,8 +65,20 @@ foreach ($dll in $DLL_NAMES) {
     }
 }
 
+# ── Install pymsio ───────────────────────────────────────────────────────────
+if (-not $SkipPipInstall) {
+    Write-Host ""
+    Write-Host "[*] Installing pymsio ..." -ForegroundColor Green
+    Push-Location $ScriptDir
+    python -m pip install .
+    Pop-Location
+} else {
+    Write-Host ""
+    Write-Host "[*] Skipping pip install (use 'pip install .' manually)." -ForegroundColor Yellow
+}
+
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host "  Thermo DLL installation complete!" -ForegroundColor Cyan
+Write-Host "  Pymsio installation complete!" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host ""

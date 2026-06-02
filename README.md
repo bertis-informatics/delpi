@@ -91,16 +91,9 @@ uv pip install torch --index-url https://download.pytorch.org/whl/cu128
 # If using pip: pip install torch --index-url https://download.pytorch.org/whl/cu128
 ```
 
-#### Step 4: Install DelPi
+#### Step 4: Install pymsio
 
-```bash
-uv pip install .
-# If using pip: pip install .
-```
-
-#### Step 5: Install Thermo RawFileReader DLLs (for .raw file support)
-
-[pymsio](https://github.com/bertis-informatics/pymsio) is bundled as a dependency and installed in the previous step. To read Thermo `.raw` files, run the install script **after** installing DelPi so the DLLs are placed inside the correct installed pymsio package. For additional details, see the [pymsio README](pymsio/README.md).
+[pymsio](https://github.com/bertis-informatics/pymsio) is bundled in the `pymsio/` directory. The install script downloads the Thermo RawFileReader DLLs and installs pymsio in one step. For additional details, see the [pymsio README](pymsio/README.md).
 
 **Windows PowerShell:**
 ```powershell
@@ -111,6 +104,13 @@ uv pip install .
 ```bash
 chmod +x pymsio/install.sh
 ./pymsio/install.sh
+```
+
+#### Step 5: Install DelPi
+
+```bash
+uv pip install .
+# If using pip: pip install .
 ```
 
 #### Step 6: Verify Installation
