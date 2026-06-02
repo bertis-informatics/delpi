@@ -103,7 +103,7 @@ if [ "$SKIP_PIP" = false ]; then
     echo ""
     echo "[*] Installing pymsio ..."
     cd "$SCRIPT_DIR"
-    pip install .
+    python -m pip install .
 else
     echo ""
     echo "[*] Skipping pip install (use 'pip install .' manually)."
