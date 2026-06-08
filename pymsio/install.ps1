@@ -70,7 +70,7 @@ if (-not $SkipPipInstall) {
     Write-Host ""
     Write-Host "[*] Installing pymsio ..." -ForegroundColor Green
     Push-Location $ScriptDir
-    pip install .
+    python -m pip install .
     Pop-Location
 } else {
     Write-Host ""
