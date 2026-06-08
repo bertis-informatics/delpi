@@ -1,13 +1,24 @@
 # DelPi
 
-DelPi is an open-source peptide identification tool for mass spectrometry–based proteomics. It applies a pre-trained Transformer encoder to score candidate peptides from raw MS1/MS2 evidence using an acquisition-agnostic representation, enabling a unified workflow across both DIA and DDA data.
+DelPi is an open-source, easy-to-use peptide identification tool for mass spectrometry-based proteomics. It provides a Windows GUI application and a command-line interface, helping users run DIA or DDA peptide searches without building complex workflows by hand.
+
+DelPi applies a pre-trained Transformer encoder to score candidate peptides from raw MS1/MS2 evidence using an acquisition-agnostic representation, enabling a unified workflow across both DIA and DDA data.
+
+<p align="center">
+   <img src="examples/images/gui_screenshot.jpg" width="512" alt="DelPi Windows GUI application screenshot">
+</p>
+
+<p align="center">
+   <b>Run peptide identification through an easy-to-use Windows GUI — no manual YAML editing required.</b>
+</p>
 
 ## Key Features
 - **Deep representation learning:** Scores candidate peptides using a pre-trained Transformer encoder, without relying on handcrafted features.
-- **Acquisition-agnostic:** Supports both DDA and DIA within a unified scoring framework.
-- **Library-free search:** Uses internally generated in silico spectral libraries.
+- **DIA and DDA support:** Use one workflow across common LC-MS/MS acquisition modes.
+- **Library-free search:** Generates in silico spectral libraries internally, supporting common PTMs registered in the UniMod database.
 - **GPU-accelerated inference:** Designed for practical performance on consumer-grade GPUs via PyTorch/CUDA.
 - **Experiment-adaptive workflow:** Employs a two-stage search with experiment-level transfer learning to adapt to instrument and chromatographic conditions.
+- **Easy-to-use Windows GUI:** Configure and run DelPi searches without manually editing YAML files.
 
 ## System Requirements
 
@@ -18,7 +29,6 @@ DelPi is an open-source peptide identification tool for mass spectrometry–base
 - Supported OS: **Linux, Windows**
 - macOS (including Apple Silicon/MPS) and CPU-only execution are not supported
 
-
 **Memory Considerations:**
 - DelPi processes input files **one run at a time**
 - Peak memory usage depends on the size of an individual raw/mzML file being processed
@@ -26,7 +36,6 @@ DelPi is an open-source peptide identification tool for mass spectrometry–base
 
 **Runtime:**
 - For a 25 min DIA gradient (human sample, Astral Orbitrap), DelPi completes peptide identification in approximately 15 minutes on a single NVIDIA RTX 4090 GPU
-    
 
 ## Supported LC-MS/MS Data
 
@@ -43,7 +52,7 @@ DelPi is available in two flavors:
 
 ### Option 1: Windows GUI Application
 
-Download the latest Windows installer (`.exe`) from the [Releases page](https://github.com/bertis-informatics/delpi/releases) and run it. The installer bundles all required dependencies; no additional setup is needed.
+For most Windows users, this is the easiest way to start using DelPi. Download the latest Windows installer (`.exe`) from the [Releases page](https://github.com/bertis-informatics/delpi/releases) and run it. The installer bundles all required dependencies; no additional setup is needed.
 
 ### Option 2: Command-Line Tool
 
@@ -106,8 +115,6 @@ chmod +x pymsio/install.sh
 ./pymsio/install.sh
 ```
 
-
-
 #### Step 5: Install DelPi
 
 ```bash
@@ -126,13 +133,27 @@ python -c "import delpi; print('DelPi installed successfully!')"
 
 Verify your DelPi installation using publicly available DIA data from the [Skyline tutorial](https://skyline.ms/tutorials/DIA-QE.zip).
 
-1. **Download and extract the DIA test dataset:**
-   ```bash
-   wget https://skyline.ms/tutorials/DIA-QE.zip
-   unzip DIA-QE.zip
-   ```
+### Download the Test Data
 
-2. **Configure search parameters:**
+```bash
+wget https://skyline.ms/tutorials/DIA-QE.zip
+unzip DIA-QE.zip
+```
+
+### Quick Start with the Windows GUI
+
+1. Open the DelPi application.
+2. Select the downloaded raw or mzML input files.
+3. Select a FASTA protein database.
+4. Choose an output folder for search results.
+5. Choose an output spectral library folder.
+6. Review the search settings.
+7. Click **Run**.
+8. Check the result files in the output folder.
+
+### Quick Start with the Command Line
+
+1. **Configure search parameters:**
    
    Copy the example configuration file:
    ```bash
@@ -141,18 +162,18 @@ Verify your DelPi installation using publicly available DIA data from the [Skyli
    
    Edit `my_config.yaml` to specify paths for `input_files`, `fasta_file`, `output_directory`, and `database_directory`.
 
-3. **Run the search:**
+2. **Run the search:**
    ```bash
    delpi my_config.yaml
    ```
 
-4. **Verify output:**
+3. **Verify output:**
    
    DelPi generates the following files in your specified `output_directory`:
    
-   - **`delpi.log`**: Detailed execution log ([example](/examples/output/delpi.log))
-   - **`pmsm_results.<tsv|parquet>`**: Peptide-spectrum matches with q-values (format depends on configuration; [example](/examples/output/pmsm_results.tsv))
-   - **`protein_group_maxlfq_results.tsv`**: MaxLFQ protein quantification ([example](/examples/output/protein_group_maxlfq_results.tsv))
+   - **`delpi.log`**: Detailed execution log
+   - **`pmsm_results.<tsv|parquet>`**: Peptide-spectrum matches with q-values (format depends on configuration; [example](examples/output/pmsm_results.tsv))
+   - **`protein_group_maxlfq_results.tsv`**: MaxLFQ protein quantification ([example](examples/output/protein_group_maxlfq_results.tsv))
    
    Compare your results with the provided examples to verify correct installation.
 
@@ -160,8 +181,7 @@ Verify your DelPi installation using publicly available DIA data from the [Skyli
 
 ### 1. Prepare LC-MS/MS Data
 
-Ensure your data files are in a [supported format](#supported-lcmsms-data). If needed, convert to mzML using [ProteoWizard MSConvert](https://proteowizard.sourceforge.io).
-
+Ensure your data files are in a [supported format](#supported-lc-msms-data). If needed, convert to mzML using [ProteoWizard MSConvert](https://proteowizard.sourceforge.io).
 
 ### 2. Configure Search Parameters
 
@@ -250,5 +270,5 @@ DelPi is freely available under the [MIT License](LICENSE.txt).
 
 ## Contact
 
-For questions, bug reports, or feature requests, please contact **Jungkap Park** at jungkap.park@bertis.com
+For questions, bug reports, or feature requests, please contact **Jungkap Park, Ph.D.** at jungkap.park@bertis.com
 
