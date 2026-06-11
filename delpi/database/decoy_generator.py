@@ -73,6 +73,44 @@ class DecoyGenerator:
 
         return decoy_df
 
+    def resolve_duplicate_decoys(
+        self, target_peptide_df, decoy_df, max_attempts: int = 3
+    ) -> pl.DataFrame:
+        """Resolve decoys shared by multiple targets.
+
+        Different target sequences can map to the same decoy sequence. For each
+        group of colliding decoys the first occurrence is kept, while the rest
+        are regenerated with a pseudo-shuffle that preserves the N-term and
+        C-term residues of the corresponding target and only shuffles the
+        interior. ``target_peptide_df`` and ``decoy_df`` are matched row by row.
+        Decoys that still collide after ``max_attempts`` are collapsed into a
+        single decoy.
+        """
+
+        random.seed(self.random_seed)
+
+        target_peptides = target_peptide_df["peptide"].to_list()
+        decoy_peptides = decoy_df["peptide"].to_list()
+
+        for _ in range(max_attempts):
+            # Indices of rows that duplicate an earlier decoy (keep the first).
+            dup_indices = (
+                pl.DataFrame({"peptide": decoy_peptides})
+                .with_row_index("__row")
+                .filter(pl.int_range(pl.len()).over("peptide") > 0)
+                .get_column("__row")
+                .to_list()
+            )
+            if not dup_indices:
+                break
+
+            for i in dup_indices:
+                decoy_peptides[i] = get_shuffled_decoy(target_peptides[i])
+
+        decoy_df = decoy_df.with_columns(pl.Series("peptide", decoy_peptides))
+
+        return decoy_df.unique(subset="peptide", keep="first", maintain_order=True)
+
     def append_decoys(
         self,
         target_peptide_df,
@@ -82,6 +120,10 @@ class DecoyGenerator:
         decoy_peptide_df = self.generate_decoys(target_peptide_df)
         if decoy_peptide_df is None:
             return target_peptide_df.with_columns(is_decoy=False)
+
+        decoy_peptide_df = self.resolve_duplicate_decoys(
+            target_peptide_df, decoy_peptide_df
+        )
 
         if allow_conflicts == False:
             decoy_peptide_df = decoy_peptide_df.join(
