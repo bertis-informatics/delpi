@@ -114,21 +114,18 @@ class DecoyGenerator:
     def append_decoys(
         self,
         target_peptide_df,
-        allow_conflicts: bool = False,
     ) -> pl.DataFrame:
 
         decoy_peptide_df = self.generate_decoys(target_peptide_df)
         if decoy_peptide_df is None:
             return target_peptide_df.with_columns(is_decoy=False)
 
-        decoy_peptide_df = self.resolve_duplicate_decoys(
-            target_peptide_df, decoy_peptide_df
+        decoy_peptide_df = decoy_peptide_df.unique(
+            subset="peptide", keep="first", maintain_order=True
         )
-
-        if allow_conflicts == False:
-            decoy_peptide_df = decoy_peptide_df.join(
-                target_peptide_df.select(pl.col("peptide")), on="peptide", how="anti"
-            )
+        decoy_peptide_df = decoy_peptide_df.join(
+            target_peptide_df.select(pl.col("peptide")), on="peptide", how="anti"
+        )
 
         return pl.concat(
             (
