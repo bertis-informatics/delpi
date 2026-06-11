@@ -91,6 +91,8 @@ class BaseSearchEngine(ABC):
         self.state = SearchState(self.state + 1)
 
     def get_db_dir(self):
+        if not self.search_config.enable_transfer_learning:
+            return self.search_config.db_dir
         return (
             self.search_config.db_dir
             if self.state < SearchState.SECOND_SEARCH
@@ -98,6 +100,8 @@ class BaseSearchEngine(ABC):
         )
 
     def get_results_group_key(self):
+        if not self.search_config.enable_transfer_learning:
+            return "first_results"
         return (
             "first_results"
             if self.state < SearchState.SECOND_SEARCH
@@ -213,7 +217,10 @@ class BaseSearchEngine(ABC):
             search_progress.complete()
 
             self.next_state()
-            if self.state < SearchState.SECOND_SEARCH:
+            if (
+                self.search_config.enable_transfer_learning
+                and self.state < SearchState.SECOND_SEARCH
+            ):
                 # TDA + TL data prep (15% of overall)
                 tda_progress = progress.create_child("TDA", total=1, portion=10)
                 pmsm_df = self.perform_tda(result_manager)

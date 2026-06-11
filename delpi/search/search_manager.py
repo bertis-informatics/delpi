@@ -97,6 +97,8 @@ class SearchManager:
         return self.search_config.input_files
 
     def get_db_dir(self):
+        if not self.search_config.enable_transfer_learning:
+            return self.search_config.db_dir
         return (
             self.search_config.db_dir
             if self.state < SearchState.SECOND_SEARCH
@@ -104,6 +106,8 @@ class SearchManager:
         )
 
     def get_results_group_key(self):
+        if not self.search_config.enable_transfer_learning:
+            return "first_results"
         return (
             "first_results"
             if self.state < SearchState.SECOND_SEARCH
@@ -421,7 +425,7 @@ class SearchManager:
         lfq = LabelFreeQuantifier(
             result_aggregator,
             q_value_cutoff=q_value_cutoff,
-            group_key="second_results",
+            group_key=self.get_results_group_key(),
             acq_method=self.search_config.config.get("acquisition_method", "DDA"),
         )
 
@@ -526,19 +530,28 @@ class SearchManager:
             f"Search configuration:\n\n{yaml.dump(self.search_config.config, default_flow_style=False, indent=2)}"
         )
 
+        enable_tl = self.search_config.enable_transfer_learning
+        if enable_tl:
+            logger.info("Two-stage search (transfer learning enabled)")
+        else:
+            logger.info("Single-stage search (transfer learning disabled)")
+
         self.prepare_database()
 
         # First search
         self.execute_batch()
 
-        # Transfer learning
-        self.perform_transfer_learning()
+        if enable_tl:
+            # Transfer learning
+            self.perform_transfer_learning()
 
-        # Second search
-        self.execute_batch()
+            # Second search
+            self.execute_batch()
 
         # FDR control and quantification
         pmsm_df = self.perform_global_tda()
+
+        # pmsm_df.write_parquet(self.search_config.output_dir / "pmsm_scores.parquet")
 
         # Quantification
         pmsm_df, pg_quant_df = self.perform_quantification(pmsm_df)
