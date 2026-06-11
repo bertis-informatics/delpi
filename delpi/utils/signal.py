@@ -124,6 +124,7 @@ def cluster_peaks_with_weights(
     peak_group_weights: np.ndarray,
     dist_cutoff: int = 2,
     min_cluster_size: int = 1,
+    max_cluster_size: int = 3,
 ):
     """
     Cluster peaks by distance and select the peak with highest weight in each cluster.
@@ -133,6 +134,7 @@ def cluster_peaks_with_weights(
         peak_group_weights: Array of weights corresponding to each peak
         dist_cutoff: Maximum distance between peaks in same cluster
         min_cluster_size: Minimum number of peaks required to form a cluster
+        max_cluster_size: Maximum number of peaks allowed in a single cluster
 
     Returns:
         Array of selected peak positions (one per cluster, with highest weight)
@@ -155,7 +157,7 @@ def cluster_peaks_with_weights(
     j = 1  # current_count
 
     for peak, w in zip(peak_groups[1:], peak_group_weights[1:]):
-        if peak - current_cluster[j - 1] <= dist_cutoff:
+        if peak - current_cluster[j - 1] <= dist_cutoff and j < max_cluster_size:
             # Add to current cluster
             current_cluster[j] = peak
             current_cluster_weight[j] = w

@@ -347,12 +347,17 @@ class DIASearchEngine(BaseSearchEngine):
         # Full search (70% of overall)
         st_t = time.perf_counter()
         logger.info("Search started")
-        if self.state < SearchState.SECOND_SEARCH:
-            logit_cutoff = LOGIT_CUTOFF
-            save_quant = False
-        else:
+        if self.state >= SearchState.SECOND_SEARCH or (
+            not self.search_config.enable_transfer_learning
+        ):
+            # Either the second (refined) search, or a single-stage search:
+            # this is the final search, so capture quantification data.
             logit_cutoff = LOGIT_CUTOFF - 3.0
             save_quant = True
+        else:
+            # First search of a 2-stage (transfer learning) workflow.
+            logit_cutoff = LOGIT_CUTOFF
+            save_quant = False
 
         batch_size = self.search_config.config.get("batch_size", 512)
         search_progress = progress.create_child("Search", total=num_wins, portion=93)

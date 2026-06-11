@@ -95,7 +95,7 @@ class LabelFreeQuantifier:
             )
             .filter(
                 # filter out low confidence PmSMs
-                (pl.col("score") / pl.col("max_precursor_score") > 0.5)
+                (pl.col("score") / pl.col("max_precursor_score") > 0.3)
                 | (pl.col("max_precursor_score") - pl.col("score") < 1.0)
             )
             .sort(pl.col("precursor_index", "run_index"))
@@ -110,7 +110,11 @@ class LabelFreeQuantifier:
             all_xic_arrays[:, :, all_xic_arrays.shape[-1] // 2], axis=1
         )
         target_pmsm_df = target_pmsm_df.with_columns(
-            pl.Series(name="med_intensity", values=med_intensity)
+            pl.Series(name="med_intensity", values=med_intensity),
+            pl.col("observed_rt")
+            .over("precursor_index")
+            .median()
+            .alias("median_observed_rt"),
         ).with_row_index("index_")
 
         ## select a PmSM for each precursor based on the median intensity
@@ -124,7 +128,9 @@ class LabelFreeQuantifier:
         rt_diff_df = (
             selected_pmsm_df.select(
                 pl.col("precursor_index"),
-                (pl.col("observed_rt") - pl.col("predicted_rt")).abs().alias("rt_diff"),
+                (pl.col("observed_rt") - pl.col("median_observed_rt"))
+                .abs()
+                .alias("rt_diff"),
             )
             .group_by("precursor_index")
             .agg(pl.col("rt_diff").median().alias("median_rt_diff"))
@@ -138,7 +144,7 @@ class LabelFreeQuantifier:
                 how="left",
             )
             .with_columns(
-                rt_match=(pl.col("observed_rt") - pl.col("predicted_rt")).abs()
+                rt_match=(pl.col("observed_rt") - pl.col("median_observed_rt")).abs()
                 < pl.col("median_rt_diff") * 3
             )
             .group_by(["precursor_index", "run_index"], maintain_order=True)

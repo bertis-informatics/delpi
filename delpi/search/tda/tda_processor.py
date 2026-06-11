@@ -182,6 +182,9 @@ class TDAProcessor:
         )
         scored_df = pl.concat([scored_a, scored_b], how="vertical")
 
+        # for debugging: save all scored PmSMs before selection
+        scored_df.write_parquet(self.output_dir / "pmsm_scores.parquet")
+
         pmsm_df = scored_df.group_by(["run_index", "cluster"]).agg(
             pl.all().sort_by(["score", "pmsm_index"]).last()
         )

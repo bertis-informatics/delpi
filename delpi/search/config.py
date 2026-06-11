@@ -156,6 +156,15 @@ class SearchConfig:
         return db_params
 
     @property
+    def enable_transfer_learning(self) -> bool:
+        """Whether to run the 2-stage search with transfer learning.
+
+        When the ``enable_transfer_learning`` option is not specified in the
+        configuration, a single-stage search is performed.
+        """
+        return bool(self.config.get("enable_transfer_learning", False))
+
+    @property
     def is_phospho_search(self) -> bool:
         mod_params = self.config.get("modification", {}).get("mod_param_set", [])
         for mod in mod_params:
