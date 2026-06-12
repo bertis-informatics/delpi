@@ -87,6 +87,19 @@ class BaseSearchEngine(ABC):
         n = max(1, numba.config.NUMBA_NUM_THREADS // 2)
         numba.set_num_threads(n)
 
+    def get_save_quant(self) -> bool:
+        return (
+            self.state >= SearchState.SECOND_SEARCH
+            or not self.search_config.enable_transfer_learning
+        )
+
+    def get_logit_cutoff(self, base_cutoff: float, loose_delta: float = -3.0) -> float:
+        return (
+            base_cutoff + loose_delta
+            if self.state >= SearchState.SECOND_SEARCH
+            else base_cutoff
+        )
+
     def next_state(self):
         self.state = SearchState(self.state + 1)
 

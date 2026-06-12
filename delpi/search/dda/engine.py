@@ -361,17 +361,8 @@ class DDASearchEngine(BaseSearchEngine):
         # Full search (70% of overall)
         st_t = time.perf_counter()
         logger.info("Search started")
-        if self.state >= SearchState.SECOND_SEARCH or (
-            not self.search_config.enable_transfer_learning
-        ):
-            # Either the second (refined) search, or a single-stage search:
-            # this is the final search, so capture quantification data.
-            logit_cutoff = LOGIT_CUTOFF - 2.0
-            save_quant = True
-        else:
-            # First search of a 2-stage (transfer learning) workflow.
-            logit_cutoff = LOGIT_CUTOFF
-            save_quant = False
+        save_quant = self.get_save_quant()
+        logit_cutoff = self.get_logit_cutoff(LOGIT_CUTOFF)
 
         batch_size = self.search_config.config.get("batch_size", 512)
         num_groups = len(run.ms2_maps)
