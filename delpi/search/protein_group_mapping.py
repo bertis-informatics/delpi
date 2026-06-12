@@ -72,12 +72,17 @@ def _assemble_output_expanded(
     selected_proteins = [protein_ids[i] for i in selected_protein_indices]
 
     precursor_to_group = defaultdict(set)
-    precursor_counts = defaultdict(int)
+    # Maps precursor -> the first (highest-scoring) parsimony protein that covers it.
+    # selected_proteins is ordered by greedy selection (most coverage first), so the
+    # first protein in this order that covers a precursor is the master — consistent
+    # with AlphaDIA's behaviour where the protein that "claimed" the precursor is master.
+    precursor_to_master: dict = {}
 
     for protein in selected_proteins:
         for precursor in protein_to_precursors[protein]:
             precursor_to_group[precursor].add(protein)
-            precursor_counts[(precursor, protein)] += 1
+            if precursor not in precursor_to_master:
+                precursor_to_master[precursor] = protein
 
     precursor_list = []
     group_list = []
@@ -85,7 +90,7 @@ def _assemble_output_expanded(
 
     for precursor in precursor_ids:
         group = list(precursor_to_group[precursor])
-        master = max(group, key=lambda p: precursor_counts[(precursor, p)])
+        master = precursor_to_master[precursor]
         for protein in group:
             precursor_list.append(precursor)
             group_list.append(protein)
