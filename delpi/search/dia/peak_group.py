@@ -353,6 +353,8 @@ def find_peak_groups(
             peak_group_arr,
             peak_group_weights,
             dist_cutoff=2,
+            min_cluster_size=1,
+            max_cluster_size=1024,
         )
         mask = (peak_group_arr >= peak_lb) & (peak_group_arr <= peak_ub)
         peak_group_arr = peak_group_arr[mask]

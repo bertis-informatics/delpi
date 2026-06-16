@@ -518,6 +518,20 @@ class SearchManager:
 
         self.state = SearchState.DONE
 
+    def check_result_files(self) -> None:
+        """Raise FileExistsError if any per-run result file already exists."""
+        existing_files = [
+            ResultManager.get_hdf_file_path(self.output_dir, run_name)
+            for run_name in self.search_config.run_names
+            if ResultManager.get_hdf_file_path(self.output_dir, run_name).exists()
+        ]
+        if existing_files:
+            existing_names = ", ".join(f.name for f in existing_files)
+            raise FileExistsError(
+                f"Result file(s) already exist in '{self.output_dir}': {existing_names}. "
+                "Remove them before starting a new search."
+            )
+
     def execute_workflow(self) -> None:
         """
         Execute the full search workflow.
@@ -529,6 +543,8 @@ class SearchManager:
         logger.info(
             f"Search configuration:\n\n{yaml.dump(self.search_config.config, default_flow_style=False, indent=2)}"
         )
+
+        self.check_result_files()
 
         enable_tl = self.search_config.enable_transfer_learning
         if enable_tl:
