@@ -403,7 +403,7 @@ class SearchManager:
             training_params={
                 "num_warmup_steps": 5,
                 "max_epochs": 50,
-                "train_split": 0.9,
+                "train_split": 0.8,
                 "early_stopping_patience": 5,
             },
         )
