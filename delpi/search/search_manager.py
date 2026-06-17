@@ -383,6 +383,7 @@ class SearchManager:
         q_value_cutoff = search_config.config.get(
             "q_value_cutoff", DEFAULT_Q_VALUE_CUTOFF
         )
+        use_protein_picker = search_config.config.get("use_protein_picker", True)
 
         result_aggregator = ResultsAggregator(
             db_dir=self.get_db_dir(), search_config=search_config
@@ -394,6 +395,7 @@ class SearchManager:
             output_dir=search_config.output_dir,
             device=self.device,
             q_value_cutoff=q_value_cutoff,
+            use_protein_picker=use_protein_picker,
             batch_size=search_batch_size * 4,
             split_level="peptide",
         )

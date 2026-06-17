@@ -13,8 +13,10 @@ class FDRAnalyzer:
         self,
         q_value_cutoff: float,
         db_dir: Path,
+        use_protein_picker: bool = True,
     ):
         self.q_value_cutoff = q_value_cutoff
+        self.use_protein_picker = use_protein_picker
         self.fasta_id_df = (
             pl.scan_parquet(db_dir / "sequence_df.parquet")
             .select(pl.col("protein_index", "fasta_id"))
@@ -60,7 +62,10 @@ class FDRAnalyzer:
             # Map protein groups
             confident_pmsm_df = g_pmsm_df.filter(
                 pl.col("global_precursor_q_value") <= self.q_value_cutoff
-            ).select(pl.col("precursor_index", "is_decoy", "protein_index"))
+            ).select(pl.col("precursor_index", "is_decoy", "protein_index", "score"))
+
+            if self.use_protein_picker:
+                confident_pmsm_df = self._apply_protein_picker(confident_pmsm_df)
 
             pg_df = protein_group_mapping(confident_pmsm_df, self.fasta_id_df)
             g_pmsm_df = g_pmsm_df.select(
@@ -116,7 +121,10 @@ class FDRAnalyzer:
             # Map protein groups
             confident_pmsm_df = pmsm_df.filter(
                 pl.col("precursor_q_value") <= self.q_value_cutoff
-            ).select(pl.col("precursor_index", "is_decoy", "protein_index"))
+            ).select(pl.col("precursor_index", "is_decoy", "protein_index", "score"))
+
+            if self.use_protein_picker:
+                confident_pmsm_df = self._apply_protein_picker(confident_pmsm_df)
 
             pg_df = protein_group_mapping(confident_pmsm_df, self.fasta_id_df)
             pmsm_df = pmsm_df.select(
@@ -133,6 +141,71 @@ class FDRAnalyzer:
             )
 
         return pmsm_df
+
+    def _apply_protein_picker(self, confident_pmsm_df: pl.DataFrame) -> pl.DataFrame:
+        pair_df = (
+            confident_pmsm_df.select(
+                pl.col("precursor_index", "protein_index", "is_decoy", "score")
+            )
+            .explode("protein_index")
+            .drop_nulls("protein_index")
+        )
+
+        if pair_df.is_empty():
+            return confident_pmsm_df
+
+        protein_score_df = pair_df.group_by(["protein_index", "is_decoy"]).agg(
+            pl.col("score").max().alias("protein_score")
+        )
+
+        competition_df = (
+            protein_score_df.group_by("protein_index")
+            .agg(
+                pl.col("protein_score")
+                .filter(~pl.col("is_decoy"))
+                .max()
+                .alias("target_score"),
+                pl.col("protein_score")
+                .filter(pl.col("is_decoy"))
+                .max()
+                .alias("decoy_score"),
+            )
+            .with_columns(
+                (
+                    pl.col("decoy_score").is_null()
+                    | (
+                        pl.col("target_score").is_not_null()
+                        & (pl.col("target_score") >= pl.col("decoy_score"))
+                    )
+                ).alias("keep_target"),
+                (
+                    pl.col("target_score").is_null()
+                    | (
+                        pl.col("decoy_score").is_not_null()
+                        & (pl.col("decoy_score") > pl.col("target_score"))
+                    )
+                ).alias("keep_decoy"),
+            )
+        )
+
+        filtered_pair_df = pair_df.join(
+            competition_df.select(pl.col("protein_index", "keep_target", "keep_decoy")),
+            on="protein_index",
+            how="left",
+        ).filter(
+            ((pl.col("is_decoy") == False) & pl.col("keep_target"))
+            | ((pl.col("is_decoy") == True) & pl.col("keep_decoy"))
+        )
+
+        filtered_protein_df = filtered_pair_df.group_by("precursor_index").agg(
+            pl.col("protein_index")
+        )
+
+        return (
+            confident_pmsm_df.select(pl.exclude("protein_index"))
+            .join(filtered_protein_df, on="precursor_index", how="left")
+            .filter(pl.col("protein_index").is_not_null())
+        )
 
     def batch_run_specific_analysis(
         self, pmsm_df: pl.DataFrame, run_key: str = "run_index"

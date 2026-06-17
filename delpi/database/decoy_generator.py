@@ -120,9 +120,17 @@ class DecoyGenerator:
         if decoy_peptide_df is None:
             return target_peptide_df.with_columns(is_decoy=False)
 
-        decoy_peptide_df = decoy_peptide_df.unique(
-            subset="peptide", keep="first", maintain_order=True
+        # re-group decoys by peptide and collect protein indices for each decoy
+        decoy_peptide_df = (
+            decoy_peptide_df.explode("protein_index")
+            .group_by("peptide", maintain_order=True)
+            .agg(
+                pl.col("protein_index").unique().sort(),
+                pl.col("sequence_length").first(),
+            )
         )
+
+        # remove decoys that are identical to any target peptide
         decoy_peptide_df = decoy_peptide_df.join(
             target_peptide_df.select(pl.col("peptide")), on="peptide", how="anti"
         )

@@ -46,6 +46,7 @@ class TDAProcessor:
         output_dir: Path,
         device: torch.device,
         q_value_cutoff: float = DEFAULT_Q_VALUE_CUTOFF,
+        use_protein_picker: bool = True,
         n_ensemble: int = 1,
         ensemble_train_ratio: float = 0.8,
         batch_size: int = 2048,
@@ -55,6 +56,7 @@ class TDAProcessor:
         self.output_dir = output_dir
         self.device = device
         self.q_value_cutoff = q_value_cutoff
+        self.use_protein_picker = use_protein_picker
         self.n_ensemble = n_ensemble
         self.ensemble_train_ratio = ensemble_train_ratio
         self.batch_size = batch_size
@@ -126,7 +128,11 @@ class TDAProcessor:
             f"Selected {pmsm_df.shape[0]} best-scoring PmSMs (one per precursor)"
         )
 
-        fdr = FDRAnalyzer(q_value_cutoff=self.q_value_cutoff, db_dir=self.db_dir)
+        fdr = FDRAnalyzer(
+            q_value_cutoff=self.q_value_cutoff,
+            db_dir=self.db_dir,
+            use_protein_picker=self.use_protein_picker,
+        )
         pmsm_df = fdr.perform_run_specific_analysis(pmsm_df)
 
         return pmsm_df
@@ -201,7 +207,11 @@ class TDAProcessor:
 
         pmsm_df = self._join_database_columns(pmsm_df, result_aggregator.db_dir)
 
-        fdr = FDRAnalyzer(q_value_cutoff=self.q_value_cutoff, db_dir=self.db_dir)
+        fdr = FDRAnalyzer(
+            q_value_cutoff=self.q_value_cutoff,
+            db_dir=self.db_dir,
+            use_protein_picker=self.use_protein_picker,
+        )
         pmsm_df = fdr.perform_global_analysis(pmsm_df)
         pmsm_df = fdr.batch_run_specific_analysis(pmsm_df)
         pmsm_df = fdr.add_fasta_id_column(pmsm_df)
@@ -544,9 +554,23 @@ class TDAProcessor:
         db_dir: Path,
     ) -> pl.DataFrame:
         """Attach precursor/modification/peptide columns from the database."""
+        # Columns added by the join — drop them first if already present to
+        # avoid polars creating duplicate (_right) columns.
+        _join_added = {
+            "peptidoform_index",
+            "peptide_index",
+            "precursor_charge",
+            "mod_ids",
+            "mod_sites",
+            "peptide",
+            "sequence_length",
+            "is_decoy",
+            "protein_index",
+        }
+        cols_to_drop = [c for c in pmsm_df.columns if c in _join_added]
         return PeptideDatabase.join(
             db_dir,
-            pmsm_df.select(pl.exclude("peptidoform_index", "peptide_index")),
+            pmsm_df.drop(cols_to_drop),
             precursor_columns=["precursor_charge"],
             modification_columns=["mod_ids", "mod_sites"],
             peptide_columns=[
