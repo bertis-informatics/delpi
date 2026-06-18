@@ -34,7 +34,7 @@ from delpi.search.progress import CallbackProgressTracker
 from delpi.search.dia.max_lfq import maxlfq
 from delpi.utils.mp import get_multiprocessing_context
 from delpi.database.utils import get_modified_sequence
-from delpi.constants import DEFAULT_Q_VALUE_CUTOFF
+from delpi.constants import DEFAULT_Q_VALUE_CUTOFF, DEFAULT_REPORT_FORMAT
 
 SUPPORTED_DEVICES = ["cuda"]
 
@@ -463,7 +463,9 @@ class SearchManager:
 
     def save_pmsm_df(self, pmsm_df: pl.DataFrame, pg_quant_df: pl.DataFrame) -> None:
 
-        format = self.search_config.config.get("output_format", "tsv").lower()
+        format = self.search_config.config.get(
+            "output_format", DEFAULT_REPORT_FORMAT
+        ).lower()
         output_decoy = self.search_config.config.get("output_decoy", True)
         q_value_cutoff = self.search_config.config.get(
             "q_value_cutoff", DEFAULT_Q_VALUE_CUTOFF
