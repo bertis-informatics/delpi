@@ -65,10 +65,12 @@ class LabelFreeQuantifier:
         for run_index, result_mgr in result_aggregator._results_dict.items():
             quant_dict = result_mgr.read_dict(
                 group_key,
-                data_keys=["precursor_index", "ms1_area"],
+                data_keys=["ms1_area"],
             )
-            quant_df = pl.DataFrame(quant_dict, nan_to_null=True).with_columns(
-                pl.lit(run_index).cast(pl.UInt32).alias("run_index")
+            quant_df = (
+                pl.DataFrame(quant_dict, nan_to_null=True)
+                .with_row_index("pmsm_index")
+                .with_columns(pl.lit(run_index).cast(pl.UInt32).alias("run_index"))
             )
             dfs.append(quant_df)
 

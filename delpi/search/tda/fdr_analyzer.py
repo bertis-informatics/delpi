@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Literal
 from pathlib import Path
 
 import polars as pl
@@ -14,9 +14,11 @@ class FDRAnalyzer:
         q_value_cutoff: float,
         db_dir: Path,
         use_protein_picker: bool = True,
+        grouping_type: Literal["lead_only", "parsimonious_grouping"] = "parsimonious_grouping",
     ):
         self.q_value_cutoff = q_value_cutoff
         self.use_protein_picker = use_protein_picker
+        self.grouping_type = grouping_type
         self.fasta_id_df = (
             pl.scan_parquet(db_dir / "sequence_df.parquet")
             .select(pl.col("protein_index", "fasta_id"))
@@ -34,6 +36,7 @@ class FDRAnalyzer:
             pmsm_df.select(
                 pl.col(
                     "precursor_index",
+                    "peptide_index",
                     "peptidoform_index",
                     "protein_index",
                     "is_decoy",
@@ -62,15 +65,31 @@ class FDRAnalyzer:
             # Map protein groups
             confident_pmsm_df = g_pmsm_df.filter(
                 pl.col("global_precursor_q_value") <= self.q_value_cutoff
-            ).select(pl.col("precursor_index", "is_decoy", "protein_index", "score"))
+            ).select(
+                pl.col("peptide_index", "is_decoy", "protein_index", "score")
+            )
 
             if self.use_protein_picker:
                 confident_pmsm_df = self._apply_protein_picker(confident_pmsm_df)
 
-            pg_df = protein_group_mapping(confident_pmsm_df, self.fasta_id_df)
+            pg_df = protein_group_mapping(
+                confident_pmsm_df,
+                self.fasta_id_df,
+                grouping_type=self.grouping_type,
+            )
+            # protein_group_mapping returns one row per (peptide_index, group_id)
+            # edge (many-to-many). For precursor-level downstream FDR we need
+            # exactly one protein_group per peptide_index. Deduplicate to the
+            # lowest group_id (greedy-selection order) so the choice is
+            # deterministic and independent of DataFrame row order.
+            pg_df_dedup = (
+                pg_df.sort("group_id")
+                .unique("peptide_index", keep="first", maintain_order=True)
+                .drop("group_id")
+            )
             g_pmsm_df = g_pmsm_df.select(
                 pl.exclude("protein_group", "master_protein")
-            ).join(pg_df, on="precursor_index", how="left")
+            ).join(pg_df_dedup, on="peptide_index", how="left")
 
         g_pmsm_df = self._update_q_values(
             g_pmsm_df,
@@ -121,15 +140,28 @@ class FDRAnalyzer:
             # Map protein groups
             confident_pmsm_df = pmsm_df.filter(
                 pl.col("precursor_q_value") <= self.q_value_cutoff
-            ).select(pl.col("precursor_index", "is_decoy", "protein_index", "score"))
+            ).select(
+                pl.col("peptide_index", "is_decoy", "protein_index", "score")
+            )
 
             if self.use_protein_picker:
                 confident_pmsm_df = self._apply_protein_picker(confident_pmsm_df)
 
-            pg_df = protein_group_mapping(confident_pmsm_df, self.fasta_id_df)
+            pg_df = protein_group_mapping(
+                confident_pmsm_df,
+                self.fasta_id_df,
+                grouping_type=self.grouping_type,
+            )
+            # Deduplicate many-to-many edges to one group per peptide_index
+            # (lowest group_id = greedy-selection order).
+            pg_df_dedup = (
+                pg_df.sort("group_id")
+                .unique("peptide_index", keep="first", maintain_order=True)
+                .drop("group_id")
+            )
             pmsm_df = pmsm_df.select(
                 pl.exclude("protein_group", "master_protein")
-            ).join(pg_df, on="precursor_index", how="left")
+            ).join(pg_df_dedup, on="peptide_index", how="left")
 
         if "protein_group" in pmsm_df.columns:
             # Calculate protein group-level Q-values
@@ -142,10 +174,14 @@ class FDRAnalyzer:
 
         return pmsm_df
 
-    def _apply_protein_picker(self, confident_pmsm_df: pl.DataFrame) -> pl.DataFrame:
+    def _apply_protein_picker(
+        self,
+        confident_pmsm_df: pl.DataFrame,
+        inference_column: str = "peptide_index",
+    ) -> pl.DataFrame:
         pair_df = (
             confident_pmsm_df.select(
-                pl.col("precursor_index", "protein_index", "is_decoy", "score")
+                pl.col(inference_column, "protein_index", "is_decoy", "score")
             )
             .explode("protein_index")
             .drop_nulls("protein_index")
@@ -197,13 +233,13 @@ class FDRAnalyzer:
             | ((pl.col("is_decoy") == True) & pl.col("keep_decoy"))
         )
 
-        filtered_protein_df = filtered_pair_df.group_by("precursor_index").agg(
+        filtered_protein_df = filtered_pair_df.group_by(inference_column).agg(
             pl.col("protein_index")
         )
 
         return (
             confident_pmsm_df.select(pl.exclude("protein_index"))
-            .join(filtered_protein_df, on="precursor_index", how="left")
+            .join(filtered_protein_df, on=inference_column, how="left")
             .filter(pl.col("protein_index").is_not_null())
         )
 

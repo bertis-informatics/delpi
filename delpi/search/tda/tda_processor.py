@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Callable, List, Literal, Tuple
 
 SplitLevel = Literal["pmsm", "precursor", "peptide"]
+GroupingType = Literal["lead_only", "parsimonious_grouping"]
 
 import numpy as np
 import polars as pl
@@ -47,6 +48,7 @@ class TDAProcessor:
         device: torch.device,
         q_value_cutoff: float = DEFAULT_Q_VALUE_CUTOFF,
         use_protein_picker: bool = True,
+        grouping_type: GroupingType = "parsimonious_grouping",
         n_ensemble: int = 1,
         ensemble_train_ratio: float = 0.8,
         batch_size: int = 2048,
@@ -57,6 +59,7 @@ class TDAProcessor:
         self.device = device
         self.q_value_cutoff = q_value_cutoff
         self.use_protein_picker = use_protein_picker
+        self.grouping_type = grouping_type
         self.n_ensemble = n_ensemble
         self.ensemble_train_ratio = ensemble_train_ratio
         self.batch_size = batch_size
@@ -132,6 +135,7 @@ class TDAProcessor:
             q_value_cutoff=self.q_value_cutoff,
             db_dir=self.db_dir,
             use_protein_picker=self.use_protein_picker,
+            grouping_type=self.grouping_type,
         )
         pmsm_df = fdr.perform_run_specific_analysis(pmsm_df)
 
@@ -211,6 +215,7 @@ class TDAProcessor:
             q_value_cutoff=self.q_value_cutoff,
             db_dir=self.db_dir,
             use_protein_picker=self.use_protein_picker,
+            grouping_type=self.grouping_type,
         )
         pmsm_df = fdr.perform_global_analysis(pmsm_df)
         pmsm_df = fdr.batch_run_specific_analysis(pmsm_df)

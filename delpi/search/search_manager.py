@@ -384,6 +384,9 @@ class SearchManager:
             "q_value_cutoff", DEFAULT_Q_VALUE_CUTOFF
         )
         use_protein_picker = search_config.config.get("use_protein_picker", True)
+        grouping_type = search_config.config.get(
+            "grouping_type", "parsimonious_grouping"
+        )
 
         result_aggregator = ResultsAggregator(
             db_dir=self.get_db_dir(), search_config=search_config
@@ -396,6 +399,7 @@ class SearchManager:
             device=self.device,
             q_value_cutoff=q_value_cutoff,
             use_protein_picker=use_protein_picker,
+            grouping_type=grouping_type,
             batch_size=search_batch_size * 4,
             split_level="peptide",
         )
@@ -432,12 +436,23 @@ class SearchManager:
         )
 
         quant_df = lfq.perform_quantification(pmsm_df)
-        pmsm_df = (
-            pmsm_df.select(pl.exclude("ms1_area", "ms2_area"))
-            .group_by(["run_index", "precursor_index"])
-            .agg(pl.all().sort_by("score").last())
-            .join(quant_df, on=["run_index", "precursor_index"], how="left")
-        )
+        ## [TODO] DIA quantification
+        ## For DDA, MS1 area is estimated for each PmSM
+        ## For DIA, MS1 area is estimated for each precursor (across all PmSMs)
+        if lfq.acq_method == "DIA":
+            pmsm_df = (
+                pmsm_df.select(pl.exclude("ms1_area", "ms2_area"))
+                .group_by(["run_index", "precursor_index"])
+                .agg(pl.all().sort_by("score").last())
+                .join(quant_df, on=["run_index", "precursor_index"], how="left")
+            )
+        else:
+            pmsm_df = (
+                pmsm_df.select(pl.exclude("ms1_area", "ms2_area"))
+                .group_by(["run_index", "precursor_index"])
+                .agg(pl.all().sort_by("score").last())
+                .join(quant_df, on=["run_index", "pmsm_index"], how="left")
+            )
 
         ## run MaxLFQ
         if self.search_config.config.get("acquisition_method", "DDA").upper() == "DIA":

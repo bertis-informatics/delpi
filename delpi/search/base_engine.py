@@ -358,6 +358,9 @@ class BaseSearchEngine(ABC):
             "q_value_cutoff", DEFAULT_Q_VALUE_CUTOFF
         )
         use_protein_picker = self.search_config.config.get("use_protein_picker", True)
+        grouping_type = self.search_config.config.get(
+            "grouping_type", "parsimonious_grouping"
+        )
         group_key = self.get_results_group_key()
         search_batch_size = self.search_config.config.get("batch_size", 512)
         processor = TDAProcessor(
@@ -366,6 +369,7 @@ class BaseSearchEngine(ABC):
             device=self.device,
             q_value_cutoff=q_value_cutoff,
             use_protein_picker=use_protein_picker,
+            grouping_type=grouping_type,
             batch_size=search_batch_size * 4,
         )
         pmsm_df = processor.run_single(result_manager, group_key)
