@@ -19,6 +19,8 @@ output_decoy: true # output_decoy can be either true or false, default is false
 ms1_mass_tol_in_ppm: 10
 ms2_mass_tol_in_ppm: 10
 q_value_cutoff: 0.01
+# protein grouping mode: "lead_only" or "parsimonious_grouping" (default)
+grouping_type: parsimonious_grouping
 # enable_transfer_learning enables the 2-stage search that fine-tunes the models
 # (transfer learning) between a first and second search. When omitted or false,
 # a single-stage search is performed.
