@@ -2,6 +2,8 @@ import random
 
 import polars as pl
 
+from delpi.database.numba.prefix_mass_array import aa_mass_array
+
 MUTATION_MAP = dict(zip("GAVLIFMPWSCTYHKRQEND", "LLLVVLLLLTSSSSLLNDQE"))
 
 
@@ -15,6 +17,24 @@ def get_mutated_decoy(peptide):
     )
 
 
+def _diann_fragment_shifts(peptide: str):
+    """Return (delta_N, delta_C) monoisotopic mass shifts for a diann-style decoy.
+
+    Replicates the two mutation positions used by DIA-NN without altering the
+    actual sequence:
+    - ``peptide[2]``  (second residue)   → N-side shift applied from b2 onward
+    - ``peptide[-3]`` (second-to-last)   → C-side shift applied from the
+      second-to-last prefix mass onward
+    """
+    delta_n = (
+        aa_mass_array[ord(MUTATION_MAP[peptide[2]])] - aa_mass_array[ord(peptide[2])]
+    )
+    delta_c = (
+        aa_mass_array[ord(MUTATION_MAP[peptide[-3]])] - aa_mass_array[ord(peptide[-3])]
+    )
+    return float(delta_n), float(delta_c)
+
+
 def get_shuffled_decoy(peptide):
     mid = list(peptide[1:-2])
     random.shuffle(mid)
@@ -23,7 +43,12 @@ def get_shuffled_decoy(peptide):
 
 class DecoyGenerator:
 
-    supported_methods = ["pseudo_reverse", "mutation", "pseudo_shuffle", "diann"]
+    supported_methods = [
+        "pseudo_reverse",
+        "mutation",
+        "pseudo_shuffle",
+        "diann",
+    ]
 
     def __init__(self, method: str = None, random_seed: int = 323):
 
@@ -50,13 +75,30 @@ class DecoyGenerator:
                 .str.reverse()
                 + pl.col("peptide").str.slice(pl.col("sequence_length"), 2)
             ).alias("peptide")
+            decoy_df = target_df.with_columns(get_decoy)
+
+        # elif self.method == "mutation_legacy":
+        #     get_decoy = (
+        #         pl.col("peptide").map_elements(
+        #             get_mutated_decoy, return_dtype=pl.String
+        #         )
+        #     ).alias("peptide")
+        #     decoy_df = target_df.with_columns(get_decoy)
 
         elif self.method in ["diann", "mutation"]:
-            get_decoy = (
-                pl.col("peptide").map_elements(
-                    get_mutated_decoy, return_dtype=pl.String
-                )
-            ).alias("peptide")
+            # Sequence is kept identical to the target.  Only fragment m/z will
+            # differ via per-peptide shifts stored as metadata columns.
+            peptides = peptide_df["peptide"].to_list()
+            shifts = [_diann_fragment_shifts(p) for p in peptides]
+            decoy_df = target_df.with_columns(
+                pl.Series(
+                    "decoy_n_fragment_shift", [s[0] for s in shifts], dtype=pl.Float32
+                ),
+                pl.Series(
+                    "decoy_c_fragment_shift", [s[1] for s in shifts], dtype=pl.Float32
+                ),
+            )
+
         elif self.method == "pseudo_shuffle":
             random.seed(self.random_seed)
             get_decoy = (
@@ -64,12 +106,12 @@ class DecoyGenerator:
                     get_shuffled_decoy, return_dtype=pl.String
                 )
             ).alias("peptide")
+            decoy_df = target_df.with_columns(get_decoy)
+
         else:
             raise NotImplementedError(
                 f"Decoy generation method {self.method} is not implemented"
             )
-
-        decoy_df = target_df.with_columns(get_decoy)
 
         return decoy_df
 
@@ -117,28 +159,52 @@ class DecoyGenerator:
     ) -> pl.DataFrame:
 
         decoy_peptide_df = self.generate_decoys(target_peptide_df)
+
+        _zero_shifts = [
+            pl.lit(0.0).cast(pl.Float32).alias("decoy_n_fragment_shift"),
+            pl.lit(0.0).cast(pl.Float32).alias("decoy_c_fragment_shift"),
+        ]
+
         if decoy_peptide_df is None:
-            return target_peptide_df.with_columns(is_decoy=False)
+            return target_peptide_df.with_columns(is_decoy=False, *_zero_shifts)
 
-        # re-group decoys by peptide and collect protein indices for each decoy
-        decoy_peptide_df = (
-            decoy_peptide_df.explode("protein_index")
-            .group_by("peptide", maintain_order=True)
-            .agg(
-                pl.col("protein_index").unique().sort(),
-                pl.col("sequence_length").first(),
+        if self.method == "diann":
+            # diann decoys share the target sequence; no anti-join needed.
+            decoy_peptide_df = (
+                decoy_peptide_df.explode("protein_index")
+                .group_by("peptide", maintain_order=True)
+                .agg(
+                    pl.col("protein_index").unique().sort(),
+                    pl.col("sequence_length").first(),
+                    pl.col("decoy_n_fragment_shift").first(),
+                    pl.col("decoy_c_fragment_shift").first(),
+                )
             )
-        )
+        else:
+            # re-group decoys by peptide and collect protein indices for each decoy
+            decoy_peptide_df = (
+                decoy_peptide_df.explode("protein_index")
+                .group_by("peptide", maintain_order=True)
+                .agg(
+                    pl.col("protein_index").unique().sort(),
+                    pl.col("sequence_length").first(),
+                )
+            )
+            # remove decoys that are identical to any target peptide
+            decoy_peptide_df = decoy_peptide_df.join(
+                target_peptide_df.select(pl.col("peptide")), on="peptide", how="anti"
+            )
+            decoy_peptide_df = decoy_peptide_df.with_columns(*_zero_shifts)
 
-        # remove decoys that are identical to any target peptide
-        decoy_peptide_df = decoy_peptide_df.join(
-            target_peptide_df.select(pl.col("peptide")), on="peptide", how="anti"
-        )
+        # Determine output column order: original target columns then new ones.
+        out_cols = list(target_peptide_df.columns) + [
+            "is_decoy",
+            "decoy_n_fragment_shift",
+            "decoy_c_fragment_shift",
+        ]
+        target_out = target_peptide_df.with_columns(
+            is_decoy=False, *_zero_shifts
+        ).select(out_cols)
+        decoy_out = decoy_peptide_df.with_columns(is_decoy=True).select(out_cols)
 
-        return pl.concat(
-            (
-                target_peptide_df.with_columns(is_decoy=False),
-                decoy_peptide_df.with_columns(is_decoy=True),
-            ),
-            how="vertical",
-        )
+        return pl.concat((target_out, decoy_out), how="vertical")

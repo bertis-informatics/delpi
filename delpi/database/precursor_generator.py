@@ -1,3 +1,5 @@
+import numpy as np
+import numpy as np
 import polars as pl
 from numba.typed import List
 
@@ -86,6 +88,20 @@ class PrecursorGenerator:
             peptide_df, modification_df
         )
 
+        # Apply per-peptide fragment mass shifts for diann-style decoys before
+        # precursor mass is read from the array.
+        if "decoy_n_fragment_shift" in peptide_df.columns:
+            self._apply_diann_shifts(
+                flatten_mass_array, stop_row_indices, modification_df, peptide_df
+            )
+
+        # Apply per-peptide fragment mass shifts for diann-style decoys.
+        # This must happen before precursor_mass is read from the array.
+        if "decoy_n_fragment_shift" in peptide_df.columns:
+            self._apply_diann_shifts(
+                flatten_mass_array, stop_row_indices, modification_df, peptide_df
+            )
+
         precursor_mass = flatten_mass_array[stop_row_indices - 1] + Composition.H2O.mass
         modification_df = modification_df.with_columns(
             # mass_array_stop_index=stop_row_indices,
@@ -117,3 +133,51 @@ class PrecursorGenerator:
         # peptidoform_mass_array_stop_index = stop_row_indices
 
         return (precursor_df, modification_df, prefix_mass_container)
+
+    @staticmethod
+    def _apply_diann_shifts(
+        flatten_mass_array: np.ndarray,
+        stop_row_indices: np.ndarray,
+        modification_df: pl.DataFrame,
+        peptide_df: pl.DataFrame,
+    ) -> None:
+        """Apply N- and C-side fragment mass shifts for diann decoys in-place.
+
+        For each peptidoform that carries non-zero shifts (i.e. diann decoys):
+
+        - ``decoy_n_fragment_shift`` (delta for second residue) is added to
+          prefix-mass positions 1 .. n-1.  This shifts b2 and all higher b-ions,
+          and leaves shared-residue y-ion differences unchanged.
+        - ``decoy_c_fragment_shift`` (delta for second-to-last residue) is added
+          to prefix-mass positions n-2 .. n-1.
+
+        Both shifts are applied before ``precursor_mass`` is read from the array,
+        so the precursor m/z is updated consistently.
+        """
+        shift_df = (
+            modification_df.select("peptide_index")
+            .join(
+                peptide_df.select(
+                    "peptide_index",
+                    "decoy_n_fragment_shift",
+                    "decoy_c_fragment_shift",
+                ),
+                on="peptide_index",
+                how="left",
+            )
+        )
+        n_shifts = shift_df["decoy_n_fragment_shift"].fill_null(0.0).to_numpy()
+        c_shifts = shift_df["decoy_c_fragment_shift"].fill_null(0.0).to_numpy()
+
+        for i in np.where((n_shifts != 0.0) | (c_shifts != 0.0))[0]:
+            start = int(stop_row_indices[i - 1]) if i > 0 else 0
+            stop  = int(stop_row_indices[i])
+            n     = stop - start          # number of residues in this peptidoform
+            delta_n = float(n_shifts[i])
+            delta_c = float(c_shifts[i])
+            # N-side: second residue is at cumsum index 1; delta propagates to end.
+            if delta_n != 0.0 and n > 1:
+                flatten_mass_array[start + 1 : stop] += delta_n
+            # C-side: second-to-last residue is at cumsum index n-2.
+            if delta_c != 0.0 and n >= 2:
+                flatten_mass_array[stop - 2 : stop] += delta_c
