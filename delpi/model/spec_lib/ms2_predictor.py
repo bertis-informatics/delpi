@@ -287,7 +287,7 @@ class Ms2SpectrumPredictor(LightningModule):
 
         # Use L1 loss for intensity prediction (matches Carafe / AlphaPeptDeep
         # fine-tuning recipe; more robust than MSE for sparse non-negative targets)
-        loss = nn.functional.l1_loss(y_pred, y_true)
+        loss = nn.functional.mse_loss(y_pred, y_true)
 
         return loss, y_true, y_pred
 
@@ -400,10 +400,35 @@ class Ms2SpectrumPredictor(LightningModule):
 
     def get_trainset(self):
         if self.fractions is not None:
-            return self.original_train_ds.make_subset(
-                fractions=self.fractions,
-                seed=self.current_epoch,
-            )
+            n = len(self.original_train_ds)
+            subset_size = max(1, int(n * self.fractions))
+            max_non_overlap_epochs = max(1, n // subset_size)
+
+            # Consume non-overlapping chunks from one global permutation,
+            # then reshuffle per cycle for better dataset coverage.
+            cycle_epochs = self.subset_shuffle_every_epochs
+            if cycle_epochs is None:
+                cycle_epochs = max_non_overlap_epochs
+            cycle_epochs = max(1, min(cycle_epochs, max_non_overlap_epochs))
+
+            cycle_index = self.current_epoch // cycle_epochs
+            epoch_in_cycle = self.current_epoch % cycle_epochs
+
+            if (
+                self._subset_perm is None
+                or self._subset_perm_cycle_index != cycle_index
+                or self._subset_perm_size != n
+            ):
+                rng = np.random.default_rng(self.subset_seed + cycle_index)
+                self._subset_perm = rng.permutation(n)
+                self._subset_perm_cycle_index = cycle_index
+                self._subset_perm_size = n
+
+            start = epoch_in_cycle * subset_size
+            stop = min(start + subset_size, n)
+            subset_idx = self._subset_perm[start:stop]
+
+            return self.original_train_ds.make_subset_from_indices(subset_idx)
 
         return self.original_train_ds
 
@@ -414,6 +439,8 @@ class Ms2SpectrumPredictor(LightningModule):
         batch_size,
         fractions=None,
         num_workers=8,
+        subset_shuffle_every_epochs=None,
+        subset_seed=0,
     ):
         """Set datasets for training and validation."""
         self.original_train_ds = train_dataset
@@ -421,6 +448,12 @@ class Ms2SpectrumPredictor(LightningModule):
         self.batch_size = batch_size
         self.fractions = fractions
         self.num_workers = num_workers
+        self.subset_shuffle_every_epochs = subset_shuffle_every_epochs
+        self.subset_seed = int(subset_seed)
+
+        self._subset_perm = None
+        self._subset_perm_cycle_index = None
+        self._subset_perm_size = None
 
     def get_batch_sampler(self, dataset: Dataset, shuffle: bool):
         from delpi.utils.batch_sampler import get_batch_sampler_for_seq_data
