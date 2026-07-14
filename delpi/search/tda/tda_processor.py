@@ -79,7 +79,16 @@ class TDAProcessor:
 
         Split granularity is controlled by ``self.split_level``.
         All features fit in memory, so no subsampling is applied.
-        Returns a q-value-filtered PmSM DataFrame.
+
+        Writes ``score`` and ``precursor_q_value`` arrays back into *group_key*
+        inside *result_manager*, aligned to the original HDF pmsm_index order.
+        Entries that did not survive cluster/precursor deduplication are NaN.
+
+        Returns
+        -------
+        pl.DataFrame
+            Best-scoring PmSMs (one per precursor) with ``score`` and
+            ``precursor_q_value`` columns.
         """
         pmsm_df, feature_arr = self._load_single_run(
             result_manager, group_key, self.db_dir
@@ -113,22 +122,16 @@ class TDAProcessor:
         )
         scores_a = self._score(fold_a, model_b, feature_fn)
 
-        # Merge scored folds
+        # Merge scored folds – every PmSM now has a score
         scored_a = fold_a.with_columns(pl.Series(values=scores_a, name="score"))
         scored_b = fold_b.with_columns(pl.Series(values=scores_b, name="score"))
-        pmsm_df = pl.concat([scored_a, scored_b], how="vertical")
+        full_scored_df = pl.concat([scored_a, scored_b], how="vertical")
 
         # Best per cluster, then best per precursor.
         # Tie-break on pmsm_index to make selection deterministic when
         # multiple PmSMs in a group share the same score.
-        pmsm_df = pmsm_df.group_by("cluster").agg(
+        pmsm_df = full_scored_df.group_by("cluster").agg(
             pl.all().sort_by(["score", "pmsm_index"]).last()
-        )
-        pmsm_df = pmsm_df.group_by("precursor_index").agg(
-            pl.all().sort_by(["score", "pmsm_index"]).last()
-        )
-        logger.debug(
-            f"Selected {pmsm_df.shape[0]} best-scoring PmSMs (one per precursor)"
         )
 
         fdr = FDRAnalyzer(
@@ -138,6 +141,15 @@ class TDAProcessor:
             grouping_type=self.grouping_type,
         )
         pmsm_df = fdr.perform_run_specific_analysis(pmsm_df)
+
+        q_value_arr = np.full(feature_arr.shape[0], np.nan, dtype=np.float32)
+        score_arr = np.full(feature_arr.shape[0], np.nan, dtype=np.float32)
+        score_arr[full_scored_df["pmsm_index"]] = full_scored_df["score"].to_numpy()
+        q_value_arr[pmsm_df["pmsm_index"]] = pmsm_df["precursor_q_value"].to_numpy()
+
+        result_manager.write_dict(
+            group_key, {"score": score_arr, "precursor_q_value": q_value_arr}
+        )
 
         return pmsm_df
 
