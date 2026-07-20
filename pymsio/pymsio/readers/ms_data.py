@@ -7,7 +7,6 @@ import numpy as np
 
 from pymsio.readers.utils import get_frame_num_to_index_arr, compute_z_score_cdf_numba
 
-
 META_SCHEMA = {
     "frame_num": pl.UInt32,
     "mz_lo": pl.Float32,
@@ -146,6 +145,8 @@ class MassSpecData:
         self,
         file_path: Union[str, Path],
         overwrite: bool = False,
+        compression: Optional[str] = None,
+        compression_opts: Optional[int] = None,
     ):
         file_path = Path(file_path)
         group_key = self.run_name
@@ -157,8 +158,22 @@ class MassSpecData:
                 else:
                     raise FileExistsError("LC/MS data already exists")
             hf_grp = hf.create_group(group_key)
-            hf_grp.create_dataset("mz", data=self.peaks.mz, dtype=np.float32)
-            hf_grp.create_dataset("ab", data=self.peaks.ab, dtype=np.float32)
+            hf_grp.create_dataset(
+                "mz",
+                data=self.peaks.mz,
+                dtype=np.float32,
+                compression=compression,
+                compression_opts=compression_opts,
+                shuffle=True if compression is not None else False,
+            )
+            hf_grp.create_dataset(
+                "ab",
+                data=self.peaks.ab,
+                dtype=np.float32,
+                compression=compression,
+                compression_opts=compression_opts,
+                shuffle=True if compression is not None else False,
+            )
 
         self.meta_df.to_pandas().to_hdf(
             file_path, key=f"{group_key}/meta_df", index=False
