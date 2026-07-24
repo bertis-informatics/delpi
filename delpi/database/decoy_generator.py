@@ -45,41 +45,46 @@ def build_varmod_signature_fn(
 
 def _find_safe_mutation_position(
     peptide: str,
-    start: int,
-    step: int,
-    limit: int,
+    candidates: Sequence[int],
     varmod_signature: Callable[[str], tuple],
+    exclude: Optional[int] = None,
 ) -> Optional[int]:
-    """Scan positions ``start, start+step, start+2*step, ...`` (inclusive of
-    ``limit`` in the search direction) for the first residue whose
-    ``MUTATION_MAP`` mutation preserves the same variable-modification
-    eligibility. Returns the index, or ``None`` if none is found."""
-    pos = start
-    while (step > 0 and pos <= limit) or (step < 0 and pos >= limit):
+    """Try ``candidates`` (0-based indices; negative values count from the
+    end, as in Python slicing) in priority order and return the first
+    internal position (never the first or last residue, and never
+    ``exclude``) whose ``MUTATION_MAP`` mutation preserves the residue's
+    variable-modification eligibility. Returns ``None`` if none qualifies."""
+    length = len(peptide)
+    for pos in candidates:
+        if pos < 0:
+            pos += length
+        if pos <= 0 or pos >= length - 1 or pos == exclude:
+            continue
         aa = peptide[pos]
         if varmod_signature(aa) == varmod_signature(MUTATION_MAP[aa]):
             return pos
-        pos += step
     return None
 
 
 def get_mutated_decoy(
     peptide: str, varmod_signature: Callable[[str], tuple] = None
 ) -> str:
-    """Mutate up to two internal residues of ``peptide`` to generate a decoy,
-    preserving the terminal characters and first/last residues.
+    """Mutate two internal residues of ``peptide`` to generate a decoy,
+    preserving the first residue and the last two residues.
 
-    The default mutation positions are the same as before: the second
-    residue from the N-term (index 2) and the second-to-last residue from
-    the C-term (index ``len(peptide) - 3``). When ``varmod_signature`` is
-    given, a default position is only mutated in place if doing so does not
-    change the residue's eligibility for any active variable modification
-    (see :func:`build_varmod_signature_fn`); otherwise the nearest safe
-    residue in the same direction (N: increasing index; C: decreasing index)
-    is mutated instead, without the two positions ever colliding. If no safe
-    residue can be found on either side, the original (unconditional)
-    mutation at the default positions is used as a fallback, so the decoy
-    always differs from the target.
+    Each terminal side tries a fixed, prioritized list of positions and
+    mutates the first one whose ``MUTATION_MAP`` substitution preserves the
+    residue's eligibility for any active variable modification (see
+    :func:`build_varmod_signature_fn`):
+
+    - N-terminal side: index 2, then 3, then 4, then 1.
+    - C-terminal side: index ``len - 3``, then ``len - 4``, then ``len - 5``.
+
+    If none of a side's candidates are safe (or valid), that side falls back
+    to its original default position (2 for N-term, ``len(peptide) - 3`` for
+    C-term) and mutates it unconditionally, so the decoy always differs from
+    the target. The C-terminal search skips any position already claimed by
+    the N-terminal side.
     """
     if varmod_signature is None:
         varmod_signature = _default_varmod_signature
@@ -87,32 +92,19 @@ def get_mutated_decoy(
     n_default = 2
     c_default = len(peptide) - 3
 
-    n_pos = _find_safe_mutation_position(
-        peptide,
-        start=n_default,
-        step=1,
-        limit=c_default - 1,
-        varmod_signature=varmod_signature,
-    )
-    lower_bound = n_pos + 1 if n_pos is not None else n_default
-    c_pos = _find_safe_mutation_position(
-        peptide,
-        start=c_default,
-        step=-1,
-        limit=lower_bound,
-        varmod_signature=varmod_signature,
-    )
+    n_pos = _find_safe_mutation_position(peptide, (2, 3, 4, 1), varmod_signature)
+    if n_pos is None:
+        n_pos = n_default
 
-    if n_pos is None and c_pos is None:
-        # No variable-modification-safe residue found on either side; fall
-        # back to the original (unconditional) mutation at the defaults.
-        n_pos, c_pos = n_default, c_default
+    c_pos = _find_safe_mutation_position(
+        peptide, (-3, -4, -5), varmod_signature, exclude=n_pos
+    )
+    if c_pos is None:
+        c_pos = c_default
 
     chars = list(peptide)
-    if n_pos is not None:
-        chars[n_pos] = MUTATION_MAP[chars[n_pos]]
-    if c_pos is not None:
-        chars[c_pos] = MUTATION_MAP[chars[c_pos]]
+    chars[n_pos] = MUTATION_MAP[peptide[n_pos]]
+    chars[c_pos] = MUTATION_MAP[peptide[c_pos]]
 
     return "".join(chars)
 

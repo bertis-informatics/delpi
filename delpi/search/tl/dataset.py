@@ -7,12 +7,10 @@ import numpy as np
 from torch.utils.data import Dataset
 
 from delpi.model.spec_lib.aa_encoder import encode_modification_feature
-from delpi.search.result_manager import TL_DATA_GROUP
 from delpi.utils.hdf import HdfDataset
 
 LABEL_DTYPE = np.dtype(
     [
-        ("hdf_index", np.uint32),
         ("seq_len", np.int16),
         ("index", np.uint32),
         ("precursor_index", np.uint32),
@@ -40,7 +38,6 @@ class TransferLearningDataset(HdfDataset):
         # Pre-convert to numpy for worker-safe __getitem__ (no polars in workers)
         # self._seq_lens = label_df["seq_len"].to_numpy()
         # self._indices = label_df["index"].to_numpy()
-        # self._fids = label_df["hdf_index"].to_numpy()
 
     def __len__(self):
         return len(self.labels)
@@ -48,19 +45,18 @@ class TransferLearningDataset(HdfDataset):
     def __getitem__(self, index):
         n_tokens = self.labels["seq_len"][index]
         idx = self.labels["index"][index]
-        fid = self.labels["hdf_index"][index]
 
         if self.use_memory:
             # Get data from pre-loaded numpy arrays (same structure as HDF)
-            x_aa = self.data_dict[fid][n_tokens]["x_aa"][idx]
-            x_mod = self.data_dict[fid][n_tokens]["x_mod"][idx]
-            x_meta = self.data_dict[fid][n_tokens]["x_meta"][idx]
-            y_intensity = self.data_dict[fid][n_tokens]["x_intensity"][idx]
+            x_aa = self.data_dict[n_tokens]["x_aa"][idx]
+            x_mod = self.data_dict[n_tokens]["x_mod"][idx]
+            x_meta = self.data_dict[n_tokens]["x_meta"][idx]
+            y_intensity = self.data_dict[n_tokens]["x_intensity"][idx]
         else:
-            # Get data from HDF5 files
-            hf = self.get_hf(fid)
-            tl_data_group = hf[TL_DATA_GROUP]
-            data_group = tl_data_group[str(n_tokens)]
+            # Get data from the shared HDF5 file (single file, no per-run
+            # grouping).
+            hf = self.get_hf(0)
+            data_group = hf[str(n_tokens)]
 
             x_aa = data_group["x_aa"][idx][...]
             x_mod = data_group["x_mod"][idx][...]
@@ -109,7 +105,6 @@ class TransferLearningDatasetForRT(Dataset):
         # Pre-convert to numpy for worker-safe __getitem__ (no polars in workers)
         # self._seq_lens = label_df["seq_len"].to_numpy()
         # self._indices = label_df["index"].to_numpy()
-        # self._fids = label_df["hdf_index"].to_numpy()
 
     def __len__(self):
         return len(self.labels)
@@ -117,12 +112,11 @@ class TransferLearningDatasetForRT(Dataset):
     def __getitem__(self, index):
         n_tokens = self.labels["seq_len"][index]
         idx = self.labels["index"][index]
-        fid = self.labels["hdf_index"][index]
 
         # Get data from pre-loaded numpy arrays (same structure as HDF)
-        x_aa = self.data_dict[fid][n_tokens]["x_aa"][idx]
-        x_mod = self.data_dict[fid][n_tokens]["x_mod"][idx]
-        y_rt = self.data_dict[fid][n_tokens]["x_rt"][idx]
+        x_aa = self.data_dict[n_tokens]["x_aa"][idx]
+        x_mod = self.data_dict[n_tokens]["x_mod"][idx]
+        y_rt = self.data_dict[n_tokens]["x_rt"][idx]
 
         # Apply transformations
         x_mod = encode_modification_feature(x_mod, x_aa.shape[0])

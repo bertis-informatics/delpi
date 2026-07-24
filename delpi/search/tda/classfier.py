@@ -46,9 +46,13 @@ class TargetDecoyClassifier(pl.LightningModule):
         self.train_ap = torchmetrics.AveragePrecision(task="binary")
         self.valid_ap = torchmetrics.AveragePrecision(task="binary")
         self.valid_rc = RecallAtFDR(fdr_cutoff=0.01)
-        self.criterion = AsymmetricFocalLoss(
-            focal_loss_gamma_pos, focal_loss_gamma_neg, focal_loss_clip
-        )
+        if focal_loss_gamma_pos == 0.0 and focal_loss_gamma_neg == 0.0:
+            # Asymmetric focal loss reduces to plain BCE when both gammas are 0.
+            self.criterion = nn.BCEWithLogitsLoss()
+        else:
+            self.criterion = AsymmetricFocalLoss(
+                focal_loss_gamma_pos, focal_loss_gamma_neg, focal_loss_clip
+            )
         # self.criterion = NURiskLoss(pi_p=0.1)
         self.num_warmup_steps = num_warmup_steps
         self.num_training_steps = num_training_steps
@@ -64,7 +68,8 @@ class TargetDecoyClassifier(pl.LightningModule):
 
         y_true = y_true.to(torch.float32)
         logits = self(X)
-        loss, y_proba = self.criterion(logits, y_true, return_score=True)
+        y_proba = torch.sigmoid(logits)
+        loss = self.criterion(logits, y_true)
 
         return loss, y_true, y_proba
 

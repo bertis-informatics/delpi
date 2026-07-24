@@ -32,7 +32,7 @@ DEFAULT_MODEL_PARAMS = {
     "layers": [64, 32],
     "dropout": 0,
     "focal_loss_gamma_pos": 0.0,
-    "focal_loss_gamma_neg": 4.0,
+    "focal_loss_gamma_neg": 0.0,
     "focal_loss_clip": 0,
 }
 

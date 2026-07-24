@@ -30,11 +30,19 @@ class LabelFreeQuantifier:
         q_value_cutoff: float,
         acq_method: str,
         group_key: str = "second_results",
+        library_q_value_column: str = "global_precursor_q_value",
     ):
         self.result_aggregator = result_aggregator
         self.q_value_cutoff = q_value_cutoff
         self.group_key = group_key
         self.acq_method = acq_method.upper()
+        # Column used as the "library-level" cutoff for accepting a
+        # precursor-run identification, in addition to the run-specific
+        # ``precursor_q_value``.  For the transfer-learning two-pass (MBR)
+        # search this should be ``library_precursor_q_value`` (first-pass
+        # global q-value carried via ``library_confidence.parquet``); for a
+        # single-pass search it defaults to ``global_precursor_q_value``.
+        self.library_q_value_column = library_q_value_column
 
     def perform_quantification(self, pmsm_df: pl.DataFrame) -> pl.DataFrame:
         """
@@ -82,11 +90,12 @@ class LabelFreeQuantifier:
 
         result_aggregator = self.result_aggregator
         q_value_cutoff = self.q_value_cutoff
+        library_q_value_column = self.library_q_value_column
 
         target_pmsm_df = (
             pmsm_df.filter(
                 (pl.col("is_decoy") == False)
-                & (pl.col("global_precursor_q_value") <= q_value_cutoff)
+                & (pl.col(library_q_value_column) <= q_value_cutoff)
                 & (pl.col("precursor_q_value") <= q_value_cutoff)
             )
             .with_columns(

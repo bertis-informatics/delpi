@@ -14,9 +14,6 @@ import numpy as np
 import polars as pl
 import pandas as pd
 
-TL_DATA_GROUP = "tl_data"
-
-
 logger = logging.getLogger(__name__)
 
 
@@ -229,67 +226,53 @@ class ResultManager:
 
         return n_samples
 
-    def write_tl_data(self, collected_data: Dict[int, Dict[str, np.ndarray]]):
-        """Save collected training data to HDF5 file"""
-
-        with h5py.File(self.hdf_file_path, mode="a") as hf:
-
-            if TL_DATA_GROUP in hf:
-                del hf[TL_DATA_GROUP]
-
-            tl_data_group = hf.create_group(TL_DATA_GROUP)
-
-            for seq_len, data_dict in collected_data.items():
-                if not data_dict:
-                    continue
-
-                group_key = str(seq_len)
-                grp = tl_data_group.create_group(group_key)
-
-                for array_name, array_data in data_dict.items():
-                    grp.create_dataset(
-                        array_name,
-                        data=array_data,
-                        chunks=(1, *array_data.shape[1:]),
-                    )
-
     @staticmethod
     def compute_id_statistics(
-        pmsm_df: pl.DataFrame, q_value_cutoff, global_fdr: bool = False
+        pmsm_df: pl.DataFrame,
+        q_value_cutoff,
+        global_fdr: bool = False,
+        use_library_q_value: bool = False,
     ) -> pd.DataFrame:
+        """Count identified precursors/peptides/protein-groups at *q_value_cutoff*.
+
+        ``use_library_q_value`` is set for the second pass of the two-pass
+        MBR search: the first-pass-derived ``library_*_q_value`` columns
+        (fixed per precursor, not run- or global-scope specific) are used
+        instead of ``global_fdr``'s ``global_``/run-specific column prefix.
+        """
 
         target_df = pmsm_df.filter(pl.col("is_decoy") == False)
 
-        prefix = "global_" if global_fdr else ""
-        col_map = {
-            "precursors": (f"{prefix}precursor_q_value", "precursor_index"),
-            "peptides": (f"{prefix}peptide_q_value", "peptidoform_index"),
-            "protein_groups": (f"{prefix}protein_group_q_value", "protein_group"),
-        }
+        if use_library_q_value:
+            col_map = {
+                "precursors": ("library_precursor_q_value", "precursor_index"),
+                "peptides": ("library_peptide_q_value", "peptidoform_index"),
+                "protein_groups": (
+                    "library_protein_group_q_value",
+                    "protein_group",
+                ),
+            }
+        else:
+            prefix = "global_" if global_fdr else ""
+            col_map = {
+                "precursors": (f"{prefix}precursor_q_value", "precursor_index"),
+                "peptides": (f"{prefix}peptide_q_value", "peptidoform_index"),
+                "protein_groups": (
+                    f"{prefix}protein_group_q_value",
+                    "protein_group",
+                ),
+            }
 
+        # Columns may be absent (e.g. the second pass of the two-pass MBR
+        # search skips protein grouping/its q-value); report `None` for
+        # those metrics instead of raising.
         counts = {
-            key: target_df.filter(pl.col(fdr_col) <= q_value_cutoff)[idx_col].n_unique()
+            key: (
+                target_df.filter(pl.col(fdr_col) <= q_value_cutoff)[idx_col].n_unique()
+                if fdr_col in target_df.columns and idx_col in target_df.columns
+                else None
+            )
             for key, (fdr_col, idx_col) in col_map.items()
         }
-
-        # precursor_fdr_col = "precursor_q_value"
-        # peptide_fdr_col = "peptide_q_value"
-        # protein_group_fdr_col = "precursor_q_value"
-        # if global_fdr:
-        #     precursor_fdr_col = "global" + precursor_fdr_col
-        #     peptide_fdr_col = "global" + peptide_fdr_col
-        #     protein_group_fdr_col = "global" + protein_group_fdr_col
-
-        # counts = {
-        #     "precursors": target_df.filter(pl.col(precursor_fdr_col) <= q_value_cutoff)[
-        #         "precursor_index"
-        #     ].n_unique(),
-        #     "peptides": target_df.filter(pl.col(peptide_fdr_col) <= q_value_cutoff)[
-        #         "peptidoform_index"
-        #     ].n_unique(),
-        #     "protein_groups": target_df.filter(
-        #         pl.col(protein_group_fdr_col) <= q_value_cutoff
-        #     )["protein_group"].n_unique(),
-        # }
 
         return counts

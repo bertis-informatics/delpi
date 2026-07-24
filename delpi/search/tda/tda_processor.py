@@ -158,6 +158,9 @@ class TDAProcessor:
         result_aggregator: ResultsAggregator,
         group_key: str,
         training_params: dict = None,
+        run_protein_grouping: bool = True,
+        library_confidence_df: pl.DataFrame = None,
+        pass_label: str = "global",
     ) -> pl.DataFrame:
         """Cross-run TDA across multiple LC-MS runs (2-fold CV).
 
@@ -169,6 +172,19 @@ class TDAProcessor:
         sampling (each of size ``ensemble_train_ratio`` × N_fold) with
         different seeds, and averages their logits.
 
+        When ``library_confidence_df`` is provided (second pass of the
+        two-pass MBR search), protein-group membership is reused from the
+        first pass for targets and freshly computed for decoys — see
+        :meth:`FDRAnalyzer.perform_global_analysis`. This takes precedence
+        over ``run_protein_grouping``, which otherwise controls whether
+        protein inference is performed from scratch (first pass) or skipped
+        entirely.
+
+        ``pass_label`` (e.g. ``"first"``/``"second"``) is used as the prefix
+        for saved model artifacts/logs (``{pass_label}_tda_{fold}``) so that
+        first- and second-pass training runs don't collide/overwrite each
+        other and are easy to tell apart on disk.
+
         Returns an annotated PmSM DataFrame with global and run-specific
         q-values.
         """
@@ -178,6 +194,8 @@ class TDAProcessor:
         fold_a, fold_b = self._split_pmsm_df(pmsm_df, level=self.split_level)
         full_pmsm_df = pmsm_df  # keep reference for join-back after scoring
 
+        model_version_prefix = f"{pass_label}_tda"
+
         # Fold A trains → score Fold B
         scores_b = self._train_and_score_fold(
             fold_a,
@@ -185,6 +203,7 @@ class TDAProcessor:
             feature_fn,
             fold_label="f0",
             training_params=training_params,
+            model_version_prefix=model_version_prefix,
         )
         # Fold B trains → score Fold A
         scores_a = self._train_and_score_fold(
@@ -193,6 +212,7 @@ class TDAProcessor:
             feature_fn,
             fold_label="f1",
             training_params=training_params,
+            model_version_prefix=model_version_prefix,
         )
 
         # Merge scored folds, then select best per (run, cluster)
@@ -206,6 +226,7 @@ class TDAProcessor:
 
         # for debugging: save all scored PmSMs before selection
         scored_df.write_parquet(self.output_dir / "pmsm_scores.parquet")
+        # scored_df = pl.read_parquet(self.output_dir / "pmsm_scores.parquet")
 
         pmsm_df = scored_df.group_by(["run_index", "cluster"]).agg(
             pl.all().sort_by(["score", "pmsm_index"]).last()
@@ -229,13 +250,48 @@ class TDAProcessor:
             use_protein_picker=self.use_protein_picker,
             grouping_type=self.grouping_type,
         )
-        pmsm_df = fdr.perform_global_analysis(pmsm_df)
+        pmsm_df = fdr.perform_global_analysis(
+            pmsm_df,
+            protein_inference=run_protein_grouping,
+            library_confidence_df=library_confidence_df,
+        )
         pmsm_df = fdr.batch_run_specific_analysis(pmsm_df)
-        pmsm_df = fdr.add_fasta_id_column(pmsm_df)
         pmsm_df = pmsm_df.join(
             result_aggregator.get_run_df(), on="run_index", how="left"
         )
         return pmsm_df
+
+    def write_back_scores(
+        self,
+        pmsm_df: pl.DataFrame,
+        result_aggregator: ResultsAggregator,
+        group_key: str,
+    ) -> None:
+        """Persist ``score`` and run-specific ``precursor_q_value`` from a
+        cross-run (:meth:`run_global`) result back into each run's own HDF
+        group, aligned to that run's original pmsm_index order.
+
+        Used so that later per-run steps (e.g. RT calibration ahead of a
+        following full search) can bootstrap from these results without a
+        redundant run-specific TDA pass.
+        """
+        for run_index, result_manager in result_aggregator._results_dict.items():
+            sub_df = pmsm_df.filter(pl.col("run_index") == run_index)
+            if sub_df.shape[0] == 0:
+                continue
+
+            num_raw = result_manager.read_dict(
+                group_key, data_keys=["precursor_index"]
+            )["precursor_index"].shape[0]
+            score_arr = np.full(num_raw, np.nan, dtype=np.float32)
+            q_value_arr = np.full(num_raw, np.nan, dtype=np.float32)
+            idx = sub_df["pmsm_index"].to_numpy()
+            score_arr[idx] = sub_df["score"].to_numpy()
+            q_value_arr[idx] = sub_df["precursor_q_value"].to_numpy()
+
+            result_manager.write_dict(
+                group_key, {"score": score_arr, "precursor_q_value": q_value_arr}
+            )
 
     def _train_and_score_fold(
         self,
@@ -244,6 +300,7 @@ class TDAProcessor:
         feature_fn: FeatureLoader,
         fold_label: str,
         training_params: dict = None,
+        model_version_prefix: str = "global_tda",
     ) -> np.ndarray:
         """Train on *train_fold*, score *test_fold*.
 
@@ -256,7 +313,7 @@ class TDAProcessor:
             train_dataset = self._build_tensor_dataset(train_df, feature_fn)
             model = self._train_model(
                 train_dataset,
-                model_version=f"global_tda_{fold_label}",
+                model_version=f"{model_version_prefix}_{fold_label}",
                 training_params=training_params,
             )
             return self._score(test_fold, model, feature_fn)
@@ -267,6 +324,7 @@ class TDAProcessor:
             feature_fn,
             fold_label=fold_label,
             training_params=training_params,
+            model_version_prefix=model_version_prefix,
         )
 
     # ==================================================================
@@ -483,6 +541,7 @@ class TDAProcessor:
         feature_fn: FeatureLoader,
         fold_label: str = "",
         training_params: dict = None,
+        model_version_prefix: str = "global_tda",
     ) -> np.ndarray:
         """Train K models via bootstrap from *train_df* and average logits."""
         test_feature_arr = feature_fn(test_df)
@@ -500,7 +559,7 @@ class TDAProcessor:
 
             model = self._train_model(
                 train_dataset,
-                model_version=f"global_tda_{fold_label}_e{k}",
+                model_version=f"{model_version_prefix}_{fold_label}_e{k}",
                 training_params=training_params,
                 seed=seed,
             )
@@ -570,7 +629,7 @@ class TDAProcessor:
         pmsm_df: pl.DataFrame,
         db_dir: Path,
     ) -> pl.DataFrame:
-        """Attach precursor/modification/peptide columns from the database."""
+        """Attach precursor/modification/peptide/fasta_id columns from the database."""
         # Columns added by the join — drop them first if already present to
         # avoid polars creating duplicate (_right) columns.
         _join_added = {
@@ -583,9 +642,10 @@ class TDAProcessor:
             "sequence_length",
             "is_decoy",
             "protein_index",
+            "fasta_id",
         }
         cols_to_drop = [c for c in pmsm_df.columns if c in _join_added]
-        return PeptideDatabase.join(
+        pmsm_df = PeptideDatabase.join(
             db_dir,
             pmsm_df.drop(cols_to_drop),
             precursor_columns=["precursor_charge"],
@@ -597,3 +657,24 @@ class TDAProcessor:
                 "protein_index",
             ],
         )
+
+        # Attach a semicolon-joined `fasta_id` column per precursor, derived
+        # from the protein sequence database (was previously done via
+        # FDRAnalyzer.add_fasta_id_column, now folded in here so all DB joins
+        # live in one place).
+        fasta_id_df = (
+            pl.scan_parquet(db_dir / "sequence_df.parquet")
+            .select(pl.col("protein_index", "fasta_id"))
+            .collect()
+        )
+        fasta_lookup_df = (
+            pmsm_df.select(pl.col("precursor_index", "protein_index"))
+            .unique(subset="precursor_index", keep="first")
+            .explode("protein_index")
+            .join(fasta_id_df, on="protein_index", how="left")
+            .group_by("precursor_index")
+            .agg(pl.col("fasta_id"))
+            .with_columns(pl.col("fasta_id").list.sort().list.join(";"))
+        )
+
+        return pmsm_df.join(fasta_lookup_df, on="precursor_index", how="left")
