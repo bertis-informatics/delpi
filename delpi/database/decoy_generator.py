@@ -1,38 +1,120 @@
 import random
+from functools import partial
+from typing import Callable, Optional, Sequence
 
 import polars as pl
-
-from delpi.database.numba.prefix_mass_array import aa_mass_array
 
 MUTATION_MAP = dict(zip("GAVLIFMPWSCTYHKRQEND", "LLLVVLLLLTSSSSLLNDQE"))
 
 
-def get_mutated_decoy(peptide):
-    return (
-        peptide[:2]
-        + MUTATION_MAP[peptide[2]]
-        + peptide[3:-3]
-        + MUTATION_MAP[peptide[-3]]
-        + peptide[-2:]
-    )
+def _default_varmod_signature(aa: str) -> tuple:
+    """Trivial signature used when no variable modifications are active:
+    every residue compares equal, so every position is considered safe."""
+    return ()
 
 
-def _diann_fragment_shifts(peptide: str):
-    """Return (delta_N, delta_C) monoisotopic mass shifts for a diann-style decoy.
+def build_varmod_signature_fn(
+    mod_param_set: Optional[Sequence],
+) -> Callable[[str], tuple]:
+    """Build a function mapping a residue character to an eligibility tuple
+    over the active (non-fixed) residue-specific variable modifications.
 
-    Replicates the two mutation positions used by DIA-NN without altering the
-    actual sequence:
-    - ``peptide[2]``  (second residue)   → N-side shift applied from b2 onward
-    - ``peptide[-3]`` (second-to-last)   → C-side shift applied from the
-      second-to-last prefix mass onward
+    Residues are grouped by modification name so that e.g. Phospho(S)/(T)/(Y)
+    collapse into a single "is this residue phospho-eligible" flag rather
+    than three independent ones (matching the ``generate_variable_modifications``
+    residue-matching logic in :class:`~delpi.database.modification_handler.ModificationHandler`).
+    Two residues are considered "safe" to swap for decoy mutation when they
+    share the same signature tuple. Fixed modifications are ignored.
     """
-    delta_n = (
-        aa_mass_array[ord(MUTATION_MAP[peptide[2]])] - aa_mass_array[ord(peptide[2])]
+    mod_name_to_residues: dict = {}
+    for p in mod_param_set or []:
+        if p.fixed:
+            continue
+        mod_name_to_residues.setdefault(p.mod_name, set()).add(p.residue)
+
+    if not mod_name_to_residues:
+        return _default_varmod_signature
+
+    mod_names = sorted(mod_name_to_residues)
+
+    def signature(aa: str) -> tuple:
+        return tuple(aa in mod_name_to_residues[name] for name in mod_names)
+
+    return signature
+
+
+def _find_safe_mutation_position(
+    peptide: str,
+    start: int,
+    step: int,
+    limit: int,
+    varmod_signature: Callable[[str], tuple],
+) -> Optional[int]:
+    """Scan positions ``start, start+step, start+2*step, ...`` (inclusive of
+    ``limit`` in the search direction) for the first residue whose
+    ``MUTATION_MAP`` mutation preserves the same variable-modification
+    eligibility. Returns the index, or ``None`` if none is found."""
+    pos = start
+    while (step > 0 and pos <= limit) or (step < 0 and pos >= limit):
+        aa = peptide[pos]
+        if varmod_signature(aa) == varmod_signature(MUTATION_MAP[aa]):
+            return pos
+        pos += step
+    return None
+
+
+def get_mutated_decoy(
+    peptide: str, varmod_signature: Callable[[str], tuple] = None
+) -> str:
+    """Mutate up to two internal residues of ``peptide`` to generate a decoy,
+    preserving the terminal characters and first/last residues.
+
+    The default mutation positions are the same as before: the second
+    residue from the N-term (index 2) and the second-to-last residue from
+    the C-term (index ``len(peptide) - 3``). When ``varmod_signature`` is
+    given, a default position is only mutated in place if doing so does not
+    change the residue's eligibility for any active variable modification
+    (see :func:`build_varmod_signature_fn`); otherwise the nearest safe
+    residue in the same direction (N: increasing index; C: decreasing index)
+    is mutated instead, without the two positions ever colliding. If no safe
+    residue can be found on either side, the original (unconditional)
+    mutation at the default positions is used as a fallback, so the decoy
+    always differs from the target.
+    """
+    if varmod_signature is None:
+        varmod_signature = _default_varmod_signature
+
+    n_default = 2
+    c_default = len(peptide) - 3
+
+    n_pos = _find_safe_mutation_position(
+        peptide,
+        start=n_default,
+        step=1,
+        limit=c_default - 1,
+        varmod_signature=varmod_signature,
     )
-    delta_c = (
-        aa_mass_array[ord(MUTATION_MAP[peptide[-3]])] - aa_mass_array[ord(peptide[-3])]
+    lower_bound = n_pos + 1 if n_pos is not None else n_default
+    c_pos = _find_safe_mutation_position(
+        peptide,
+        start=c_default,
+        step=-1,
+        limit=lower_bound,
+        varmod_signature=varmod_signature,
     )
-    return float(delta_n), float(delta_c)
+
+    if n_pos is None and c_pos is None:
+        # No variable-modification-safe residue found on either side; fall
+        # back to the original (unconditional) mutation at the defaults.
+        n_pos, c_pos = n_default, c_default
+
+    chars = list(peptide)
+    if n_pos is not None:
+        chars[n_pos] = MUTATION_MAP[chars[n_pos]]
+    if c_pos is not None:
+        chars[c_pos] = MUTATION_MAP[chars[c_pos]]
+
+    return "".join(chars)
 
 
 def get_shuffled_decoy(peptide):
@@ -50,7 +132,12 @@ class DecoyGenerator:
         "diann",
     ]
 
-    def __init__(self, method: str = None, random_seed: int = 323):
+    def __init__(
+        self,
+        method: str = None,
+        random_seed: int = 323,
+        mod_param_set: Optional[Sequence] = None,
+    ):
 
         if method is not None and method not in self.supported_methods:
             raise ValueError(
@@ -58,14 +145,14 @@ class DecoyGenerator:
                 f"Supported methods: {self.supported_methods}"
             )
         self.method = method
+        self.mod_param_set = mod_param_set
+        self._varmod_signature = build_varmod_signature_fn(mod_param_set)
         self.random_seed = random_seed
 
-    def generate_decoys(self, peptide_df) -> pl.DataFrame:
+    def generate_decoys(self, target_df) -> pl.DataFrame:
 
         if self.method is None:
             return None
-
-        target_df = peptide_df.select(pl.exclude("peptide_index"))
 
         if self.method == "pseudo_reverse":
             get_decoy = (
@@ -77,27 +164,14 @@ class DecoyGenerator:
             ).alias("peptide")
             decoy_df = target_df.with_columns(get_decoy)
 
-        # elif self.method == "mutation_legacy":
-        #     get_decoy = (
-        #         pl.col("peptide").map_elements(
-        #             get_mutated_decoy, return_dtype=pl.String
-        #         )
-        #     ).alias("peptide")
-        #     decoy_df = target_df.with_columns(get_decoy)
-
-        elif self.method in ["diann", "mutation"]:
-            # Sequence is kept identical to the target.  Only fragment m/z will
-            # differ via per-peptide shifts stored as metadata columns.
-            peptides = peptide_df["peptide"].to_list()
-            shifts = [_diann_fragment_shifts(p) for p in peptides]
-            decoy_df = target_df.with_columns(
-                pl.Series(
-                    "decoy_n_fragment_shift", [s[0] for s in shifts], dtype=pl.Float32
-                ),
-                pl.Series(
-                    "decoy_c_fragment_shift", [s[1] for s in shifts], dtype=pl.Float32
-                ),
-            )
+        elif self.method in ("diann", "mutation"):
+            get_decoy = (
+                pl.col("peptide").map_elements(
+                    partial(get_mutated_decoy, varmod_signature=self._varmod_signature),
+                    return_dtype=pl.String,
+                )
+            ).alias("peptide")
+            decoy_df = target_df.with_columns(get_decoy)
 
         elif self.method == "pseudo_shuffle":
             random.seed(self.random_seed)
@@ -158,52 +232,35 @@ class DecoyGenerator:
         target_peptide_df,
     ) -> pl.DataFrame:
 
-        decoy_peptide_df = self.generate_decoys(target_peptide_df)
-
-        _zero_shifts = [
-            pl.lit(0.0).cast(pl.Float32).alias("decoy_n_fragment_shift"),
-            pl.lit(0.0).cast(pl.Float32).alias("decoy_c_fragment_shift"),
-        ]
-
+        decoy_peptide_df = self.generate_decoys(
+            target_peptide_df.with_row_index("target_peptide_index")
+        )
         if decoy_peptide_df is None:
-            return target_peptide_df.with_columns(is_decoy=False, *_zero_shifts)
+            return target_peptide_df.with_columns(is_decoy=False)
 
-        if self.method == "diann":
-            # diann decoys share the target sequence; no anti-join needed.
-            decoy_peptide_df = (
-                decoy_peptide_df.explode("protein_index")
-                .group_by("peptide", maintain_order=True)
-                .agg(
-                    pl.col("protein_index").unique().sort(),
-                    pl.col("sequence_length").first(),
-                    pl.col("decoy_n_fragment_shift").first(),
-                    pl.col("decoy_c_fragment_shift").first(),
-                )
+        # re-group decoys by peptide and collect protein indices for each decoy
+        decoy_peptide_df = (
+            decoy_peptide_df.explode("protein_index")
+            .group_by("peptide", maintain_order=True)
+            .agg(
+                pl.col("protein_index").unique().sort(),
+                pl.col("sequence_length").first(),
+                pl.col("target_peptide_index"),
             )
-        else:
-            # re-group decoys by peptide and collect protein indices for each decoy
-            decoy_peptide_df = (
-                decoy_peptide_df.explode("protein_index")
-                .group_by("peptide", maintain_order=True)
-                .agg(
-                    pl.col("protein_index").unique().sort(),
-                    pl.col("sequence_length").first(),
-                )
-            )
-            # remove decoys that are identical to any target peptide
-            decoy_peptide_df = decoy_peptide_df.join(
-                target_peptide_df.select(pl.col("peptide")), on="peptide", how="anti"
-            )
-            decoy_peptide_df = decoy_peptide_df.with_columns(*_zero_shifts)
+        )
+        # remove decoys that are identical to any target peptide
+        decoy_peptide_df = decoy_peptide_df.join(
+            target_peptide_df.select(pl.col("peptide")), on="peptide", how="anti"
+        )
 
         # Determine output column order: original target columns then new ones.
         out_cols = list(target_peptide_df.columns) + [
             "is_decoy",
-            "decoy_n_fragment_shift",
-            "decoy_c_fragment_shift",
+            "target_peptide_index",
         ]
+
         target_out = target_peptide_df.with_columns(
-            is_decoy=False, *_zero_shifts
+            is_decoy=False, target_peptide_index=pl.lit(None, dtype=pl.List(pl.UInt32))
         ).select(out_cols)
         decoy_out = decoy_peptide_df.with_columns(is_decoy=True).select(out_cols)
 

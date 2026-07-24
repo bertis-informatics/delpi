@@ -99,13 +99,20 @@ class PeptideDatabase:
             pl.col("peptide").str.contains(PEPTIDE_SEQ_REGEX)
         )
 
+        # Parse modification params early (cheap/side-effect-free) so the
+        # decoy generator can make variable-modification-aware mutation
+        # position choices; `mod_handler.apply(...)` is still called below,
+        # in its original place.
+        mod_handler = ModificationHandler(mod_param_set, max_mods=max_mods)
+
         # generate decoy peptides
-        decoy_generator = DecoyGenerator(method=decoy)
+        decoy_generator = DecoyGenerator(
+            method=decoy, mod_param_set=mod_handler.mod_param_set
+        )
         peptide_df = decoy_generator.append_decoys(peptide_df)
         peptide_df = peptide_df.with_row_index("peptide_index")
 
         # apply modifications
-        mod_handler = ModificationHandler(mod_param_set, max_mods=max_mods)
         modification_df = mod_handler.apply(
             peptide_df, use_multiprocessing=use_multiprocessing
         )
