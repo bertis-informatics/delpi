@@ -86,9 +86,12 @@ def _nb_build_L_b(
     pep_idx: np.ndarray,
     run_idx: np.ndarray,
     logI: np.ndarray,
+    min_ratio_count: int,
 ):
     n_pairs = n_runs * (n_runs - 1) // 2
-    counts = np.zeros(n_pairs, dtype=np.int64)
+    # n_pairs/offsets are bounded by n_runs^2 and per-pair ratio counts by
+    # peptides-per-protein, both always well within int32 range
+    counts = np.zeros(n_pairs, dtype=np.int32)
 
     # 1st pass: counts per pair
     N = pep_idx.shape[0]
@@ -105,6 +108,9 @@ def _nb_build_L_b(
                 la = logI[start + a]
                 for b in range(a + 1, m):
                     ib = run_idx[start + b]
+                    if ia == ib:
+                        # defensively skip duplicate (protein, precursor, run) rows
+                        continue
                     r = la - logI[start + b]
                     i = ia
                     j = ib
@@ -117,13 +123,13 @@ def _nb_build_L_b(
                     counts[p] += 1
         start = end
 
-    offsets = np.zeros(n_pairs + 1, dtype=np.int64)
+    offsets = np.zeros(n_pairs + 1, dtype=np.int32)
     csum = 0
     for k in range(n_pairs):
         csum += counts[k]
         offsets[k + 1] = csum
-    flat = np.empty(offsets[n_pairs], dtype=np.float64)
-    write = np.zeros(n_pairs, dtype=np.int64)
+    flat = np.empty(offsets[n_pairs], dtype=np.float32)
+    write = np.zeros(n_pairs, dtype=np.int32)
 
     # 2nd pass: fill ratios
     start = 0
@@ -139,6 +145,8 @@ def _nb_build_L_b(
                 la = logI[start + a]
                 for b in range(a + 1, m):
                     ib = run_idx[start + b]
+                    if ia == ib:
+                        continue
                     r = la - logI[start + b]
                     i = ia
                     j = ib
@@ -154,8 +162,11 @@ def _nb_build_L_b(
         start = end
 
     # 3rd pass: median and accumulate L, b
-    L = np.zeros((n_runs, n_runs), dtype=np.float64)
-    b = np.zeros(n_runs, dtype=np.float64)
+    # run pairs with fewer than min_ratio_count shared-precursor ratios are
+    # left disconnected (no L/b contribution) rather than weighted down, so
+    # connectivity - not weight - reflects how well-supported a pair is.
+    L = np.zeros((n_runs, n_runs), dtype=np.float32)
+    b = np.zeros(n_runs, dtype=np.float32)
 
     p = 0
     for i in range(n_runs):
@@ -163,7 +174,7 @@ def _nb_build_L_b(
             s = offsets[p]
             e = offsets[p + 1]
             cnt = e - s
-            if cnt > 0:
+            if cnt >= min_ratio_count:
                 # sort the slice [s:e] with insertion sort (buckets are usually small)
                 for x in range(s + 1, e):
                     key = flat[x]
@@ -176,7 +187,7 @@ def _nb_build_L_b(
                     med = float(flat[s + cnt // 2])
                 else:
                     med = 0.5 * float(flat[s + cnt // 2 - 1] + flat[s + cnt // 2])
-                w = float(cnt)
+                w = 1.0
                 L[i, i] += w
                 L[j, j] += w
                 L[i, j] -= w
@@ -186,6 +197,195 @@ def _nb_build_L_b(
             p += 1
 
     return L, b
+
+
+@nb.njit(cache=True)
+def _nb_find_root(parent: np.ndarray, i: int) -> int:
+    root = i
+    while parent[root] != root:
+        root = parent[root]
+    while parent[i] != root:
+        nxt = parent[i]
+        parent[i] = root
+        i = nxt
+    return root
+
+
+@nb.njit(cache=True)
+def _nb_union(parent: np.ndarray, i: int, j: int):
+    ri = _nb_find_root(parent, i)
+    rj = _nb_find_root(parent, j)
+    if ri != rj:
+        parent[ri] = rj
+
+
+@nb.njit(cache=True)
+def _nb_maxlfq_all_proteins(
+    protein_idx: np.ndarray,
+    peptide_idx: np.ndarray,
+    run_idx: np.ndarray,
+    logI: np.ndarray,
+    intensity: np.ndarray,
+    n_runs_total: int,
+    min_peptides_per_protein: int,
+    min_ratio_count: int,
+):
+    """
+    Vectorized MaxLFQ over all proteins in one compiled pass.
+
+    Inputs must already be sorted by (protein_idx, peptide_idx); run_idx is a
+    dense global run code aligned with the other arrays. For each protein
+    this reproduces `_maxlfq_one_protein`'s logic (run/peptide grouping via
+    `_nb_build_L_b`, connected components, per-component gauge fix + solve +
+    rescale), but without any per-protein Python/Polars round trip.
+
+    protein_idx/peptide_idx/run_idx are expected as int32 and logI/intensity
+    as float32 (dense codes/observed values never need 64-bit range or
+    precision here); the per-protein L/b/solve buffers are float32 too, since
+    MaxLFQ ratios don't need double precision.
+    """
+    N = protein_idx.shape[0]
+
+    out_protein = np.empty(N, dtype=np.int32)
+    out_run = np.empty(N, dtype=np.int32)
+    out_abundance = np.empty(N, dtype=np.float32)
+    out_count = 0
+
+    # reused across proteins via a "last seen protein id" stamp, avoiding an
+    # O(n_runs_total) reset per protein
+    remap_stamp = np.full(n_runs_total, -1, dtype=np.int32)
+    remap_local = np.empty(n_runs_total, dtype=np.int32)
+    local_to_global = np.empty(n_runs_total, dtype=np.int32)
+    intensity_by_run_local = np.zeros(n_runs_total, dtype=np.float32)
+    run_local_buf = np.empty(N, dtype=np.int32)
+
+    row = 0
+    while row < N:
+        prot = protein_idx[row]
+        prot_start = row
+        prot_end = row + 1
+        while prot_end < N and protein_idx[prot_end] == prot:
+            prot_end += 1
+
+        # single pass: local run remap, per-run intensity totals, distinct peptide count
+        k = 0
+        n_pep = 0
+        prev_pep = -1
+        for i in range(prot_start, prot_end):
+            g = run_idx[i]
+            if remap_stamp[g] != prot:
+                remap_stamp[g] = prot
+                remap_local[g] = k
+                local_to_global[k] = g
+                intensity_by_run_local[k] = 0.0
+                k += 1
+            loc = remap_local[g]
+            intensity_by_run_local[loc] += intensity[i]
+            run_local_buf[i] = loc
+
+            pep = peptide_idx[i]
+            if pep != prev_pep:
+                n_pep += 1
+                prev_pep = pep
+
+        if n_pep < min_peptides_per_protein:
+            row = prot_end
+            continue
+
+        if k == 1:
+            out_protein[out_count] = prot
+            out_run[out_count] = local_to_global[0]
+            out_abundance[out_count] = intensity_by_run_local[0]
+            out_count += 1
+            row = prot_end
+            continue
+
+        L, b = _nb_build_L_b(
+            k,
+            peptide_idx[prot_start:prot_end],
+            run_local_buf[prot_start:prot_end],
+            logI[prot_start:prot_end],
+            min_ratio_count,
+        )
+
+        # connected components via union-find over L's off-diagonal pattern
+        # (all bounded by k = local run count for this protein, so int32 is ample)
+        comp_parent = np.empty(k, dtype=np.int32)
+        for t in range(k):
+            comp_parent[t] = t
+        for i in range(k):
+            for j in range(i + 1, k):
+                if L[i, j] != 0.0:
+                    _nb_union(comp_parent, i, j)
+
+        comp_root = np.empty(k, dtype=np.int32)
+        for i in range(k):
+            comp_root[i] = _nb_find_root(comp_parent, i)
+
+        # counting sort: group local run indices by component root
+        comp_count = np.zeros(k, dtype=np.int32)
+        for i in range(k):
+            comp_count[comp_root[i]] += 1
+        comp_offset = np.zeros(k + 1, dtype=np.int32)
+        for r in range(k):
+            comp_offset[r + 1] = comp_offset[r] + comp_count[r]
+        comp_write = np.zeros(k, dtype=np.int32)
+        comp_members = np.empty(k, dtype=np.int32)
+        for i in range(k):
+            r = comp_root[i]
+            pos = comp_offset[r] + comp_write[r]
+            comp_members[pos] = i
+            comp_write[r] += 1
+
+        for r in range(k):
+            cnt = comp_count[r]
+            if cnt == 0:
+                continue
+            s = comp_offset[r]
+
+            if cnt == 1:
+                idx0 = comp_members[s]
+                out_protein[out_count] = prot
+                out_run[out_count] = local_to_global[idx0]
+                out_abundance[out_count] = intensity_by_run_local[idx0]
+                out_count += 1
+                continue
+
+            L_sub = np.empty((cnt, cnt), dtype=np.float32)
+            b_sub = np.empty(cnt, dtype=np.float32)
+            for a in range(cnt):
+                ia = comp_members[s + a]
+                for c in range(cnt):
+                    L_sub[a, c] = L[ia, comp_members[s + c]]
+                b_sub[a] = b[ia]
+
+            # gauge fixing within this component: x_sub[0] = 0
+            L_sub[0, :] = 0.0
+            L_sub[:, 0] = 0.0
+            L_sub[0, 0] = 1.0
+            b_sub[0] = 0.0
+
+            x_sub = np.linalg.solve(L_sub, b_sub)
+
+            # relative linear-scale profile, rescaled to this component's observed intensity total
+            max_x = np.max(x_sub)
+            relative = np.exp(x_sub - max_x)
+            rel_sum = np.sum(relative)
+
+            total_intensity = 0.0
+            for a in range(cnt):
+                total_intensity += intensity_by_run_local[comp_members[s + a]]
+
+            for a in range(cnt):
+                idxa = comp_members[s + a]
+                out_protein[out_count] = prot
+                out_run[out_count] = local_to_global[idxa]
+                out_abundance[out_count] = relative[a] * total_intensity / rel_sum
+                out_count += 1
+
+        row = prot_end
+
+    return out_protein[:out_count], out_run[:out_count], out_abundance[:out_count]
 
 
 @nb.njit(nogil=True, fastmath=True, cache=True)
