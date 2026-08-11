@@ -504,6 +504,7 @@ class TDAProcessor:
         train_dataset: TensorDataset,
         model_version: str,
         training_params: dict = None,
+        model_params: dict = None,
         seed: int = None,
     ):
         """Train the TDA classifier and return the best model on self.device.
@@ -515,7 +516,9 @@ class TDAProcessor:
         if seed is not None:
             training_params["random_seed"] = seed
 
-        trainer = TargetDecoyTrainer(training_params=training_params)
+        trainer = TargetDecoyTrainer(
+            model_params=model_params, training_params=training_params
+        )
         trainer.train(
             model_version=model_version,
             train_dataset=train_dataset,

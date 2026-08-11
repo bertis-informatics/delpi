@@ -415,8 +415,6 @@ class BaseSearchEngine(ABC):
             degree=5 if self.state < SearchState.SECOND_SEARCH else 2,
             min_rt_tolerance=0.1,
             max_rt_tolerance=0.15,
-            # min_rt_tolerance = 0.15,
-            # max_rt_tolerance = 0.25,
         )
 
         if after_full_search:

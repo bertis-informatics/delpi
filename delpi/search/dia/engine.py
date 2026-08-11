@@ -39,7 +39,7 @@ from delpi.constants import DIA_MATCHED_PEAKS_CUTOFF
 logger = logging.getLogger(__name__)
 
 LOGIT_CUTOFF = 0.0
-TOPK_PER_PRECURSOR = 8
+TOPK_PER_PRECURSOR = 5
 
 
 class DIASearchEngine(BaseSearchEngine):
