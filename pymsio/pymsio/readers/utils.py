@@ -1,5 +1,7 @@
 import math
 import logging
+from contextlib import contextmanager, ExitStack
+from typing import Iterator, Tuple
 
 import numpy as np
 import numba as nb
@@ -45,6 +47,127 @@ def DotNetArrayToNPArray(src, dtype=np.float64):
         if src_hndl.IsAllocated:
             src_hndl.Free()
     return dest
+
+
+# Maps a NumPy source dtype to (the expected .NET array element type name,
+# the equivalent ctypes scalar type) used by `pinned_dotnet_array_view`.
+try:
+    _DOTNET_ELEMENT_TYPES = {
+        np.dtype(np.float64): ("Double", ctypes.c_double),
+        np.dtype(np.float32): ("Single", ctypes.c_float),
+    }
+except NameError:
+    # pythonnet/.NET unavailable (see import guard above); Thermo-specific
+    # helpers below simply won't be usable in that case.
+    _DOTNET_ELEMENT_TYPES = {}
+
+
+def pin_dotnet_array(
+    src, *, source_dtype: np.dtype = np.float64, validate: bool = True
+):
+    """Low-level primitive behind :func:`pinned_dotnet_array_view`.
+
+    Pins ``src`` and returns ``(view, handle)``. The caller **must** call
+    :func:`unpin_dotnet_array(handle)` in a ``finally`` block once done with
+    ``view`` - prefer the :func:`pinned_dotnet_array_view` context manager
+    unless profiling shows its overhead matters (e.g. many thousands of
+    calls in a hot per-scan loop): a context manager built on a generator
+    function has measurable overhead of its own (protocol dispatch, the
+    generator's extra ``next()`` call, etc.) that is worth avoiding in a
+    tight loop called once per scan.
+
+    ``handle`` is ``None`` when ``src`` is ``None``/empty (nothing to pin);
+    :func:`unpin_dotnet_array` is a no-op for ``None``.
+    """
+    if src is None or len(src) == 0:
+        return np.empty(0, dtype=source_dtype), None
+
+    source_dtype = np.dtype(source_dtype)
+    expected_name, ctypes_type = _DOTNET_ELEMENT_TYPES.get(source_dtype, (None, None))
+    if ctypes_type is None:
+        raise TypeError(f"Unsupported source_dtype for pinned view: {source_dtype!r}")
+
+    if validate:
+        element_type_name = src.GetType().GetElementType().Name
+        if expected_name is not None and element_type_name != expected_name:
+            raise TypeError(
+                f"Unexpected .NET array element type {element_type_name!r}; "
+                f"expected {expected_name!r} for source_dtype={source_dtype!r}"
+            )
+
+    n = len(src)
+    src_hndl = GCHandle.Alloc(src, GCHandleType.Pinned)
+    src_ptr = src_hndl.AddrOfPinnedObject().ToInt64()
+    buf_type = ctypes_type * n
+    cbuf = buf_type.from_address(src_ptr)
+    view = np.frombuffer(cbuf, dtype=source_dtype)
+    view.setflags(write=False)
+    return view, src_hndl
+
+
+def unpin_dotnet_array(handle) -> None:
+    """Release a handle returned by :func:`pin_dotnet_array`. No-op for ``None``."""
+    if handle is not None and handle.IsAllocated:
+        handle.Free()
+
+
+@contextmanager
+def pinned_dotnet_array_view(
+    src, *, source_dtype: np.dtype = np.float64, validate: bool = True
+) -> Iterator[np.ndarray]:
+    """Temporarily expose a zero-copy, read-only NumPy view over a pinned
+    .NET array.
+
+    Unlike :func:`DotNetArrayToNPArray`, this does **not** copy: the yielded
+    view aliases the pinned .NET memory directly. The GCHandle is freed as
+    soon as the ``with`` block exits, so the view MUST NOT be used (read,
+    stored, or returned) after the context manager exits - doing so is
+    equivalent to holding a dangling pointer once the .NET GC can move or
+    collect the underlying array.
+
+    Args:
+        src: a .NET array (e.g. ``System.Double[]``), or ``None``.
+        source_dtype: expected NumPy-equivalent element dtype. The actual
+            .NET element type is validated against this before pinning.
+        validate: if ``False``, skip the ``GetType().GetElementType().Name``
+            reflection check. This check is a real (measured) pythonnet
+            boundary cost when repeated per-scan in a hot loop; callers that
+            already validated the element type once for a given array source
+            (e.g. once per RAW file/instrument) should pass ``False`` on
+            subsequent calls.
+
+    Note:
+        For very hot loops (thousands of calls, e.g. once per scan), prefer
+        the lower-level :func:`pin_dotnet_array`/:func:`unpin_dotnet_array`
+        pair with an explicit ``try``/``finally`` - this context manager's
+        generator-based protocol has measurable overhead of its own at that
+        call frequency.
+    """
+    view, handle = pin_dotnet_array(src, source_dtype=source_dtype, validate=validate)
+    try:
+        yield view
+    finally:
+        unpin_dotnet_array(handle)
+
+
+@contextmanager
+def pinned_dotnet_array_views(
+    *arrays, source_dtype: np.dtype = np.float64, validate: bool = True
+) -> Iterator[Tuple[np.ndarray, ...]]:
+    """Like :func:`pinned_dotnet_array_view`, but pins/yields multiple .NET
+    arrays at once (e.g. masses + intensities), guaranteeing every GCHandle
+    is released even if pinning or use of a later array raises.
+    """
+    with ExitStack() as stack:
+        views = tuple(
+            stack.enter_context(
+                pinned_dotnet_array_view(
+                    arr, source_dtype=source_dtype, validate=validate
+                )
+            )
+            for arr in arrays
+        )
+        yield views
 
 
 def get_frame_num_to_index_arr(frame_nums):

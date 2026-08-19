@@ -1,4 +1,4 @@
-from typing import List, Literal
+from typing import List, Literal, Optional
 from pathlib import Path
 
 import polars as pl
@@ -14,7 +14,9 @@ class FDRAnalyzer:
         q_value_cutoff: float,
         db_dir: Path,
         use_protein_picker: bool = True,
-        grouping_type: Literal["lead_only", "parsimonious_grouping"] = "parsimonious_grouping",
+        grouping_type: Literal[
+            "lead_only", "parsimonious_grouping"
+        ] = "parsimonious_grouping",
     ):
         self.q_value_cutoff = q_value_cutoff
         self.use_protein_picker = use_protein_picker
@@ -30,7 +32,22 @@ class FDRAnalyzer:
         pmsm_df: pl.DataFrame,
         protein_inference: bool = True,
         target_to_decoy_size_ratio: float = 1.0,
+        library_confidence_df: Optional[pl.DataFrame] = None,
     ) -> pl.DataFrame:
+        """Compute global precursor/peptide (and, optionally, protein-group)
+        q-values.
+
+        When ``library_confidence_df`` is provided (second pass of the
+        two-pass MBR search), protein-group membership is *not* recomputed
+        from scratch for targets: target rows reuse the first pass's
+        ``protein_group``/``master_protein`` and ``library_*_q_value``
+        columns (joined by ``precursor_index`` from
+        ``library_confidence.parquet``; decoy rows get ``null`` for the
+        library q-values, since they weren't part of the first pass), while
+        decoy rows are freshly grouped here so they can compete for a
+        protein-group q-value. This takes precedence over
+        ``protein_inference``.
+        """
 
         g_pmsm_df = (
             pmsm_df.select(
@@ -61,13 +78,87 @@ class FDRAnalyzer:
             target_to_decoy_size_ratio=target_to_decoy_size_ratio,
         )
 
-        if protein_inference:
+        join_columns = [
+            "precursor_index",
+            "global_precursor_q_value",
+            "global_peptide_q_value",
+        ]
+
+        if library_confidence_df is not None:
+            # Second pass: reuse the first pass's target protein-group
+            # membership and library q-values instead of recomputing them
+            # (decoy rows get null for the library q-values, filled in below
+            # for protein_group/master_protein only).
+            g_pmsm_df = g_pmsm_df.join(
+                library_confidence_df.select(
+                    pl.col(
+                        "precursor_index",
+                        "protein_group",
+                        "master_protein",
+                        "library_precursor_q_value",
+                        "library_peptide_q_value",
+                        "library_protein_group_q_value",
+                    )
+                ),
+                on="precursor_index",
+                how="left",
+            )
+
+            # Freshly group only the confident decoys so they have a
+            # protein_group to compete against the (reused) target groups.
+            decoy_confident_df = g_pmsm_df.filter(
+                pl.col("is_decoy")
+                & (pl.col("global_precursor_q_value") <= self.q_value_cutoff)
+            ).select(pl.col("peptide_index", "is_decoy", "protein_index", "score"))
+
+            if not decoy_confident_df.is_empty():
+                decoy_pg_df = protein_group_mapping(
+                    decoy_confident_df,
+                    self.fasta_id_df,
+                    grouping_type=self.grouping_type,
+                )
+                decoy_pg_df_dedup = (
+                    decoy_pg_df.sort("group_id")
+                    .unique("peptide_index", keep="first", maintain_order=True)
+                    .select(
+                        pl.col("peptide_index"),
+                        pl.col("protein_group").alias("_decoy_protein_group"),
+                        pl.col("master_protein").alias("_decoy_master_protein"),
+                    )
+                )
+                g_pmsm_df = (
+                    g_pmsm_df.join(decoy_pg_df_dedup, on="peptide_index", how="left")
+                    .with_columns(
+                        pl.coalesce("protein_group", "_decoy_protein_group").alias(
+                            "protein_group"
+                        ),
+                        pl.coalesce("master_protein", "_decoy_master_protein").alias(
+                            "master_protein"
+                        ),
+                    )
+                    .drop("_decoy_protein_group", "_decoy_master_protein")
+                )
+
+            g_pmsm_df = self._update_q_values(
+                g_pmsm_df,
+                group_keys=["protein_group", "is_decoy"],
+                out_column="global_protein_group_q_value",
+                target_to_decoy_size_ratio=1.0,
+            )
+            join_columns += [
+                "global_protein_group_q_value",
+                "protein_group",
+                "master_protein",
+                "library_precursor_q_value",
+                "library_peptide_q_value",
+                "library_protein_group_q_value",
+            ]
+
+        elif protein_inference:
             # Map protein groups
             confident_pmsm_df = g_pmsm_df.filter(
                 pl.col("global_precursor_q_value") <= self.q_value_cutoff
-            ).select(
-                pl.col("peptide_index", "is_decoy", "protein_index", "score")
-            )
+            ).select(pl.col("peptide_index", "is_decoy", "protein_index", "score"))
 
             if self.use_protein_picker:
                 confident_pmsm_df = self._apply_protein_picker(confident_pmsm_df)
@@ -91,24 +182,20 @@ class FDRAnalyzer:
                 pl.exclude("protein_group", "master_protein")
             ).join(pg_df_dedup, on="peptide_index", how="left")
 
-        g_pmsm_df = self._update_q_values(
-            g_pmsm_df,
-            group_keys=["protein_group", "is_decoy"],
-            out_column="global_protein_group_q_value",
-            target_to_decoy_size_ratio=1.0,
-        )
+            g_pmsm_df = self._update_q_values(
+                g_pmsm_df,
+                group_keys=["protein_group", "is_decoy"],
+                out_column="global_protein_group_q_value",
+                target_to_decoy_size_ratio=1.0,
+            )
+            join_columns += [
+                "global_protein_group_q_value",
+                "protein_group",
+                "master_protein",
+            ]
 
         pmsm_df = pmsm_df.join(
-            g_pmsm_df.select(
-                pl.col(
-                    "precursor_index",
-                    "global_precursor_q_value",
-                    "global_peptide_q_value",
-                    "global_protein_group_q_value",
-                    "protein_group",
-                    "master_protein",
-                )
-            ),
+            g_pmsm_df.select(pl.col(*join_columns)),
             on="precursor_index",
             how="left",
         )
@@ -140,9 +227,7 @@ class FDRAnalyzer:
             # Map protein groups
             confident_pmsm_df = pmsm_df.filter(
                 pl.col("precursor_q_value") <= self.q_value_cutoff
-            ).select(
-                pl.col("peptide_index", "is_decoy", "protein_index", "score")
-            )
+            ).select(pl.col("peptide_index", "is_decoy", "protein_index", "score"))
 
             if self.use_protein_picker:
                 confident_pmsm_df = self._apply_protein_picker(confident_pmsm_df)
@@ -284,20 +369,4 @@ class FDRAnalyzer:
 
         return pmsm_df.join(
             df.select(pl.col(*group_keys, out_column)), on=group_keys, how="left"
-        )
-
-    def add_fasta_id_column(self, pmsm_df):
-        # add fasta ID columns
-        tmp_df = (
-            pmsm_df.select(pl.col("precursor_index", "protein_index"))
-            .unique(["precursor_index"], keep="first")
-            .explode("protein_index")
-            .join(self.fasta_id_df, on="protein_index", how="left")
-            .group_by("precursor_index")
-            .agg(pl.col("fasta_id"))
-            .with_columns(pl.col("fasta_id").list.sort().list.join(";"))
-        )
-
-        return pmsm_df.select(pl.exclude("fasta_id")).join(
-            tmp_df, on="precursor_index", how="left"
         )

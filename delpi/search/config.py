@@ -58,6 +58,13 @@ class SearchConfig:
         return self.output_dir / "refined_speclib"
 
     @property
+    def tl_ms2_h5_path(self):
+        """Shared HDF5 file holding MS2/RT transfer-learning training data
+        for all runs (see :class:`~delpi.search.tl.data_prep.TransferLearningDataPreparator`).
+        """
+        return self.output_dir / "transfer_learning_ms2.h5"
+
+    @property
     def log_file_path(self):
         return self.output_dir / "delpi.log"
 
@@ -160,9 +167,13 @@ class SearchConfig:
         """Whether to run the 2-stage search with transfer learning.
 
         When the ``enable_transfer_learning`` option is not specified in the
-        configuration, a single-stage search is performed.
+        configuration, a single-stage search is performed. Also always
+        disabled when there is only a single input run, since the two-pass
+        MBR/propagation design requires cross-run global scoring.
         """
-        return bool(self.config.get("enable_transfer_learning", False))
+        if len(self.input_files) <= 1:
+            return False
+        return bool(self.config.get("enable_transfer_learning", True))
 
     @property
     def is_phospho_search(self) -> bool:

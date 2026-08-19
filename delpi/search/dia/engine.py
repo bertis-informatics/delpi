@@ -13,8 +13,6 @@ import polars as pl
 import numpy as np
 import torch
 
-from tqdm import tqdm
-
 from pymsio import MassSpecData
 from delpi.search.progress.tracker import ProgressTracker
 from delpi.search.progress.dummy_tracker import DummyProgressTracker
@@ -40,8 +38,8 @@ from delpi.constants import DIA_MATCHED_PEAKS_CUTOFF
 
 logger = logging.getLogger(__name__)
 
-LOGIT_CUTOFF = 0.8
-TOPK_PER_PRECURSOR = 10
+LOGIT_CUTOFF = 0.0
+TOPK_PER_PRECURSOR = 5
 
 
 class DIASearchEngine(BaseSearchEngine):

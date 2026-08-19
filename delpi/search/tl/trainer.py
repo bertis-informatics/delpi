@@ -40,13 +40,14 @@ class TransferLearningTrainer:
         output_dir: Path,
         result_aggregator: ResultsAggregator,
         device: torch.device,
+        tl_ms2_h5_path: Path,
     ) -> np.ndarray:
 
         logger = CSVLogger(save_dir=output_dir, version=f"ms2_predictor_tl")
-        hdf_files = result_aggregator.get_hdf_files()
+        hdf_files = [tl_ms2_h5_path]
         label_df = PeptideDatabase.join(
             result_aggregator.db_dir,
-            result_aggregator.get_tl_label_df(),
+            result_aggregator.get_tl_label_df(tl_ms2_h5_path),
             precursor_columns=[],
             modification_columns=[],
             peptide_columns=[],
@@ -56,7 +57,8 @@ class TransferLearningTrainer:
         in_memory = len(label_df) < 1_000_000
         data_dict = (
             result_aggregator.get_tl_data(
-                data_keys=["x_aa", "x_mod", "x_meta", "x_intensity"]
+                tl_ms2_h5_path,
+                data_keys=["x_aa", "x_mod", "x_meta", "x_intensity"],
             )
             if in_memory
             else None

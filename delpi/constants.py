@@ -34,3 +34,8 @@ PMSM_EMBEDDING_DIM = 192
 TDA_MAX_TRAIN_SIZE = 8 * 1024 * 1024
 
 DEFAULT_REPORT_FORMAT = "parquet"  # tsv or parquet
+
+# Default number of top-scoring observations per precursor (across runs) used
+# to fine-tune the RT/MS2 predictors during the transfer-learning two-pass
+# search.
+DEFAULT_TL_TOP_K = 3

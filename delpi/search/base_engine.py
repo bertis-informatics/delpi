@@ -23,10 +23,7 @@ from delpi.database.peptide_database import PeptideDatabase
 from delpi.search.tda.tda_processor import TDAProcessor
 from delpi.model.pmsm_scale import PeptideMultiSpectraMatchScaler
 from delpi.model.rt_calibrator import RetentionTimeCalibrator
-from delpi.search.tl.data_prep import (
-    TransferLearningDataPreparator,
-    TransferLearningConfig,
-)
+from delpi.search.tl.data_prep import TransferLearningDataPreparator
 from delpi.search.search_state import SearchState
 from delpi.search.progress.tracker import ProgressTracker
 from delpi.search.progress.tqdm_tracker import TqdmProgressTracker
@@ -230,40 +227,6 @@ class BaseSearchEngine(ABC):
             search_progress.complete()
 
             self.next_state()
-            if (
-                self.search_config.enable_transfer_learning
-                and self.state < SearchState.SECOND_SEARCH
-            ):
-                # TDA + TL data prep (15% of overall)
-                tda_progress = progress.create_child("TDA", total=1, portion=10)
-                pmsm_df = self.perform_tda(result_manager)
-                group_key = self.get_results_group_key()
-                # result_manager.write_df(pmsm_df, key=f"{group_key}/pmsm_df")
-                req_cols = [
-                    "precursor_index",
-                    "observed_rt",
-                    "predicted_rt",
-                    "is_decoy",
-                    "precursor_q_value",
-                ]
-                result_manager.write_dict(
-                    f"{group_key}/pmsm_df",
-                    {key: pmsm_df[key].to_numpy() for key in req_cols},
-                )
-
-                tda_progress.complete()
-
-                self.next_state()
-                tl_progress = progress.create_child("TL-Prep", total=1, portion=5)
-                tl_dataset = self.prepare_transfer_learning_data(
-                    lcms_data,
-                    pmsm_df.filter(pl.col("is_decoy") == False),
-                    mass_tolerance_in_ppm=self.search_config["ms2_mass_tol_in_ppm"],
-                    is_phospho_search=self.search_config.is_phospho_search,
-                )
-                result_manager.write_tl_data(tl_dataset)
-                tl_progress.complete()
-                logger.info("Transfer learning data prepared")
 
             progress.complete()
 
@@ -275,80 +238,50 @@ class BaseSearchEngine(ABC):
             if progress_queue is not None:
                 progress_queue.put(None)  # sentinel — tells parent we're done
 
-    # def perform_tda(self, result_manager: ResultManager) -> pl.DataFrame:
+    def prepare_tl_data_for_run(
+        self,
+        raw_path: Path,
+        target_pmsm_df: pl.DataFrame,
+        tl_ms2_h5_path: Path,
+        progress_queue=None,
+    ) -> None:
+        """Extract MS2/RT transfer-learning training data for a single run
+        and append it to the shared ``transfer_learning_ms2.h5`` file.
 
-    #     logger.info("Target-decoy analysis started")
+        This is run *after* the first-pass global (cross-run) target-decoy
+        analysis, using the already dual-FDR-filtered and top-k-selected
+        target PmSMs for this run (see
+        :func:`delpi.search.tl.second_pass.select_tl_training_pmsms`).
 
-    #     # Extract parameters from config
-    #     q_value_cutoff = self.search_config.config["q_value_cutoff"]
+        Designed to be called in a child process spawned by
+        :meth:`SearchManager.prepare_transfer_learning_training_data`, for
+        the same GPU-memory isolation and raw-data reload reasons as
+        :meth:`process_single_run`.
+        """
+        use_tqdm = progress_queue is None
+        configure_logging(
+            logfile_path=self.search_config.log_file_path,
+            level=logging.INFO,
+            use_tqdm=use_tqdm,
+        )
 
-    #     # Load search results
-    #     group_key = self.get_results_group_key()
-    #     result_aggregator = ResultsAggregator(
-    #         db_dir=self.get_db_dir()
-    #     ).add_result_manager(0, result_manager)
+        try:
+            if target_pmsm_df.shape[0] == 0:
+                logger.info(f"No TL training PmSMs selected for {raw_path}; skipping")
+                return
 
-    #     pmsm_df, data_dict = result_aggregator.get_search_results(
-    #         group_key, load_features=True
-    #     )
-
-    #     num_decoys = pmsm_df["is_decoy"].sum()
-    #     num_targets = len(pmsm_df) - num_decoys
-    #     logger.info(
-    #         f"Training a classifier with {num_targets:,} positive and {num_decoys:,} negative PmSMs"
-    #     )
-
-    #     # Train classifier and rescore PmSMs
-    #     splitter = DatasetSplitter()
-    #     train_df, test_df = splitter.split_by_peptide(pmsm_df)
-    #     train_dataset = PMSMDataset.create_tensor_dataset(train_df, data_dict)
-    #     test_dataset = PMSMDataset.create_tensor_dataset(test_df, data_dict)
-    #     trainer = TargetDecoyTrainer()
-    #     test_score_arr = trainer.train(
-    #         result_manager.run_name,
-    #         train_dataset,
-    #         test_dataset,
-    #         output_dir=self.search_config.output_dir,
-    #         device=self.device,
-    #     )
-
-    #     ###############################################################################
-    #     # select only one PmSM per cluster (sharing the same peaks)
-    #     # then select only one PmSM per precursor
-    #     # the order of these two steps does matter
-    #     # because low-scoring PmSMs of precursor may not share peaks with other PmSMs
-    #     ################################################################################
-    #     pmsm_df = (
-    #         test_df.with_columns(score=test_score_arr)
-    #         .group_by(["cluster"])
-    #         .agg(pl.all().sort_by("score").last())
-    #     )
-    #     logger.info(
-    #         f"Selected {pmsm_df.shape[0]} non-redundant PmSMs (one per cluster) from {test_df.shape[0]} PmSMs"
-    #     )
-
-    #     ## Now select only one PmSM per precursor
-    #     pmsm_df = pmsm_df.group_by(["precursor_index"]).agg(
-    #         pl.all().sort_by("score").last()
-    #     )
-
-    #     logger.debug(
-    #         f"Selected {pmsm_df.shape[0]} best-scoring PmSMs (one per Precursor)"
-    #     )
-
-    #     fdr_analyzer = FDRAnalyzer(
-    #         q_value_cutoff=q_value_cutoff, db_dir=self.search_config.db_dir
-    #     )
-    #     pmsm_df = fdr_analyzer.perform_run_specific_analysis(pmsm_df)
-    #     counts = ResultManager.compute_id_statistics(pmsm_df, q_value_cutoff)
-    #     logger.info(
-    #         "FDR estimated: "
-    #         f"#Precursors: {counts['precursors']}, "
-    #         f"#Peptides: {counts['peptides']}, "
-    #         f"#Protein Groups: {counts['protein_groups']} at {q_value_cutoff:.2f} FDR"
-    #     )
-
-    #     return pmsm_df.filter(pl.col("precursor_q_value") <= q_value_cutoff)
+            preparator = TransferLearningDataPreparator(
+                tolerance_in_ppm=self.search_config["ms2_mass_tol_in_ppm"],
+                apply_phospho=self.search_config.is_phospho_search,
+            )
+            preparator.extract_and_save(target_pmsm_df, raw_path, tl_ms2_h5_path)
+            logger.info(f"Transfer learning data prepared for {raw_path}")
+        except Exception as e:
+            logger.error(f"TL data prep failed: {str(e)}")
+            raise RuntimeError(f"TL data prep failed for {raw_path}") from e
+        finally:
+            if progress_queue is not None:
+                progress_queue.put(None)  # sentinel — tells parent we're done
 
     def perform_tda(self, result_manager: ResultManager) -> pl.DataFrame:
         """Run-specific TDA using TensorDataset for fast training/inference."""
@@ -431,17 +364,21 @@ class BaseSearchEngine(ABC):
                     pmsm_df, score_column="logit", out_column="precursor_q_value"
                 )
             else:  # SECND_SEARCH and before_full_search
-                pmsm_df = pl.from_dict(
-                    result_manager.read_dict(
-                        f"{group_key}/pmsm_df",
-                        data_keys=[
-                            "precursor_index",
-                            "observed_rt",
-                            "predicted_rt",
-                            "is_decoy",
-                            "precursor_q_value",
-                        ],
-                    )
+                results_dict = result_manager.read_dict(
+                    group_key,
+                    data_keys=[
+                        "precursor_index",
+                        "observed_rt",
+                        "predicted_rt",
+                        "score",
+                        "precursor_q_value",
+                    ],
+                )
+                pmsm_df = (
+                    pl.DataFrame(results_dict)
+                    .filter(pl.col("precursor_q_value").is_not_null())
+                    .group_by("precursor_index")
+                    .agg(pl.all().sort_by("score").last())
                 )
 
                 ## update precursor_index for refined DB
@@ -462,7 +399,7 @@ class BaseSearchEngine(ABC):
                     pmsm_df,
                     precursor_columns=[],
                     modification_columns=["ref_rt"],
-                    peptide_columns=[],
+                    peptide_columns=["is_decoy"],
                 )
 
             target_df = pmsm_df.filter(
@@ -476,6 +413,8 @@ class BaseSearchEngine(ABC):
             ref_rt=target_df["ref_rt"].to_numpy(),
             obs_rt=target_df["observed_rt"].to_numpy(),
             degree=5 if self.state < SearchState.SECOND_SEARCH else 2,
+            min_rt_tolerance=0.1,
+            max_rt_tolerance=0.15,
         )
 
         if after_full_search:
@@ -486,18 +425,3 @@ class BaseSearchEngine(ABC):
             )
 
         return rt_calibrator
-
-    def prepare_transfer_learning_data(
-        self,
-        lcms_data: MassSpecData,
-        pmsm_df: pl.DataFrame,
-        is_phospho_search: bool = False,
-        mass_tolerance_in_ppm: float = 10,
-    ):
-        config = TransferLearningConfig(
-            tolerance_in_ppm=mass_tolerance_in_ppm, apply_phospho=is_phospho_search
-        )
-        preparator = TransferLearningDataPreparator(config)
-        collected_data = preparator.prepare_training_data(pmsm_df, lcms_data)
-
-        return collected_data

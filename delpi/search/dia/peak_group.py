@@ -5,7 +5,6 @@ import numpy as np
 import numba as nb
 
 from delpi.lcms.data_container import DIAWindowFrameNumMap, PeakContainer
-
 from delpi.database.numba.spec_lib_container import SpectralLibContainer
 from delpi.database.numba.spec_lib_utils import (
     get_frame_index_range,
@@ -13,7 +12,6 @@ from delpi.database.numba.spec_lib_utils import (
 )
 from delpi.utils.signal import find_local_maxima, cluster_peaks_with_weights
 from delpi.utils.peak import find_peak_index
-from delpi.utils.numeric import corrcoef
 from delpi.constants import QUANT_FRAGMENTS
 
 
@@ -192,36 +190,6 @@ def clip_peak_group(peak_groups: np.ndarray, peak_lb: int, peak_ub: int):
 
 
 @nb.njit(nogil=True, fastmath=True, cache=True)
-def get_avg_xic_corrs(
-    xic_arr: np.ndarray,
-    peak_group_arr: np.ndarray,
-    rt_window_radius: int,
-):
-    corr_score = np.empty(peak_group_arr.shape[0], dtype=np.float32)
-
-    for i in nb.prange(peak_group_arr.shape[0]):
-        peak = peak_group_arr[i]
-        st = peak - rt_window_radius
-        ed = peak + rt_window_radius + 1
-
-        xic_arr_ = xic_arr[:, st:ed]
-        mask = np.sum(xic_arr_, axis=1) > 0
-        n_xics = np.sum(mask)
-        if n_xics < 2:
-            corr_score[i] = 0
-        else:
-            corr_arr = corrcoef(xic_arr_[mask])
-            n_corrs = n_xics * (n_xics - 1) // 2
-            corr_power_3_sum = 0.0
-            for j in range(n_xics):
-                for k in range(j + 1, n_xics):
-                    corr_power_3_sum += corr_arr[j, k] ** 3
-            corr_score[i] = corr_power_3_sum / n_corrs
-
-    return corr_score
-
-
-@nb.njit(nogil=True, fastmath=True, cache=True)
 def sum_neighborhood(all_peak_count_arr, rt_window_radius, peak_group_arr):
     n = peak_group_arr.shape[0]
     sum_peak_count_arr = np.empty(n, dtype=all_peak_count_arr.dtype)
@@ -337,21 +305,15 @@ def find_peak_groups(
             continue
 
         ## cluster peak groups with ad-hoc peak group scoring
-        apex_median_intensity = np.empty(len(peak_group_arr), dtype=np.float32)
-        for i, t_ in enumerate(peak_group_arr):
-            apex_intensity = xic_arr[:, t_]
-            apex_median_intensity[i] = np.median(apex_intensity[apex_intensity > 0])
-
-        ## cluster peak groups with ad-hoc peak group scoring
         comb_count_arr = xic_peak_count_arr + spec_peak_count_arr
-        peak_group_weights = (
-            0.25 * comb_count_arr[peak_group_arr - 1]
-            + 0.5 * comb_count_arr[peak_group_arr]
-            + 0.25 * comb_count_arr[peak_group_arr + 1]
+        peak_group_scores = (
+            comb_count_arr[peak_group_arr - 1]
+            + 2.0 * comb_count_arr[peak_group_arr]
+            + comb_count_arr[peak_group_arr + 1]
         )
         peak_group_arr = cluster_peaks_with_weights(
             peak_group_arr,
-            peak_group_weights,
+            peak_group_scores,
             dist_cutoff=2,
             min_cluster_size=1,
             max_cluster_size=1024,
@@ -372,16 +334,12 @@ def find_peak_groups(
         if peak_group_arr.shape[0] < 1:
             continue
 
-        ## select Top K peak groups with more sophisticated ad-hoc scoring
+        ## select Top K peak groups, ranked by fragment co-elution score
         if peak_group_arr.shape[0] > topk:
-            # ad-hoc scoring
             peak_group_scores = (
-                # averaged correlations
-                get_avg_xic_corrs(xic_arr, peak_group_arr, rt_window_radius=2)
-                # fragment mono-isotopic peaks
-                + 0.25 * spec_peak_count_arr[peak_group_arr - 1]
-                + 0.5 * spec_peak_count_arr[peak_group_arr]
-                + 0.25 * spec_peak_count_arr[peak_group_arr + 1]
+                comb_count_arr[peak_group_arr - 1]
+                + 2.0 * comb_count_arr[peak_group_arr]
+                + comb_count_arr[peak_group_arr + 1]
             )
             ii = np.argsort(peak_group_scores)[::-1][:topk]
             peak_group_arr = peak_group_arr[ii]

@@ -9,7 +9,6 @@ import io
 import re
 import binascii
 import zlib
-import gzip
 from functools import lru_cache
 
 try:
@@ -22,87 +21,99 @@ try:
 except ImportError:
     fast_zlib = zlib
 
+try:
+    from isal.igzip import IGzipFile as _GzipFile
+except ImportError:
+    from gzip import GzipFile as _GzipFile
+
+try:
+    import pybase64 as _base64_lib
+
+    def _b64decode(binary_text: str) -> bytes:
+        return _base64_lib.b64decode(binary_text, validate=False)
+
+except ImportError:
+
+    def _b64decode(binary_text: str) -> bytes:
+        return binascii.a2b_base64(binary_text)
+
+
 import numpy as np
-import numba as nb
 import polars as pl
 
 from pymsio.readers.base import MassSpecFileReader
 from pymsio.readers.ms_data import MassSpecData, PeakArray, META_SCHEMA
 
+_EMPTY_F32 = np.array([], dtype=np.float32)
 
-# MS ontology accession codes as constants for faster lookup
-MS_ACCESSIONS = {
-    "MS:1000016": "scan_start_time",
-    "MS:1000511": "ms_level",
-    "MS:1000514": "mz_array",
-    "MS:1000515": "intensity_array",
-    "MS:1000521": "float32",
-    "MS:1000523": "float64",
-    "MS:1000574": "zlib_compression",
-}
+# PSI-MS CV accession codes used for single-pass, order-independent parsing.
+MS_LEVEL = "MS:1000511"
+SCAN_TIME = "MS:1000016"
+SCAN_WINDOW_LOWER = "MS:1000501"
+SCAN_WINDOW_UPPER = "MS:1000500"
 
-# Commonly used tag names for faster lookup
-COMMON_TAGS = {
-    "scan",
-    "cvParam",
-    "binaryDataArray",
-    "binary",
-    "scanWindow",
-    "isolationWindow",
-}
+ISOLATION_TARGET = "MS:1000827"
+ISOLATION_LOWER = "MS:1000828"
+ISOLATION_UPPER = "MS:1000829"
 
-NUMERIC_PATTERN = re.compile(r"^[0-9]+\.?[0-9]*$")
-NUMERIC_WITH_MINUS_PATTERN = re.compile(r"^-?[0-9]+\.?[0-9]*$")
+MZ_ARRAY = "MS:1000514"
+INTENSITY_ARRAY = "MS:1000515"
+
+FLOAT32 = "MS:1000521"
+FLOAT64 = "MS:1000523"
+ZLIB_COMPRESSION = "MS:1000574"
+NO_COMPRESSION = "MS:1000576"
+
+MINUTE_UNIT = "UO:0000031"
 
 
-# Optimized peak processing using Numba JIT compilation
-@nb.njit(cache=True, fastmath=True)
 def fast_process_peaks(mz_arr, int_arr):
-    """Filter peaks with positive intensity. Returns (mz, ab) 1-D float32 arrays."""
+    """Filter peaks with positive intensity. Returns (mz, ab) 1-D float32 arrays.
 
-    if mz_arr is None or int_arr is None:
-        return np.empty(0, dtype=np.float32), np.empty(0, dtype=np.float32)
+    Vectorized with NumPy instead of an element-by-element JIT loop: this
+    avoids JIT dispatch overhead for the (typically small) per-spectrum
+    arrays and includes a fast path when every intensity is already
+    positive (the common case), which skips filtering entirely.
+    """
 
-    if mz_arr.size == 0 or int_arr.size == 0:
-        return np.empty(0, dtype=np.float32), np.empty(0, dtype=np.float32)
+    if mz_arr is None or int_arr is None or mz_arr.size == 0 or int_arr.size == 0:
+        return _EMPTY_F32, _EMPTY_F32
 
-    min_len = min(mz_arr.size, int_arr.size)
-    if min_len == 0:
-        return np.empty(0, dtype=np.float32), np.empty(0, dtype=np.float32)
+    n = min(mz_arr.size, int_arr.size)
+    if n != mz_arr.size:
+        mz_arr = mz_arr[:n]
+    if n != int_arr.size:
+        int_arr = int_arr[:n]
 
-    # Count valid peaks
-    valid_count = 0
-    for i in range(min_len):
-        if int_arr[i] > 0:
-            valid_count += 1
+    mask = int_arr > 0
+    if mask.all():
+        return (
+            mz_arr.astype(np.float32, copy=False),
+            int_arr.astype(np.float32, copy=False),
+        )
+    if not mask.any():
+        return _EMPTY_F32, _EMPTY_F32
 
-    if valid_count == 0:
-        return np.empty(0, dtype=np.float32), np.empty(0, dtype=np.float32)
-
-    mz_out = np.empty(valid_count, dtype=np.float32)
-    ab_out = np.empty(valid_count, dtype=np.float32)
-    idx = 0
-    for i in range(min_len):
-        if int_arr[i] > 0:
-            mz_out[idx] = np.float32(mz_arr[i])
-            ab_out[idx] = np.float32(int_arr[i])
-            idx += 1
-
-    return mz_out, ab_out
+    return (
+        mz_arr[mask].astype(np.float32, copy=False),
+        int_arr[mask].astype(np.float32, copy=False),
+    )
 
 
 def binary_decode(
     binary_text: str, precision: int, compression: Optional[str] = None
 ) -> np.ndarray:
     """Optimized binary decoding with zero-copy and memory efficiency."""
-    # Early validation to avoid exceptions in normal path
+    # Early validation to avoid exceptions in normal path. Avoid `.strip()`
+    # here: it would scan the (potentially large) base64 payload just to
+    # check for blankness; a2b_base64/pybase64 already tolerate embedded
+    # whitespace/newlines.
     dtype = np.float64 if precision == 64 else np.float32
-    if not binary_text or not binary_text.strip():
+    if not binary_text:
         return np.array([], dtype=dtype)
 
     try:
-        # Fast base64 decode using binascii (faster than base64.b64decode)
-        binary_data = binascii.a2b_base64(binary_text)
+        binary_data = _b64decode(binary_text)
 
         # Fast decompression with Intel ISA-L acceleration
         if compression == "zlib":
@@ -120,23 +131,35 @@ def binary_decode(
 
 class MzmlFileReader(MassSpecFileReader):
     """
-    Optimized mzML file reader with JIT acceleration.
+    Optimized mzML file reader.
 
-    Performance improvements over pymzML:
-    - 2.5x faster loading
-    - Lower memory usage
-    - Identical scientific accuracy
+    Performance improvements over a naive implementation:
+    - Single-pass, accession-based cvParam/binary-array extraction (no
+      repeated subtree traversal).
+    - Metadata-only parsing never decodes binary (m/z/intensity) arrays.
+    - ``load()`` decodes peaks and collects metadata in one XML pass.
+    - Peaks are written directly into preallocated flat float32 buffers
+      instead of building/concatenating many small per-spectrum arrays.
     """
 
     def __init__(
         self,
         file_path: Union[str, Path],
-        num_workers: int = 1,  # Keep simple for best performance
+        num_workers: int = 1,
         build_index: bool = False,
         index_regex: Optional[str] = None,
         buffer_size_mb: int = 8,  # Configurable buffer size in MB
     ):
-        """Initialize optimized mzML reader."""
+        """Initialize optimized mzML reader.
+
+        Note:
+            ``num_workers`` is accepted for API compatibility but is
+            currently unused: parsing is single-threaded (streaming XML
+            parsing does not parallelize well due to sequential decompression
+            and element ordering). It is kept as a constructor argument so
+            existing callers/config do not break; it may be wired up to a
+            real parallel strategy in the future if profiling justifies it.
+        """
         super().__init__(file_path, num_workers)
         self._meta_df: Optional[pl.DataFrame] = None
         self._is_gzipped = self.file_path.suffix.lower() == ".gz"
@@ -204,9 +227,11 @@ class MzmlFileReader(MassSpecFileReader):
     def _open_file_handle(self):
         """Open file handle with configurable buffering for both regular and gzipped files."""
         if self._is_gzipped:
-            # Wrap with a configurable large buffer (default 8MB)
+            # Wrap with a configurable large buffer (default 8MB). Uses
+            # isal's IGzipFile (much faster DEFLATE) when python-isal is
+            # installed, falling back to the stdlib gzip.GzipFile.
             return io.BufferedReader(
-                gzip.GzipFile(self.file_path, "rb"), buffer_size=self.buffer_size
+                _GzipFile(self.file_path, "rb"), buffer_size=self.buffer_size
             )
         else:
             return open(self.file_path, "rb", buffering=self.buffer_size)
@@ -220,249 +245,269 @@ class MzmlFileReader(MassSpecFileReader):
         # Optimized namespace extraction - only split once
         return tag.split("}", 1)[1]
 
-    def _parse_spectrum_element(self, spectrum_elem) -> Optional[Dict[str, Any]]:
-        """Parse a single spectrum element from XML with optimized traversal."""
-        # Early validation to avoid exceptions
+    def _parse_spectrum_element(
+        self, spectrum_elem, *, decode_peaks: bool
+    ) -> Optional[Dict[str, Any]]:
+        """Parse a single <spectrum> element in a single traversal.
+
+        cvParam values are matched by CV accession (not by ``name``, and not
+        by tracking which structural element we are nested inside) since the
+        accessions used here are each unique to their context in the mzML
+        schema. This lets metadata and (optionally) the mz/intensity binary
+        arrays be extracted in one pass over ``spectrum_elem.iter()``,
+        instead of the 3 separate subtree traversals the naive
+        implementation would need (one for metadata, one to collect
+        <binaryDataArray> elements, one per array for its cvParams/<binary>).
+
+        Binary arrays are identified by their array-type cvParam accession
+        (``MZ_ARRAY``/``INTENSITY_ARRAY``), not by assuming the first two
+        <binaryDataArray> elements are mz/intensity - so additional arrays
+        (e.g. ion mobility) before or between them are handled safely.
+
+        When ``decode_peaks`` is False, no base64/zlib decoding happens at
+        all - only cheap XML attribute access.
+        """
         if spectrum_elem is None:
             return None
 
         spectrum_id = spectrum_elem.get("id", "")
         index_str = spectrum_elem.get("index", "0")
-
-        # Safe index parsing with fast numeric check
         index = int(index_str) if index_str.isdigit() else 0
 
-        # Initialize variables
         scan_time = 0.0
         ms_level = 1
-        scan_window = {"scan window lower limit": 0.0, "scan window upper limit": 0.0}
-        isolation_window = None
+        mz_lo = 0.0
+        mz_hi = 0.0
+        iso_target = None
+        iso_lower = None
+        iso_upper = None
 
-        # Single pass through elements with targeted extraction
-        scan_time_found = False
-        ms_level_found = False
+        mz_binary_elem = None
+        mz_precision = 32
+        mz_compression = None
+        intensity_binary_elem = None
+        intensity_precision = 32
+        intensity_compression = None
+
+        # State for whichever <binaryDataArray> we're currently inside.
+        cur_array_type: Optional[str] = None
+        cur_precision = 32
+        cur_compression: Optional[str] = None
+        arrays_found = 0
 
         for elem in spectrum_elem.iter():
             tag = self._get_local_tag(elem.tag)
-
-            # Skip elements that are not relevant
-            if tag not in COMMON_TAGS:
-                continue
 
             if tag == "cvParam":
                 accession = elem.get("accession")
                 if not accession:
                     continue
+                value = elem.get("value")
 
-                # Use dictionary lookup instead of multiple string comparisons
-                accession_type = MS_ACCESSIONS.get(accession)
+                if accession == MS_LEVEL:
+                    if value is not None:
+                        try:
+                            ms_level = int(value)
+                        except ValueError:
+                            pass
+                elif accession == SCAN_TIME:
+                    if value is not None:
+                        try:
+                            scan_time = float(value)
+                        except ValueError:
+                            pass
+                        else:
+                            unit_acc = elem.get("unitAccession")
+                            if unit_acc == MINUTE_UNIT or (
+                                unit_acc is None
+                                and elem.get("unitName", "minute") == "minute"
+                            ):
+                                scan_time *= 60.0
+                elif accession == SCAN_WINDOW_LOWER:
+                    if value is not None:
+                        try:
+                            mz_lo = float(value)
+                        except ValueError:
+                            pass
+                elif accession == SCAN_WINDOW_UPPER:
+                    if value is not None:
+                        try:
+                            mz_hi = float(value)
+                        except ValueError:
+                            pass
+                elif accession == ISOLATION_TARGET:
+                    if value is not None:
+                        try:
+                            iso_target = float(value)
+                        except ValueError:
+                            pass
+                elif accession == ISOLATION_LOWER:
+                    if value is not None:
+                        try:
+                            iso_lower = float(value)
+                        except ValueError:
+                            pass
+                elif accession == ISOLATION_UPPER:
+                    if value is not None:
+                        try:
+                            iso_upper = float(value)
+                        except ValueError:
+                            pass
+                elif decode_peaks and arrays_found < 2:
+                    if accession == MZ_ARRAY:
+                        cur_array_type = "mz"
+                    elif accession == INTENSITY_ARRAY:
+                        cur_array_type = "intensity"
+                    elif accession == FLOAT32:
+                        cur_precision = 32
+                    elif accession == FLOAT64:
+                        cur_precision = 64
+                    elif accession == ZLIB_COMPRESSION:
+                        cur_compression = "zlib"
+                    elif accession == NO_COMPRESSION:
+                        cur_compression = None
 
-                if accession_type == "scan_start_time" and not scan_time_found:
-                    value = elem.get("value")
-                    if value and NUMERIC_PATTERN.match(value):
-                        scan_time = float(value)
-                        unit = elem.get("unitName", "minute")
-                        if unit == "minute":
-                            scan_time *= 60  # Convert to seconds
-                        scan_time_found = True
+            elif tag == "binaryDataArray":
+                if decode_peaks and arrays_found < 2:
+                    # Reset per-array state for this new <binaryDataArray>.
+                    cur_array_type = None
+                    cur_precision = 32
+                    cur_compression = None
 
-                elif accession_type == "ms_level" and not ms_level_found:
-                    value = elem.get("value")
-                    if value and value.isdigit():
-                        ms_level = int(value)
-                        ms_level_found = True
+            elif tag == "binary":
+                if decode_peaks and arrays_found < 2 and cur_array_type is not None:
+                    if cur_array_type == "mz" and mz_binary_elem is None:
+                        mz_binary_elem = elem
+                        mz_precision = cur_precision
+                        mz_compression = cur_compression
+                        arrays_found += 1
+                    elif (
+                        cur_array_type == "intensity" and intensity_binary_elem is None
+                    ):
+                        intensity_binary_elem = elem
+                        intensity_precision = cur_precision
+                        intensity_compression = cur_compression
+                        arrays_found += 1
+                    cur_array_type = None
+                    # binaryDataArrayList is the last child of <spectrum> in
+                    # valid mzML, so once both required arrays are found
+                    # there is nothing else left to extract.
+                    if arrays_found >= 2:
+                        break
 
-            elif tag == "scanWindow":
-                # Extract scan window in a single pass
-                for cvparam in elem.iter():
-                    if self._get_local_tag(cvparam.tag) == "cvParam":
-                        name = cvparam.get("name")
-                        value = cvparam.get("value")
-                        if (
-                            name in scan_window
-                            and value
-                            and NUMERIC_WITH_MINUS_PATTERN.match(value)
-                        ):
-                            scan_window[name] = float(value)
-
-            elif tag == "isolationWindow" and ms_level > 1:
-                # Extract isolation window for MS2+ in a single pass
-                isolation_info = {}
-                for cvparam in elem.iter():
-                    if self._get_local_tag(cvparam.tag) == "cvParam":
-                        name = cvparam.get("name")
-                        value = cvparam.get("value")
-                        if value and NUMERIC_WITH_MINUS_PATTERN.match(value):
-                            isolation_info[name] = float(value)
-
-                target_mz = isolation_info.get("isolation window target m/z")
-                lower_offset = isolation_info.get("isolation window lower offset")
-                upper_offset = isolation_info.get("isolation window upper offset")
-
-                if all(x is not None for x in [target_mz, lower_offset, upper_offset]):
-                    isolation_window = {
-                        "isolation_min_mz": target_mz - lower_offset,
-                        "isolation_max_mz": target_mz + upper_offset,
-                    }
-
-        # Extract binary data arrays with optimized loop
-        binary_arrays = []
-        arrays_needed = 2
-
-        # Collect binary arrays in first pass with early exit
-        for elem in spectrum_elem.iter():
-            if self._get_local_tag(elem.tag) == "binaryDataArray":
-                binary_arrays.append(elem)
-                # Early exit when we have enough arrays
-                if len(binary_arrays) >= arrays_needed:
-                    break
-
-        if len(binary_arrays) < 2:
-            return None, None
+        isolation_min_mz = None
+        isolation_max_mz = None
+        if iso_target is not None and iso_lower is not None and iso_upper is not None:
+            isolation_min_mz = iso_target - iso_lower
+            isolation_max_mz = iso_target + iso_upper
 
         mz_array = None
         intensity_array = None
-        arrays_found = 0
-
-        for array_elem in binary_arrays:
-            array_type = None
-            precision = 32
-            compression = None
-            binary_elem = None
-
-            # Single pass through array element children
-            for elem in array_elem.iter():
-                tag = self._get_local_tag(elem.tag)
-
-                if tag == "cvParam":
-                    accession = elem.get("accession")
-                    if accession:
-                        accession_type = MS_ACCESSIONS.get(accession)
-
-                        if accession_type == "mz_array":
-                            array_type = "mz"
-                        elif accession_type == "intensity_array":
-                            array_type = "intensity"
-                        elif accession_type == "float32":
-                            precision = 32
-                        elif accession_type == "float64":
-                            precision = 64
-                        elif accession_type == "zlib_compression":
-                            compression = "zlib"
-
-                elif tag == "binary" and binary_elem is None:
-                    binary_elem = elem
-
-            if array_type is None or binary_elem is None:
-                continue
-
-            binary_text = binary_elem.text
-            if not binary_text or not binary_text.strip():
-                continue
-
-            decoded_array = binary_decode(binary_text, precision, compression)
-            # Check if decoding succeeded
-            if decoded_array is not None and decoded_array.size > 0:
-                if array_type == "mz":
-                    mz_array = decoded_array
-                    arrays_found += 1
-                elif array_type == "intensity":
-                    intensity_array = decoded_array
-                    arrays_found += 1
-
-                # Early exit if we have both arrays
-                if arrays_found >= 2:
-                    break
+        if decode_peaks:
+            if mz_binary_elem is not None and mz_binary_elem.text:
+                mz_array = binary_decode(
+                    mz_binary_elem.text, mz_precision, mz_compression
+                )
+            if intensity_binary_elem is not None and intensity_binary_elem.text:
+                intensity_array = binary_decode(
+                    intensity_binary_elem.text,
+                    intensity_precision,
+                    intensity_compression,
+                )
 
         return {
             "id": spectrum_id,
             "index": index,
             "ms_level": ms_level,
             "scan_time": scan_time,
-            "scan_window": scan_window,
-            "isolation_window": isolation_window,
+            "mz_lo": mz_lo,
+            "mz_hi": mz_hi,
+            "isolation_min_mz": isolation_min_mz,
+            "isolation_max_mz": isolation_max_mz,
             "mz_array": mz_array,
             "intensity_array": intensity_array,
         }
 
     def _spec_to_meta(self, spectrum_data: Dict[str, Any]) -> Dict[str, Any]:
         """Convert spectrum data to metadata dictionary."""
-        frame = spectrum_data["index"]
-        time_sec = spectrum_data.get("scan_time", 0.0)
-        mslev = spectrum_data.get("ms_level", 1)
-
-        scan_window = spectrum_data.get("scan_window", {})
-        mz_lo = scan_window.get("scan window lower limit", 0.0)
-        mz_hi = scan_window.get("scan window upper limit", 0.0)
-
-        isolation_window = spectrum_data.get("isolation_window") or {}
-        isolation_min_mz = isolation_window.get("isolation_min_mz")
-        isolation_max_mz = isolation_window.get("isolation_max_mz")
-
         return {
-            "frame_num": np.uint32(frame),
-            "mz_lo": np.float32(mz_lo),
-            "mz_hi": np.float32(mz_hi),
-            "time_in_seconds": np.float32(time_sec),
-            "ms_level": np.uint8(mslev),
-            "isolation_min_mz": isolation_min_mz,
-            "isolation_max_mz": isolation_max_mz,
+            "frame_num": np.uint32(spectrum_data["index"]),
+            "mz_lo": np.float32(spectrum_data["mz_lo"]),
+            "mz_hi": np.float32(spectrum_data["mz_hi"]),
+            "time_in_seconds": np.float32(spectrum_data["scan_time"]),
+            "ms_level": np.uint8(spectrum_data["ms_level"]),
+            "isolation_min_mz": spectrum_data["isolation_min_mz"],
+            "isolation_max_mz": spectrum_data["isolation_max_mz"],
         }
 
     def _parse_spectra(
         self,
+        *,
         collect_meta: bool,
+        decode_peaks: bool,
         progress=None,
-    ) -> Tuple[List[PeakArray], List[Dict[str, Any]]]:
-        """Fast spectrum parsing with minimal overhead using lxml optimizations."""
-        peaks_list: List[PeakArray] = []
+    ) -> Tuple[
+        List[Dict[str, Any]], List[Tuple[Optional[np.ndarray], Optional[np.ndarray]]]
+    ]:
+        """Single streaming pass over all <spectrum> elements.
+
+        Args:
+            collect_meta: collect one metadata row per spectrum.
+            decode_peaks: decode and return the *raw* (not yet filtered or
+                cast to float32) mz/intensity arrays for each spectrum. When
+                ``False``, no base64/zlib decoding happens at all.
+        """
         meta_rows: List[Dict[str, Any]] = []
+        raw_peaks: List[Tuple[Optional[np.ndarray], Optional[np.ndarray]]] = []
 
         with self._open_file_handle() as f:
-            # Try to use lxml tag filtering for major performance boost
             try:
-                # lxml tag filtering - proven speedup
                 context = ET.iterparse(f, events=("end",), tag="{*}spectrum")
                 use_filter = True
             except (TypeError, ValueError):
-                # Fallback for non-lxml parsers
                 context = ET.iterparse(f, events=("end",))
                 use_filter = False
 
+            idx = 0
             for event, elem in self._progress(
                 context, progress=progress, desc="parse spectra"
             ):
-                # Quick filtering for non-lxml
                 if not use_filter and self._get_local_tag(elem.tag) != "spectrum":
                     elem.clear()
                     continue
 
-                spectrum_data = self._parse_spectrum_element(elem)
+                spectrum_data = self._parse_spectrum_element(
+                    elem, decode_peaks=decode_peaks
+                )
 
                 if spectrum_data is not None:
-                    # Use fast processing
-                    mz, ab = fast_process_peaks(
-                        spectrum_data["mz_array"], spectrum_data["intensity_array"]
-                    )
-                    peaks_list.append(PeakArray(mz, ab))
-
                     if collect_meta:
                         meta_rows.append(self._spec_to_meta(spectrum_data))
+                    if decode_peaks:
+                        raw_peaks.append(
+                            (
+                                spectrum_data["mz_array"],
+                                spectrum_data["intensity_array"],
+                            )
+                        )
                 else:
-                    peaks_list.append(PeakArray.empty())
                     if collect_meta:
-                        meta_rows.append(self._create_empty_meta(len(peaks_list) - 1))
+                        meta_rows.append(self._create_empty_meta(idx))
+                    if decode_peaks:
+                        raw_peaks.append((None, None))
+
+                idx += 1
 
                 # Efficient memory cleanup
                 elem.clear()
-                parent = elem.getparent()
+                parent = elem.getparent() if hasattr(elem, "getparent") else None
                 if parent is not None:
                     try:
                         parent.remove(elem)
                     except (ValueError, TypeError):
                         pass
 
-        return peaks_list, meta_rows
+        return meta_rows, raw_peaks
 
     def _create_empty_meta(self, frame_num: int) -> Dict[str, Any]:
         """Create empty metadata entry."""
@@ -477,8 +522,8 @@ class MzmlFileReader(MassSpecFileReader):
         }
 
     def _read_meta(self) -> pl.DataFrame:
-        """Read metadata for all spectra."""
-        _, meta_rows = self._parse_spectra(collect_meta=True)
+        """Read metadata for all spectra without decoding any binary arrays."""
+        meta_rows, _ = self._parse_spectra(collect_meta=True, decode_peaks=False)
         return pl.DataFrame(meta_rows, schema=META_SCHEMA)
 
     def get_meta_df(self) -> pl.DataFrame:
@@ -487,25 +532,81 @@ class MzmlFileReader(MassSpecFileReader):
             self._meta_df = self._read_meta()
         return self._meta_df
 
+    @staticmethod
+    def _build_peak_array(
+        raw_peaks: List[Tuple[Optional[np.ndarray], Optional[np.ndarray]]],
+    ) -> Tuple[np.ndarray, np.ndarray, PeakArray]:
+        """Filter+cast raw per-spectrum (mz, intensity) arrays directly into
+        one preallocated flat float32 ``PeakArray``, instead of building one
+        ``PeakArray`` per spectrum and concatenating them afterwards.
+
+        Returns ``(peak_start, peak_stop, peaks)``.
+        """
+        n_spectra = len(raw_peaks)
+        counts = np.zeros(n_spectra, dtype=np.uint32)
+        masks: List[Optional[np.ndarray]] = [None] * n_spectra
+
+        for i, (_, int_arr) in enumerate(raw_peaks):
+            if int_arr is None or int_arr.size == 0:
+                continue
+            mask = int_arr > 0
+            if mask.all():
+                counts[i] = int_arr.size
+                # No filtering needed later; leave masks[i] as None as a
+                # sentinel meaning "take everything".
+            else:
+                masks[i] = mask
+                counts[i] = int(mask.sum())
+
+        peak_stop = np.cumsum(counts, dtype=np.uint32)
+        peak_start = peak_stop - counts
+        total = int(peak_stop[-1]) if n_spectra else 0
+        mz_out = np.empty(total, dtype=np.float32)
+        ab_out = np.empty(total, dtype=np.float32)
+
+        for i, (mz_arr, int_arr) in enumerate(raw_peaks):
+            n = int(counts[i])
+            if n == 0:
+                continue
+            st, ed = int(peak_start[i]), int(peak_stop[i])
+            mask = masks[i]
+            if mask is None:
+                # fast path: every peak already has positive intensity
+                mz_out[st:ed] = mz_arr
+                ab_out[st:ed] = int_arr
+            else:
+                mz_out[st:ed] = mz_arr[mask]
+                ab_out[st:ed] = int_arr[mask]
+
+        return peak_start, peak_stop, PeakArray(mz_out, ab_out)
+
     def load(self, progress=None) -> MassSpecData:
-        """Load complete mass spectrometry data."""
+        """Load complete mass spectrometry data.
+
+        Metadata and peaks are collected in the same XML pass when metadata
+        has not already been loaded (i.e. this does not re-parse the file
+        just because ``get_meta_df()`` wasn't called first).
+        """
         need_meta = self._meta_df is None
-        peaks_list, meta_rows = self._parse_spectra(
-            collect_meta=need_meta, progress=progress
+        meta_rows, raw_peaks = self._parse_spectra(
+            collect_meta=need_meta, decode_peaks=True, progress=progress
         )
 
         if need_meta:
             self._meta_df = pl.DataFrame(meta_rows, schema=META_SCHEMA)
 
-        return MassSpecData.create(
-            run_name=self.run_name, meta_df=self._meta_df, list_of_peaks=peaks_list
+        peak_start, peak_stop, peaks = self._build_peak_array(raw_peaks)
+
+        return MassSpecData.create_from_flat(
+            run_name=self.run_name,
+            meta_df=self._meta_df,
+            peaks=peaks,
+            peak_start=peak_start,
+            peak_stop=peak_stop,
         )
 
     def get_frame(self, frame_num: int) -> PeakArray:
-        # """Get peaks for a specific frame number."""
-        # raise NotImplementedError(
-        #     "get_frame not implemented for streaming reader. Use load() instead."
-        # )
+        """Get peaks for a specific frame number."""
         target_index = int(frame_num)
 
         with self._open_file_handle() as f:
@@ -528,7 +629,7 @@ class MzmlFileReader(MassSpecFileReader):
                     continue
 
                 # Parse exactly one spectrum here
-                spectrum_data = self._parse_spectrum_element(elem)
+                spectrum_data = self._parse_spectrum_element(elem, decode_peaks=True)
                 elem.clear()
                 parent = getattr(elem, "getparent", lambda: None)()
                 if parent is not None:
@@ -596,7 +697,9 @@ class MzmlFileReader(MassSpecFileReader):
                 if spec_idx not in target_set:
                     continue
 
-                spectrum_data = self._parse_spectrum_element(spec_elem)
+                spectrum_data = self._parse_spectrum_element(
+                    spec_elem, decode_peaks=True
+                )
                 if spectrum_data is None:
                     results.append(PeakArray.empty())
                 else:

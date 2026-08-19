@@ -7,7 +7,7 @@ import polars as pl
 import numpy as np
 
 from delpi.database.peptide_database import PeptideDatabase
-from delpi.search.result_manager import ResultManager, TL_DATA_GROUP
+from delpi.search.result_manager import ResultManager
 from delpi.search.config import SearchConfig
 from delpi.constants import QUANT_FRAGMENTS, RT_WINDOW_LEN
 
@@ -51,60 +51,56 @@ class ResultsAggregator:
         # Return the average xic_peak_interval across all runs
         return float(np.mean(xic_peak_intervals))
 
-    def get_tl_label_df(self) -> pl.DataFrame:
+    def get_tl_label_df(self, tl_ms2_h5_path: Path) -> pl.DataFrame:
+        """Build the transfer-learning label DataFrame from the shared
+        ``transfer_learning_ms2.h5`` file (see
+        :class:`~delpi.search.tl.data_prep.TransferLearningDataPreparator`).
+
+        The file is grouped as ``/<seq_len>/<array>`` (all runs share the
+        same arrays; there is no per-run grouping).
+        """
+        tl_ms2_h5_path = Path(tl_ms2_h5_path)
+        if not tl_ms2_h5_path.exists():
+            return pl.DataFrame()
 
         label_dfs = []
-        hdf_files = self.get_hdf_files()
-        for hdf_index, hdf_path in enumerate(hdf_files):
-            with h5py.File(hdf_path, "r") as hf:
-                tl_data_group = hf[TL_DATA_GROUP]
-                for n in tl_data_group:
-                    if n == "config":
-                        continue
+        with h5py.File(tl_ms2_h5_path, "r") as hf:
+            for n in hf:
+                precursor_index = hf[n]["precursor_index"][:]
+                if precursor_index.shape[0] == 0:
+                    continue
 
-                    precursor_index = tl_data_group[n]["precursor_index"][:]
-                    if precursor_index.shape[0] == 0:
-                        continue
-
-                    n_samples = precursor_index.shape[0]
-                    label_dfs.append(
-                        pl.DataFrame(
-                            {
-                                "seq_len": np.full(n_samples, int(n), dtype=np.uint16),
-                                "index": np.arange(n_samples, dtype=np.uint32),
-                                "hdf_index": np.full(n_samples, hdf_index, dtype=np.uint32),
-                                "precursor_index": precursor_index.astype(np.uint32, copy=False),
-                            }
-                        )
+                n_samples = precursor_index.shape[0]
+                label_dfs.append(
+                    pl.DataFrame(
+                        {
+                            "seq_len": np.full(n_samples, int(n), dtype=np.uint16),
+                            "index": np.arange(n_samples, dtype=np.uint32),
+                            "precursor_index": precursor_index.astype(np.uint32, copy=False),
+                        }
                     )
+                )
 
         return pl.concat(label_dfs, how="vertical") if label_dfs else pl.DataFrame()
 
-    def get_tl_data(self, data_keys: List[str]) -> List[Dict[str, np.ndarray]]:
-        """Load all data from HDF files into memory with 3-level dict structure"""
-        hdf_files = self.get_hdf_files()
-        data_dicts = list()
-        for hdf_index, hdf_path in enumerate(hdf_files):
-            data_dict = {}
-            with h5py.File(hdf_path, "r") as hf:
-                tl_data_group = hf[TL_DATA_GROUP]
-                n_tokens = list(tl_data_group)
-                for n in n_tokens:
-                    if n == "config":
-                        continue
-                    int_n = int(n)
-                    data_dict[int_n] = {
-                        key: tl_data_group[n][key][:] for key in data_keys
-                    }
-                    # data_dict[int_n] = {
-                    #     "x_aa": tl_data_group[n]["x_aa"][:],
-                    #     "x_mod": tl_data_group[n]["x_mod"][:],
-                    #     "x_meta": tl_data_group[n]["x_meta"][:],
-                    #     "x_intensity": tl_data_group[n]["x_intensity"][:],
-                    # }
-            data_dicts.append(data_dict)
+    def get_tl_data(
+        self, tl_ms2_h5_path: Path, data_keys: List[str]
+    ) -> Dict[int, Dict[str, np.ndarray]]:
+        """Load all transfer-learning data from the shared HDF5 file into
+        memory as a single dict keyed by sequence length (there is no
+        per-run grouping)."""
+        data_dict: Dict[int, Dict[str, np.ndarray]] = {}
 
-        return data_dicts
+        tl_ms2_h5_path = Path(tl_ms2_h5_path)
+        if not tl_ms2_h5_path.exists():
+            return data_dict
+
+        with h5py.File(tl_ms2_h5_path, "r") as hf:
+            for n in hf:
+                int_n = int(n)
+                data_dict[int_n] = {key: hf[n][key][:] for key in data_keys}
+
+        return data_dict
 
     def get_run_df(self):
         run_info_dict = defaultdict(list)

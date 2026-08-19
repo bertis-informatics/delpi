@@ -7,7 +7,6 @@ import numpy as np
 
 from pymsio.readers.utils import get_frame_num_to_index_arr, compute_z_score_cdf_numba
 
-
 META_SCHEMA = {
     "frame_num": pl.UInt32,
     "mz_lo": pl.Float32,
@@ -36,7 +35,6 @@ class PeakArray(NamedTuple):
 
 
 class MassSpecData:
-
     thread_safe = False
 
     def __init__(
@@ -73,6 +71,50 @@ class MassSpecData:
             np.concatenate([p.mz for p in list_of_peaks]),
             np.concatenate([p.ab for p in list_of_peaks]),
         )
+
+        return cls(run_name, meta_df, peaks)
+
+    @classmethod
+    def create_from_flat(
+        cls,
+        run_name: str,
+        meta_df: pl.DataFrame,
+        peaks: PeakArray,
+        peak_start: np.ndarray,
+        peak_stop: np.ndarray,
+    ):
+        """Like :meth:`create`, but accepts an already-built flat, contiguous
+        ``PeakArray`` plus the per-spectrum ``[peak_start, peak_stop)`` ranges
+        directly, instead of a list of per-spectrum ``PeakArray`` objects.
+
+        This avoids allocating one small array per spectrum and the large
+        ``np.concatenate`` call that :meth:`create` performs; callers that can
+        build the flat ``mz``/``ab`` buffers themselves (e.g. by writing
+        directly into a preallocated buffer) should prefer this method.
+        """
+        n = meta_df.shape[0]
+        peak_start = np.asarray(peak_start, dtype=np.uint32)
+        peak_stop = np.asarray(peak_stop, dtype=np.uint32)
+
+        assert (
+            len(peak_start) == n and len(peak_stop) == n
+        ), "peak_start/peak_stop must have exactly one entry per metadata row"
+        assert np.all(peak_stop >= peak_start), "peak_stop must be >= peak_start"
+        assert np.all(
+            peak_start[1:] >= peak_stop[:-1]
+        ), "peak ranges must be non-overlapping and non-decreasing"
+        assert (
+            peaks.mz.dtype == np.float32 and peaks.ab.dtype == np.float32
+        ), "flat peak arrays must already be float32"
+        if n:
+            assert peak_stop[-1] == len(
+                peaks.mz
+            ), "final peak_stop must equal the total number of peaks"
+
+        meta_df = meta_df.with_columns(
+            pl.Series("peak_start", peak_start, dtype=pl.UInt32),
+            pl.Series("peak_stop", peak_stop, dtype=pl.UInt32),
+        ).select(pl.col(list(META_SCHEMA)), pl.col("peak_start", "peak_stop"))
 
         return cls(run_name, meta_df, peaks)
 
@@ -146,6 +188,8 @@ class MassSpecData:
         self,
         file_path: Union[str, Path],
         overwrite: bool = False,
+        compression: Optional[str] = None,
+        compression_opts: Optional[int] = None,
     ):
         file_path = Path(file_path)
         group_key = self.run_name
@@ -157,8 +201,22 @@ class MassSpecData:
                 else:
                     raise FileExistsError("LC/MS data already exists")
             hf_grp = hf.create_group(group_key)
-            hf_grp.create_dataset("mz", data=self.peaks.mz, dtype=np.float32)
-            hf_grp.create_dataset("ab", data=self.peaks.ab, dtype=np.float32)
+            hf_grp.create_dataset(
+                "mz",
+                data=self.peaks.mz,
+                dtype=np.float32,
+                compression=compression,
+                compression_opts=compression_opts,
+                shuffle=True if compression is not None else False,
+            )
+            hf_grp.create_dataset(
+                "ab",
+                data=self.peaks.ab,
+                dtype=np.float32,
+                compression=compression,
+                compression_opts=compression_opts,
+                shuffle=True if compression is not None else False,
+            )
 
         self.meta_df.to_pandas().to_hdf(
             file_path, key=f"{group_key}/meta_df", index=False

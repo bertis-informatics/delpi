@@ -1,6 +1,5 @@
 from pathlib import Path
 
-import polars as pl
 import numpy as np
 import torch
 from lightning.pytorch.callbacks.early_stopping import EarlyStopping
@@ -12,7 +11,6 @@ from sklearn.model_selection import train_test_split
 from delpi.model.spec_lib.rt_predictor import RetentionTimePredictor
 from delpi.search.tl.dataset import TransferLearningDatasetForRT, LABEL_DTYPE
 from delpi.search.result_aggregator import ResultsAggregator
-from delpi.model.rt_calibrator import RetentionTimeCalibrator
 from delpi import MODEL_DIR
 
 # Default training parameters
@@ -31,17 +29,6 @@ DEFAULT_TRAINING_PARAMS = {
 }
 
 
-def make_rt_df(run_data_dict):
-    rt_df = pl.concat(
-        (
-            pl.DataFrame({k: d[k] for k in ["precursor_index", "x_rt"]})
-            for k, d in run_data_dict.items()
-        ),
-        how="vertical",
-    )
-    return rt_df
-
-
 class TransferLearningTrainerForRT:
 
     def __init__(self, training_params: dict = None):
@@ -52,21 +39,19 @@ class TransferLearningTrainerForRT:
         output_dir: Path,
         result_aggregator: ResultsAggregator,
         device: torch.device,
+        tl_ms2_h5_path: Path,
     ) -> np.ndarray:
 
         logger = CSVLogger(save_dir=output_dir, version=f"rt_predictor_tl")
 
-        label_df = result_aggregator.get_tl_label_df()
+        label_df = result_aggregator.get_tl_label_df(tl_ms2_h5_path)
         labels = np.empty(len(label_df), dtype=LABEL_DTYPE)
         for field in LABEL_DTYPE.names:
             labels[field] = label_df[field].to_numpy()
 
         data_dict = result_aggregator.get_tl_data(
-            data_keys=["precursor_index", "x_aa", "x_mod", "x_rt"]
+            tl_ms2_h5_path, data_keys=["precursor_index", "x_aa", "x_mod", "x_rt"]
         )
-
-        if len(data_dict) > 1:
-            data_dict = self._align_retention_times(data_dict)
 
         train_labels, val_labels = train_test_split(
             labels,
@@ -158,21 +143,6 @@ class TransferLearningTrainerForRT:
             filename="{epoch}",
         )
         return [early_stop_callback, checkpoint_callback]
-
-    def _align_retention_times(self, data_dict):
-        # Align retention times before training, setting the first run as reference
-        if len(data_dict) > 1:
-            ref_rt_df = make_rt_df(data_dict[0])
-            for i in range(1, len(data_dict)):
-                rt_df = make_rt_df(data_dict[i])
-                aligner = RetentionTimeCalibrator.train_aligner(
-                    ref_rt_df, rt_df, degree=2
-                )
-                # align retention times and update in data_dict
-                for k, v in data_dict[i].items():
-                    v["x_rt"] = aligner.predict(v["x_rt"].reshape((-1, 1))).flatten()
-
-        return data_dict
 
 
 def test():

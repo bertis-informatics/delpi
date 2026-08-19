@@ -1,12 +1,13 @@
-from typing import Dict
+from pathlib import Path
+from typing import Dict, Union
 from collections import defaultdict
-from dataclasses import dataclass
 from tqdm import tqdm
 
+import h5py
 import polars as pl
 import numpy as np
 
-from pymsio import MassSpecData
+from pymsio import MassSpecData, ReaderFactory
 from delpi.lcms.fragmentation import Fragmentation
 from delpi.lcms.neutral_loss import NeutralLoss
 from delpi.database.precursor_generator import PrecursorGenerator
@@ -19,28 +20,43 @@ from delpi.model.spec_lib.aa_encoder import (
 )
 
 
-@dataclass
-class TransferLearningConfig:
-    """Configuration for transfer learning data preparation"""
-
-    nce: float = 30.0
-    frag_method: int = 0  # 0: HCD, 1: CID
-    mass_analyzer: int = 0  # 0: FTMS, 1: ITMS
-    tolerance_in_ppm: float = 10.0
-    apply_phospho: bool = False
-    min_charge: int = 1
-    max_charge: int = 2
-
-
 class TransferLearningDataPreparator:
-    """MS2 intensity data preparation class for transfer learning"""
+    """MS2 intensity data preparation class for transfer learning.
 
-    def __init__(self, config: TransferLearningConfig):
+    Extracts fragment-ion intensities/RT for identified PmSMs from a raw
+    LC-MS/MS file and persists them to a shared HDF5 file (grouped by
+    ``{run_index}/{sequence_length}/{array_name}``) so that transfer-learning
+    data from every run can live in a single file instead of each run's own
+    result file.
+    """
+
+    def __init__(
+        self,
+        nce: float = 30.0,
+        frag_method: int = 0,  # 0: HCD, 1: CID
+        mass_analyzer: int = 0,  # 0: FTMS, 1: ITMS
+        tolerance_in_ppm: float = 10.0,
+        apply_phospho: bool = False,
+        min_charge: int = 1,
+        max_charge: int = 2,
+    ):
         """
         Args:
-            config: Configuration for transfer learning data preparation
+            nce: Normalized collision energy metadata value.
+            frag_method: Fragmentation method (0: HCD, 1: CID).
+            mass_analyzer: Mass analyzer type (0: FTMS, 1: ITMS).
+            tolerance_in_ppm: Fragment matching tolerance in ppm.
+            apply_phospho: Whether to include the phospho neutral loss.
+            min_charge: Minimum fragment charge.
+            max_charge: Maximum fragment charge.
         """
-        self.config = config
+        self.nce = nce
+        self.frag_method = frag_method
+        self.mass_analyzer = mass_analyzer
+        self.tolerance_in_ppm = tolerance_in_ppm
+        self.apply_phospho = apply_phospho
+        self.min_charge = min_charge
+        self.max_charge = max_charge
 
         # Initialize fragmentation and precursor generator
         self.precursor_gen = PrecursorGenerator()
@@ -49,12 +65,12 @@ class TransferLearningDataPreparator:
     def _setup_fragmentation(self):
         """Initialize fragmentation configuration"""
         neutral_losses = [NeutralLoss.NO_LOSS]
-        if self.config.apply_phospho:
+        if self.apply_phospho:
             neutral_losses.append(NeutralLoss.H3O4P)
 
         self.fragmentation = Fragmentation(
-            min_charge=self.config.min_charge,
-            max_charge=self.config.max_charge,
+            min_charge=self.min_charge,
+            max_charge=self.max_charge,
             max_fragment_isotopes=1,
             neutral_losses=neutral_losses,
         )
@@ -91,6 +107,99 @@ class TransferLearningDataPreparator:
         collected_data = self._collect_ms2_intensity_data(pmsm_df, lcms_data)
 
         return collected_data
+
+    def extract_and_save(
+        self,
+        pmsm_df: Union[pl.DataFrame, Path, str],
+        raw_file_path: Union[Path, str],
+        h5_file_path: Union[Path, str],
+    ) -> None:
+        """Extract MS2/RT training data for a single run and append it to a
+        shared HDF5 file.
+
+        Parameters
+        ----------
+        pmsm_df:
+            A pre-filtered Polars DataFrame **or** a path to a parquet file
+            containing PSMs for the given run.
+            Required columns: ``precursor_index``, ``frame_num``, ``peptide``,
+            ``mod_ids``, ``mod_sites``, ``precursor_charge``,
+            ``sequence_length``.
+        raw_file_path:
+            Path to the raw LC-MS/MS file (``.raw``, ``.mzml``, or
+            ``.mzml.gz``) for this run.
+        h5_file_path:
+            Destination shared HDF5 file. Created if it does not exist;
+            existing datasets are extended (append mode). Data from every
+            run is appended into the same arrays (no per-run grouping).
+        """
+        raw_file_path = Path(raw_file_path)
+        h5_file_path = Path(h5_file_path)
+        h5_file_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if isinstance(pmsm_df, (str, Path)):
+            pmsm_df = pl.read_parquet(pmsm_df)
+
+        if len(pmsm_df) == 0:
+            return
+
+        reader = ReaderFactory.get_reader(raw_file_path)
+        lcms_data = reader.load()
+
+        collected_data = self.prepare_training_data(pmsm_df, lcms_data)
+        self.save_to_hdf(collected_data, h5_file_path)
+
+    @staticmethod
+    def save_to_hdf(
+        collected_data: Dict[int, Dict[str, np.ndarray]],
+        h5_file_path: Union[Path, str],
+    ) -> None:
+        """Append *collected_data* to a shared HDF5 file.
+
+        Layout: ``/<seq_len>/<array_name>``, LZF-compressed with an
+        unlimited first axis for incremental appending across runs (all
+        runs' data is appended into the same arrays; there is no per-run
+        grouping).
+
+        Parameters
+        ----------
+        collected_data:
+            Mapping ``{sequence_length: {array_name: np.ndarray}}``, as
+            returned by :meth:`prepare_training_data`.
+        h5_file_path:
+            Destination HDF5 file (opened in append mode).
+        """
+        h5_file_path = Path(h5_file_path)
+        h5_file_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with h5py.File(h5_file_path, "a") as hf:
+            for seq_len, data_dict in collected_data.items():
+                if not data_dict:
+                    continue
+                grp = hf.require_group(str(seq_len))
+
+                for array_name, array_data in data_dict.items():
+                    if array_data.ndim == 1:
+                        chunk_shape = (1,)
+                        max_shape = (None,)
+                    else:
+                        chunk_shape = (1, *array_data.shape[1:])
+                        max_shape = (None, *array_data.shape[1:])
+
+                    if array_name not in grp:
+                        grp.create_dataset(
+                            array_name,
+                            data=array_data,
+                            compression="lzf",
+                            chunks=chunk_shape,
+                            maxshape=max_shape,
+                        )
+                    else:
+                        ds = grp[array_name]
+                        n_existing = ds.shape[0]
+                        n_new = array_data.shape[0]
+                        ds.resize(n_existing + n_new, axis=0)
+                        ds[-n_new:] = array_data
 
     def _validate_dataframe(self, df: pl.DataFrame):
         """Validate required columns in input dataframe"""
@@ -187,9 +296,9 @@ class TransferLearningDataPreparator:
         x_rt = np.empty((n,), dtype=np.float32)
 
         # Set metadata
-        x_meta[:, 1] = self.config.nce
-        x_meta[:, 2] = self.config.frag_method
-        x_meta[:, 3] = self.config.mass_analyzer
+        x_meta[:, 1] = self.nce
+        x_meta[:, 2] = self.frag_method
+        x_meta[:, 3] = self.mass_analyzer
 
         # Process each PMSM
         prev_frame_num = -1
@@ -217,7 +326,7 @@ class TransferLearningDataPreparator:
 
             mz_arr = get_mz_arr(prefix_mass_arr, self.ion_type_container)
             x_intensity[i] = get_intensity_arr(
-                mz_arr, peak_arr.mz, peak_arr.ab, self.config.tolerance_in_ppm
+                mz_arr, peak_arr.mz, peak_arr.ab, self.tolerance_in_ppm
             )
             x_rt[i] = rt_in_seconds
 
@@ -264,3 +373,4 @@ class TransferLearningDataPreparator:
                 stats["nce_distribution"][float(nce)] += 1
 
         return stats
+

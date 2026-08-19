@@ -26,6 +26,7 @@ dependencies = [
   "isal",
   "h5py",
   "pytest",
+  "pybase64",
 ]
 
 [project.urls]

@@ -69,16 +69,28 @@ def encode_batch_sequences(batch_sequences: List[str]) -> np.ndarray:
 
 @nb.njit(nogil=True, cache=True, fastmath=True)
 def parse_mod_string(s):
+    """Parse a MOD_SEPARATOR-joined string of (possibly negative) integers.
+
+    Modification sites use ``-1`` to mark the C-terminal residue (see
+    ``ModificationHandler.generate_variable_mods``/``generate_static_mods``),
+    so ``-`` must be treated as a sign marker rather than a digit; otherwise
+    ``ord('-') - ord('0')`` silently produces a bogus value that later gets
+    used as an out-of-bounds array index.
+    """
     result = []
     current = 0
+    sign = 1
     for i in range(len(s)):
         c = s[i]
         if c == MOD_SEPARATOR:
-            result.append(current)
+            result.append(current * sign)
             current = 0
+            sign = 1
+        elif c == "-":
+            sign = -1
         else:
             current = current * 10 + (ord(c) - ord("0"))
-    result.append(current)
+    result.append(current * sign)
     return np.array(result, dtype=np.int32)
 
 

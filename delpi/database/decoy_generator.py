@@ -1,18 +1,112 @@
 import random
+from functools import partial
+from typing import Callable, Optional, Sequence
 
 import polars as pl
 
 MUTATION_MAP = dict(zip("GAVLIFMPWSCTYHKRQEND", "LLLVVLLLLTSSSSLLNDQE"))
 
 
-def get_mutated_decoy(peptide):
-    return (
-        peptide[:2]
-        + MUTATION_MAP[peptide[2]]
-        + peptide[3:-3]
-        + MUTATION_MAP[peptide[-3]]
-        + peptide[-2:]
+def _default_varmod_signature(aa: str) -> tuple:
+    """Trivial signature used when no variable modifications are active:
+    every residue compares equal, so every position is considered safe."""
+    return ()
+
+
+def build_varmod_signature_fn(
+    mod_param_set: Optional[Sequence],
+) -> Callable[[str], tuple]:
+    """Build a function mapping a residue character to an eligibility tuple
+    over the active (non-fixed) residue-specific variable modifications.
+
+    Residues are grouped by modification name so that e.g. Phospho(S)/(T)/(Y)
+    collapse into a single "is this residue phospho-eligible" flag rather
+    than three independent ones (matching the ``generate_variable_modifications``
+    residue-matching logic in :class:`~delpi.database.modification_handler.ModificationHandler`).
+    Two residues are considered "safe" to swap for decoy mutation when they
+    share the same signature tuple. Fixed modifications are ignored.
+    """
+    mod_name_to_residues: dict = {}
+    for p in mod_param_set or []:
+        if p.fixed:
+            continue
+        mod_name_to_residues.setdefault(p.mod_name, set()).add(p.residue)
+
+    if not mod_name_to_residues:
+        return _default_varmod_signature
+
+    mod_names = sorted(mod_name_to_residues)
+
+    def signature(aa: str) -> tuple:
+        return tuple(aa in mod_name_to_residues[name] for name in mod_names)
+
+    return signature
+
+
+def _find_safe_mutation_position(
+    peptide: str,
+    candidates: Sequence[int],
+    varmod_signature: Callable[[str], tuple],
+    exclude: Optional[int] = None,
+) -> Optional[int]:
+    """Try ``candidates`` (0-based indices; negative values count from the
+    end, as in Python slicing) in priority order and return the first
+    internal position (never the first or last residue, and never
+    ``exclude``) whose ``MUTATION_MAP`` mutation preserves the residue's
+    variable-modification eligibility. Returns ``None`` if none qualifies."""
+    length = len(peptide)
+    for pos in candidates:
+        if pos < 0:
+            pos += length
+        if pos <= 0 or pos >= length - 1 or pos == exclude:
+            continue
+        aa = peptide[pos]
+        if varmod_signature(aa) == varmod_signature(MUTATION_MAP[aa]):
+            return pos
+    return None
+
+
+def get_mutated_decoy(
+    peptide: str, varmod_signature: Callable[[str], tuple] = None
+) -> str:
+    """Mutate two internal residues of ``peptide`` to generate a decoy,
+    preserving the first residue and the last two residues.
+
+    Each terminal side tries a fixed, prioritized list of positions and
+    mutates the first one whose ``MUTATION_MAP`` substitution preserves the
+    residue's eligibility for any active variable modification (see
+    :func:`build_varmod_signature_fn`):
+
+    - N-terminal side: index 2, then 3, then 4, then 1.
+    - C-terminal side: index ``len - 3``, then ``len - 4``, then ``len - 5``.
+
+    If none of a side's candidates are safe (or valid), that side falls back
+    to its original default position (2 for N-term, ``len(peptide) - 3`` for
+    C-term) and mutates it unconditionally, so the decoy always differs from
+    the target. The C-terminal search skips any position already claimed by
+    the N-terminal side.
+    """
+    if varmod_signature is None:
+        varmod_signature = _default_varmod_signature
+
+    n_default = 2
+    c_default = len(peptide) - 3
+
+    n_pos = _find_safe_mutation_position(peptide, (2, 3, 4, 1), varmod_signature)
+    if n_pos is None:
+        n_pos = n_default
+
+    c_pos = _find_safe_mutation_position(
+        peptide, (-3, -4, -5), varmod_signature, exclude=n_pos
     )
+    if c_pos is None:
+        c_pos = c_default
+
+    chars = list(peptide)
+    chars[n_pos] = MUTATION_MAP[peptide[n_pos]]
+    chars[c_pos] = MUTATION_MAP[peptide[c_pos]]
+
+    return "".join(chars)
 
 
 def get_shuffled_decoy(peptide):
@@ -23,9 +117,19 @@ def get_shuffled_decoy(peptide):
 
 class DecoyGenerator:
 
-    supported_methods = ["pseudo_reverse", "mutation", "pseudo_shuffle", "diann"]
+    supported_methods = [
+        "pseudo_reverse",
+        "mutation",
+        "pseudo_shuffle",
+        "diann",
+    ]
 
-    def __init__(self, method: str = None, random_seed: int = 323):
+    def __init__(
+        self,
+        method: str = None,
+        random_seed: int = 323,
+        mod_param_set: Optional[Sequence] = None,
+    ):
 
         if method is not None and method not in self.supported_methods:
             raise ValueError(
@@ -33,14 +137,14 @@ class DecoyGenerator:
                 f"Supported methods: {self.supported_methods}"
             )
         self.method = method
+        self.mod_param_set = mod_param_set
+        self._varmod_signature = build_varmod_signature_fn(mod_param_set)
         self.random_seed = random_seed
 
-    def generate_decoys(self, peptide_df) -> pl.DataFrame:
+    def generate_decoys(self, target_df) -> pl.DataFrame:
 
         if self.method is None:
             return None
-
-        target_df = peptide_df.select(pl.exclude("peptide_index"))
 
         if self.method == "pseudo_reverse":
             get_decoy = (
@@ -50,13 +154,17 @@ class DecoyGenerator:
                 .str.reverse()
                 + pl.col("peptide").str.slice(pl.col("sequence_length"), 2)
             ).alias("peptide")
+            decoy_df = target_df.with_columns(get_decoy)
 
-        elif self.method in ["diann", "mutation"]:
+        elif self.method in ("diann", "mutation"):
             get_decoy = (
                 pl.col("peptide").map_elements(
-                    get_mutated_decoy, return_dtype=pl.String
+                    partial(get_mutated_decoy, varmod_signature=self._varmod_signature),
+                    return_dtype=pl.String,
                 )
             ).alias("peptide")
+            decoy_df = target_df.with_columns(get_decoy)
+
         elif self.method == "pseudo_shuffle":
             random.seed(self.random_seed)
             get_decoy = (
@@ -64,12 +172,12 @@ class DecoyGenerator:
                     get_shuffled_decoy, return_dtype=pl.String
                 )
             ).alias("peptide")
+            decoy_df = target_df.with_columns(get_decoy)
+
         else:
             raise NotImplementedError(
                 f"Decoy generation method {self.method} is not implemented"
             )
-
-        decoy_df = target_df.with_columns(get_decoy)
 
         return decoy_df
 
@@ -116,7 +224,9 @@ class DecoyGenerator:
         target_peptide_df,
     ) -> pl.DataFrame:
 
-        decoy_peptide_df = self.generate_decoys(target_peptide_df)
+        decoy_peptide_df = self.generate_decoys(
+            target_peptide_df.with_row_index("target_peptide_index")
+        )
         if decoy_peptide_df is None:
             return target_peptide_df.with_columns(is_decoy=False)
 
@@ -127,18 +237,23 @@ class DecoyGenerator:
             .agg(
                 pl.col("protein_index").unique().sort(),
                 pl.col("sequence_length").first(),
+                pl.col("target_peptide_index"),
             )
         )
-
         # remove decoys that are identical to any target peptide
         decoy_peptide_df = decoy_peptide_df.join(
             target_peptide_df.select(pl.col("peptide")), on="peptide", how="anti"
         )
 
-        return pl.concat(
-            (
-                target_peptide_df.with_columns(is_decoy=False),
-                decoy_peptide_df.with_columns(is_decoy=True),
-            ),
-            how="vertical",
-        )
+        # Determine output column order: original target columns then new ones.
+        out_cols = list(target_peptide_df.columns) + [
+            "is_decoy",
+            "target_peptide_index",
+        ]
+
+        target_out = target_peptide_df.with_columns(
+            is_decoy=False, target_peptide_index=pl.lit(None, dtype=pl.List(pl.UInt32))
+        ).select(out_cols)
+        decoy_out = decoy_peptide_df.with_columns(is_decoy=True).select(out_cols)
+
+        return pl.concat((target_out, decoy_out), how="vertical")
