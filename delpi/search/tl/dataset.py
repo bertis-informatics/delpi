@@ -79,16 +79,21 @@ class TransferLearningDataset(HdfDataset):
         size = int(n * fractions)
         subset_idx = rng.choice(n, size=size, replace=False)
 
-        # """Create a subset of the dataset with the given fraction of data"""
-        # assert fractions > 0 and fractions <= 1, "Fraction must be in (0, 1]"
-
-        # new_label_df = self.label_df.sample(
-        #     fraction=fractions, seed=seed, with_replacement=False
-        # )
-
         return self.__class__(
             self.hdf_files,
             labels=self.labels[subset_idx],
+            data_dict=self.data_dict,
+        )
+
+    def make_subset_from_indices(self, indices: np.ndarray):
+        """Build a subset using explicit sample indices.
+
+        This is used by deterministic global-permutation chunk sampling so that
+        all distributed workers consume the same sample pool each epoch.
+        """
+        return self.__class__(
+            self.hdf_files,
+            labels=self.labels[indices],
             data_dict=self.data_dict,
         )
 
