@@ -104,8 +104,40 @@ def select_paired_decoys(
     ``precursor_charge`` and ``var_mod_profile`` (per-variable-modification
     occurrence counts) as the target. Ties are broken deterministically via
     ``random_seed``.
+
+    Databases built before pair-preserving decoy generation lack a
+    ``target_peptide_index`` column on ``peptide_df``; for those, pairing
+    falls back to :func:`_select_paired_decoys_by_nearest_mz`.
     """
     db_dir = Path(db_dir)
+
+    if "target_peptide_index" not in (
+        pl.scan_parquet(db_dir / "peptide_df.parquet").collect_schema()
+    ):
+        paired_df = _select_paired_decoys_by_nearest_mz(
+            db_dir, target_df, random_seed=random_seed
+        )
+    else:
+        paired_df = _select_paired_decoys_by_sequence(
+            db_dir, target_df, random_seed=random_seed
+        )
+
+    n_missing = paired_df["decoy_precursor_index"].null_count()
+    if n_missing:
+        logger.debug(
+            f"Could not find a paired decoy for {n_missing}/{len(paired_df)} "
+            "target precursors; they will be excluded from the refined library."
+        )
+
+    return paired_df
+
+
+def _select_paired_decoys_by_sequence(
+    db_dir: Path,
+    target_df: pl.DataFrame,
+    random_seed: int = 42,
+) -> pl.DataFrame:
+    """Pair via ``peptide_df.target_peptide_index`` (see :func:`select_paired_decoys`)."""
     var_mod_names = get_var_mod_names(db_dir)
 
     def _var_mod_profile_expr() -> pl.Expr:
@@ -189,7 +221,7 @@ def select_paired_decoys(
         .collect()
     )
 
-    paired_df = (
+    return (
         paired_df.with_columns(
             pl.int_range(pl.len()).shuffle(seed=random_seed).alias("_random_order")
         )
@@ -198,11 +230,95 @@ def select_paired_decoys(
         .drop("_random_order", "var_mod_profile", "mods")
     )
 
-    n_missing = paired_df["decoy_precursor_index"].null_count()
-    if n_missing:
-        logger.debug(
-            f"Could not find a paired decoy for {n_missing}/{len(paired_df)} "
-            "target precursors; they will be excluded from the refined library."
+
+def _select_paired_decoys_by_nearest_mz(
+    db_dir: Path,
+    target_df: pl.DataFrame,
+    random_seed: int = 42,
+) -> pl.DataFrame:
+    """Pair each target with the nearest-m/z decoy of same length/charge.
+
+    Legacy-database fallback used when ``peptide_df`` has no
+    ``target_peptide_index`` column to pair by sequence lineage: candidates
+    are restricted to the same ``sequence_length`` and ``precursor_charge``
+    only, so every target still gets a (best-effort) decoy count-matched to
+    it. Ties in m/z distance are broken deterministically via
+    ``random_seed``.
+    """
+    peptide_df = pl.read_parquet(db_dir / "peptide_df.parquet").select(
+        pl.col("peptide_index", "is_decoy", "sequence_length")
+    )
+    modification_df = pl.read_parquet(db_dir / "modification_df.parquet").select(
+        pl.col("peptidoform_index", "peptide_index")
+    )
+    precursor_df = pl.read_parquet(db_dir / "precursor_df.parquet").select(
+        pl.col(
+            "precursor_index", "peptidoform_index", "precursor_charge", "precursor_mz"
+        )
+    )
+
+    decoy_candidates = (
+        precursor_df.join(modification_df, on="peptidoform_index", how="left")
+        .join(peptide_df.filter(pl.col("is_decoy")), on="peptide_index", how="inner")
+        .select(
+            pl.col("precursor_index").alias("decoy_precursor_index"),
+            pl.col("precursor_charge"),
+            pl.col("precursor_mz").alias("decoy_precursor_mz"),
+            pl.col("sequence_length"),
+        )
+    )
+
+    target_meta_df = target_df.select(
+        pl.exclude("precursor_mz") if "precursor_mz" in target_df.columns else pl.all()
+    ).join(
+        precursor_df.select(pl.col("precursor_index", "precursor_mz")),
+        on="precursor_index",
+        how="left",
+    )
+
+    rng = np.random.default_rng(random_seed)
+    result_frames = []
+    for (charge, seq_len), group in target_meta_df.group_by(
+        ["precursor_charge", "sequence_length"]
+    ):
+        cand = decoy_candidates.filter(
+            (pl.col("precursor_charge") == charge)
+            & (pl.col("sequence_length") == seq_len)
+        ).sort("decoy_precursor_mz")
+
+        if cand.is_empty():
+            result_frames.append(
+                group.with_columns(
+                    pl.lit(None, dtype=pl.UInt32).alias("decoy_precursor_index")
+                )
+            )
+            continue
+
+        decoy_mz_arr = cand["decoy_precursor_mz"].to_numpy()
+        decoy_idx_arr = cand["decoy_precursor_index"].to_numpy()
+        target_mz_arr = group["precursor_mz"].to_numpy()
+
+        pos = np.searchsorted(decoy_mz_arr, target_mz_arr)
+        pos_left = np.clip(pos - 1, 0, len(decoy_mz_arr) - 1)
+        pos_right = np.clip(pos, 0, len(decoy_mz_arr) - 1)
+        diff_left = np.abs(decoy_mz_arr[pos_left] - target_mz_arr)
+        diff_right = np.abs(decoy_mz_arr[pos_right] - target_mz_arr)
+
+        tie = diff_right == diff_left
+        tie_pick_right = rng.random(len(target_mz_arr)) < 0.5
+        pick_right = np.where(tie, tie_pick_right, diff_right < diff_left)
+        chosen_pos = np.where(pick_right, pos_right, pos_left)
+        chosen_decoy_idx = decoy_idx_arr[chosen_pos]
+
+        result_frames.append(
+            group.with_columns(
+                pl.Series("decoy_precursor_index", chosen_decoy_idx, dtype=pl.UInt32)
+            )
         )
 
-    return paired_df
+    paired_df = pl.concat(result_frames, how="vertical").select(
+        pl.col("precursor_index", "decoy_precursor_index")
+    )
+
+    return target_df.join(paired_df, on="precursor_index", how="left")
+
