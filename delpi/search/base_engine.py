@@ -64,10 +64,10 @@ class BaseSearchEngine(ABC):
         self.state = state
 
     def _load_model(self) -> DelPiModel:
-        acq_method = self.get_acquisition_method()
-        model = DelPiModel.load(MODEL_DIR / f"delpi.{acq_method.lower()}.pth").to(
-            self.device
-        )
+        model_path = MODEL_DIR / f"delpi.unified.pth"
+        if not model_path.exists():
+            raise FileNotFoundError(f"Model file not found: {model_path}")
+        model = DelPiModel.load(model_path).to(self.device)
         model.transform = PeptideMultiSpectraMatchScaler()
         return model
 
