@@ -19,281 +19,349 @@ class LabelFreeQuantifier:
 
     This class coordinates quantification workflow including:
     - Loading search results from multiple HDF5 files
-    - Fragment scoring and selection
     - MS1/MS2 area calculations
     - Cross-run quantification matrix generation
+
+    It only quantifies whatever PmSMs it is given; FDR/q-value filtering is
+    the caller's responsibility (see :meth:`perform_quantification`).
     """
 
     def __init__(
         self,
         result_aggregator: ResultsAggregator,
-        q_value_cutoff: float,
         acq_method: str,
         group_key: str = "second_results",
-        library_q_value_column: str = "global_precursor_q_value",
     ):
         self.result_aggregator = result_aggregator
-        self.q_value_cutoff = q_value_cutoff
         self.group_key = group_key
         self.acq_method = acq_method.upper()
-        # Column used as the "library-level" cutoff for accepting a
-        # precursor-run identification, in addition to the run-specific
-        # ``precursor_q_value``.  For the transfer-learning two-pass (MBR)
-        # search this should be ``library_precursor_q_value`` (first-pass
-        # global q-value carried via ``library_confidence.parquet``); for a
-        # single-pass search it defaults to ``global_precursor_q_value``.
-        self.library_q_value_column = library_q_value_column
 
     def perform_quantification(self, pmsm_df: pl.DataFrame) -> pl.DataFrame:
         """
         Perform complete label-free quantification workflow.
 
+        `pmsm_df` must already be restricted to the PmSMs to quantify (e.g.
+        target-only, FDR-filtered) -- this class only computes quantities and
+        applies no FDR/q-value filtering of its own (that is the caller's
+        responsibility, same as TDAProcessor vs. FDRAnalyzer).
+
         Returns:
-            Quantification matrix (n_precursors x n_runs)
+            A minimal DataFrame keyed by ``(run_index, precursor_index)`` with
+            `ms1_quantity`/`ms2_quantity` (and, for DIA, `ms2_quantity_normalized`
+            plus normalization QC columns) -- the caller is responsible for
+            joining this back onto its own (typically larger) pmsm_df.
         """
         logger.debug("Starting label-free quantification")
 
         if self.acq_method == "DIA":
             quant_df = self._quantify_dia(pmsm_df)
-            # quant_df = self._normalize_ms2_area(quant_df)
+            quant_df = self._normalize_ms2_quantity(quant_df)
         elif self.acq_method == "DDA":
-            quant_df = self._quantify_dda()
+            quant_df = self._quantify_dda(pmsm_df)
+            # TODO: RT-dependent normalization for DDA still needs validation
+            # before enabling (abundance estimation -> RT-dependent normalization,
+            # matching the DIA order above).
+            # quant_df = self._normalize_ms2_quantity(quant_df)
         else:
             raise NotImplementedError()
 
         return quant_df
 
-    def _quantify_dda(self) -> pl.DataFrame:
+    def _quantify_dda(self, pmsm_df: pl.DataFrame) -> pl.DataFrame:
+        """Look up each already-assigned PmSM's MS1 area.
 
+        Returns a minimal DataFrame keyed by ``(run_index, precursor_index)``
+        with `ms1_quantity`.
+        """
         logger.debug("Calculating MS1 areas")
         result_aggregator = self.result_aggregator
         group_key = self.group_key
 
         dfs = []
-        for run_index, result_mgr in result_aggregator._results_dict.items():
-            quant_dict = result_mgr.read_dict(
-                group_key,
-                data_keys=["ms1_area"],
+        for run_index, sub_df in pmsm_df.group_by("run_index"):
+            run_index = run_index[0]
+            result_mgr = result_aggregator.get_result_manager(run_index)
+            run_ms1_area = result_mgr.read_dict(group_key, data_keys=["ms1_area"])[
+                "ms1_area"
+            ]
+            dfs.append(
+                sub_df.select("run_index", "precursor_index").with_columns(
+                    pl.Series(
+                        "ms1_quantity",
+                        run_ms1_area[sub_df["pmsm_index"].to_numpy()],
+                        nan_to_null=True,
+                    )
+                )
             )
-            quant_df = (
-                pl.DataFrame(quant_dict, nan_to_null=True)
-                .with_row_index("pmsm_index")
-                .with_columns(pl.lit(run_index).cast(pl.UInt32).alias("run_index"))
-            )
-            dfs.append(quant_df)
 
         return pl.concat(dfs, how="vertical")
 
     def _quantify_dia(self, pmsm_df: pl.DataFrame) -> pl.DataFrame:
-        """Calculate MS2 peak areas using selected fragments."""
+        """Calculate MS1/MS2 peak areas and run cross-run LFQ.
+
+        `pmsm_df` is expected to already contain at most one PmSM per
+        ``(run_index, precursor_index)`` (guaranteed by the per-run PmSM
+        assignment upstream of FDR control) and to already be FDR-filtered
+        by the caller, so no per-precursor re-selection or confidence
+        filtering is needed here.
+
+        Returns a minimal DataFrame keyed by ``(run_index, precursor_index)``
+        with `observed_rt` (needed by `_normalize_ms2_quantity`), `ms1_quantity`
+        and `ms2_quantity`.
+        """
         logger.debug("Calculating MS1 and MS2 areas")
 
         result_aggregator = self.result_aggregator
-        q_value_cutoff = self.q_value_cutoff
-        library_q_value_column = self.library_q_value_column
-
-        target_pmsm_df = (
-            pmsm_df.filter(
-                (pl.col("is_decoy") == False)
-                & (pl.col(library_q_value_column) <= q_value_cutoff)
-                & (pl.col("precursor_q_value") <= q_value_cutoff)
-            )
-            .with_columns(
-                pl.col("score")
-                .max()
-                .over(["precursor_index", "run_index"])
-                .alias("max_precursor_score"),
-            )
-            .filter(
-                # filter out low confidence PmSMs
-                (pl.col("score") / pl.col("max_precursor_score") > 0.3)
-                | (pl.col("max_precursor_score") - pl.col("score") < 1.0)
-            )
-            .sort(pl.col("precursor_index", "run_index"))
-        )
+        sorted_df = pmsm_df.sort("precursor_index", "run_index")
 
         all_xic_arrays, all_ms1_area_arr = result_aggregator.get_xic_arrays(
-            target_pmsm_df, group_key=self.group_key
+            sorted_df, group_key=self.group_key
         )
 
-        ## compute median intensity at apex time point
-        med_intensity = np.median(
-            all_xic_arrays[:, :, all_xic_arrays.shape[-1] // 2], axis=1
-        )
-        target_pmsm_df = target_pmsm_df.with_columns(
-            pl.Series(name="med_intensity", values=med_intensity),
-            pl.col("observed_rt")
-            .over("precursor_index")
-            .median()
-            .alias("median_observed_rt"),
-        ).with_row_index("index_")
-
-        ## select a PmSM for each precursor based on the median intensity
-        selected_pmsm_df = target_pmsm_df.group_by(
-            ["precursor_index", "run_index"], maintain_order=True
-        ).agg(
-            pl.all().sort_by("med_intensity").last(),
-        )
-
-        ## estimate RT deviation median for each precursor
-        rt_diff_df = (
-            selected_pmsm_df.select(
-                pl.col("precursor_index"),
-                (pl.col("observed_rt") - pl.col("median_observed_rt"))
-                .abs()
-                .alias("rt_diff"),
-            )
-            .group_by("precursor_index")
-            .agg(pl.col("rt_diff").median().alias("median_rt_diff"))
-        )
-
-        ## re-select PmSMs considering RT deviation
-        selected_pmsm_df = (
-            target_pmsm_df.join(
-                rt_diff_df,
-                on="precursor_index",
-                how="left",
-            )
-            .with_columns(
-                rt_match=(pl.col("observed_rt") - pl.col("median_observed_rt")).abs()
-                < pl.col("median_rt_diff") * 3
-            )
-            .group_by(["precursor_index", "run_index"], maintain_order=True)
-            .agg(
-                pl.all().sort_by("rt_match", "med_intensity").last(),
-            )
-        )
-
-        ## perform LFQ using selected PmSMs
         idx_df = (
-            selected_pmsm_df.group_by(["precursor_index"], maintain_order=True)
-            .agg(
-                pl.len(),
-            )
+            sorted_df.group_by("precursor_index", maintain_order=True)
+            .agg(pl.len())
             .with_columns(pl.col("len").cum_sum().alias("precursor_stop"))
         )
         stop_index_arr = idx_df["precursor_stop"].to_numpy()
         precursor_index_arr = idx_df["precursor_index"].to_numpy()
-        all_xic_arr = all_xic_arrays[selected_pmsm_df["index_"]]
-        all_ms1_ab_arr = all_ms1_area_arr[selected_pmsm_df["index_"]]
+
         all_ms2_ab_arr = perform_lfq(
             precursor_index_arr,
             stop_index_arr,
-            all_xic_arr,
-            min_fragments=6,
-            max_fragments=9,
+            all_xic_arrays,
+            min_fragments=9,
+            max_fragments=12,
             corr_thresh=0.9,
         )
 
-        quant_df = selected_pmsm_df.select(
-            pl.col("run_index", "precursor_index"),
-            pl.col("observed_rt").alias("quantification_rt"),
-            pl.Series(name="ms1_area", values=all_ms1_ab_arr, nan_to_null=True),
-            pl.Series(name="ms2_area", values=all_ms2_ab_arr, nan_to_null=True),
+        return sorted_df.select(
+            "run_index", "precursor_index", "observed_rt"
+        ).with_columns(
+            pl.Series("ms1_quantity", all_ms1_area_arr, nan_to_null=True),
+            pl.Series("ms2_quantity", all_ms2_ab_arr, nan_to_null=True),
         )
 
-        return quant_df
-
-    def _normalize_ms2_area(
+    def _normalize_ms2_quantity(
         self,
         quant_df: pl.DataFrame,
-        p: float = 0.25,  # housekeeping fraction (0~1)
-        # use_median_ref: bool = True,  # reference = median(sum_hk) else mean
-        eps: float = 1e-9,
-    ) -> tuple[pl.DataFrame, pl.DataFrame]:
+        min_run_fraction: float = 0.5,
+        anchor_fraction: float = 0.4,
+        min_intensity_quantile: float = 0.1,
+        window_size: int = 400,
+        min_periods: int = 200,
+        rt_column: str = "observed_rt",
+    ) -> pl.DataFrame:
+        """RT-dependent cross-run normalization of ``ms2_quantity``.
+
+        Approach (inspired by DIA-NN/DIA-BERT/PIN/NormalyzerDE-style RT-local
+        normalization): pick a set of cross-run "normalization anchors" -
+        precursors whose relative abundance is most consistent across runs
+        after removing a preliminary global shift - then, for every run,
+        estimate a global log2 shift plus a smooth RT-local log2 correction
+        from those anchors and apply both to every precursor.
+
+        Adds ``ms2_quantity_normalized`` (same null pattern as ``ms2_quantity``)
+        plus the QC columns ``normalization_factor``, ``global_log2_shift`` and
+        ``local_log2_shift``. Does not modify ``ms2_quantity`` or any other
+        existing column/row.
         """
-        Return:
-        - quant_df with new columns: ms2_area_norm, run_scaling_factor
-        - hk_summary: precursor CV table (for debugging / inspection)
+        n_runs = quant_df["run_index"].n_unique()
 
-        Housekeeping selection:
-        - compute per-precursor CV across runs using area_col
-        - keep precursors with enough non-null runs
-        - pick lowest-CV top p fraction
-        Scaling:
-        - per run: sum areas over housekeeping precursors -> sum_hk[run]
-        - scaling_factor[run] = sum_hk[run] / reference(sum_hk)
-        - normalized_area = area / scaling_factor
-        """
-
-        num_runs = len(self.result_aggregator._results_dict)
-
-        if num_runs < 2:
+        # Fallback 1: nothing to normalize against with a single run.
+        if n_runs < 2:
             return quant_df.with_columns(
-                pl.col("ms2_area").alias("normalized_ms2_area")
+                pl.col("ms2_quantity").alias("ms2_quantity_normalized")
             )
 
-        min_nonnull_runs = max(2, int(round(num_runs * 0.5)))
+        valid_df = quant_df.filter(
+            pl.col("ms2_quantity").is_not_null() & (pl.col("ms2_quantity") > 0)
+        ).with_columns(pl.col("ms2_quantity").log(2).alias("log_area"))
 
-        # 1) precursor-level stats across runs (nonnull only)
-        prec_stats = (
-            quant_df.filter(pl.col("ms2_area").is_not_null() & (pl.col("ms2_area") > 0))
-            .group_by("precursor_index")
+        if valid_df.height == 0:
+            # Fallback 3: no usable quantities to estimate anything from.
+            return quant_df.with_columns(
+                pl.col("ms2_quantity").alias("ms2_quantity_normalized")
+            )
+
+        # --- precursor median-reference across runs -------------------------
+        # reference_log_area = per-precursor cross-run median log2(ms2_quantity),
+        # only for precursors observed in >= min_run_fraction of all runs.
+        min_runs_required = max(2, int(np.ceil(n_runs * min_run_fraction)))
+        prec_ref_df = (
+            valid_df.group_by("precursor_index")
             .agg(
-                [
-                    pl.col("run_index").n_unique().alias("n_runs_nonnull"),
-                    pl.col("ms2_area").mean().alias("mean_area"),
-                    pl.col("ms2_area").std(ddof=1).alias("std_area"),
-                ]
+                pl.col("log_area").median().alias("reference_log_area"),
+                pl.col("run_index").n_unique().alias("n_runs_nonnull"),
             )
-            .filter(pl.col("n_runs_nonnull") > 1)
+            .filter(pl.col("n_runs_nonnull") >= min_runs_required)
+        )
+
+        if prec_ref_df.height == 0:
+            # Fallback 3: cannot estimate even a reference abundance.
+            return quant_df.with_columns(
+                pl.col("ms2_quantity").alias("ms2_quantity_normalized")
+            )
+
+        dev_df = valid_df.join(
+            prec_ref_df.select("precursor_index", "reference_log_area"),
+            on="precursor_index",
+            how="inner",
+        ).with_columns(
+            (pl.col("log_area") - pl.col("reference_log_area")).alias("deviation")
+        )
+
+        # preliminary global shift per run, used only to locate stable anchors
+        # (not the final normalization - avoids biasing anchor selection by
+        # runs that happen to be globally shifted).
+        prelim_df = dev_df.group_by("run_index").agg(
+            pl.col("deviation").median().alias("preliminary_global_shift")
+        )
+        dev_df = dev_df.join(prelim_df, on="run_index", how="left").with_columns(
+            (pl.col("deviation") - pl.col("preliminary_global_shift")).alias("residual")
+        )
+
+        # --- stable-anchor selection -----------------------------------------
+        # anchors = precursors with the lowest cross-run MAD of `residual`,
+        # among precursors that are not in the weakest min_intensity_quantile.
+        residual_center_df = dev_df.group_by("precursor_index").agg(
+            pl.col("residual").median().alias("residual_center")
+        )
+        mad_df = (
+            dev_df.join(residual_center_df, on="precursor_index", how="left")
             .with_columns(
-                (pl.col("std_area") / (pl.col("mean_area") + eps)).alias("cv"),
+                (pl.col("residual") - pl.col("residual_center")).abs().alias("abs_dev")
             )
-            .filter(pl.col("n_runs_nonnull") >= min_nonnull_runs)
-            .sort("cv")
+            .group_by("precursor_index")
+            .agg(pl.col("abs_dev").median().alias("residual_mad"))
+        )
+        prec_stats_df = prec_ref_df.join(mad_df, on="precursor_index", how="left")
+
+        intensity_cutoff = prec_stats_df["reference_log_area"].quantile(
+            min_intensity_quantile
+        )
+        eligible_df = prec_stats_df.filter(
+            pl.col("reference_log_area") >= intensity_cutoff
         )
 
-        if prec_stats.height == 0:
-            # raise ValueError(
-            #     "No precursors eligible for housekeeping selection. "
-            #     "Try lowering min_nonnull_runs or check ms2_area null/zero distribution."
-            # )
-            return quant_df
+        if eligible_df.height == 0:
+            # Fallback 3: nothing survives the weak-precursor filter.
+            return quant_df.with_columns(
+                pl.col("ms2_quantity").alias("ms2_quantity_normalized")
+            )
 
-        # 2) pick housekeeping precursors = lowest CV top p fraction
-        k = max(1, int(round(prec_stats.height * p)))
-        hk_precursors = prec_stats.head(k).select("precursor_index")
-
-        # 3) compute run-wise sum over housekeeping precursors
-        run_scale_df = (
-            quant_df.join(hk_precursors, on="precursor_index", how="inner")
-            .filter(pl.col("ms2_area").is_not_null() & (pl.col("ms2_area") > 0))
-            .group_by("run_index")
-            .agg(pl.col("ms2_area").sum().alias("sum_hk"))
-            .sort("run_index")
+        n_anchors = max(1, int(round(eligible_df.height * anchor_fraction)))
+        anchor_precursors = (
+            eligible_df.sort("residual_mad").head(n_anchors).select("precursor_index")
+        )
+        anchor_dev_df = dev_df.join(
+            anchor_precursors, on="precursor_index", how="inner"
         )
 
-        if run_scale_df.height == 0:
-            run_scale_df = (
-                quant_df.filter(
-                    pl.col("ms2_area").is_not_null() & (pl.col("ms2_area") > 0)
+        # --- run-global median-ratio normalization (anchors only) -----------
+        global_shift_df = anchor_dev_df.group_by("run_index").agg(
+            pl.col("deviation").median().alias("global_log2_shift")
+        )
+
+        logger.debug(
+            "RT normalization: %d eligible precursors, %d anchors (of %d)",
+            eligible_df.height,
+            anchor_precursors.height,
+            prec_stats_df.height,
+        )
+
+        # Fallback 2: too few anchors to ever support an RT curve in any run
+        # -> global median-ratio normalization only (local_log2_shift = 0).
+        if anchor_precursors.height < min_periods:
+            result_df = quant_df.join(
+                global_shift_df, on="run_index", how="left"
+            ).with_columns(
+                pl.col("global_log2_shift").fill_null(0.0),
+                pl.lit(0.0).alias("local_log2_shift"),
+            )
+        else:
+            # --- RT-local bias: centered rolling median of anchor residuals --
+            anchor_dev_df = anchor_dev_df.join(
+                global_shift_df, on="run_index", how="left"
+            ).with_columns(
+                (pl.col("deviation") - pl.col("global_log2_shift")).alias(
+                    "local_residual"
                 )
-                .group_by("run_index")
-                .agg(pl.col("ms2_area").sum().alias("sum"))
-                .sort("run_index")
             )
 
-        # scaling_factor
-        run_scale_df = run_scale_df.with_columns(
-            (pl.col("sum_hk") / (pl.col("sum_hk").median() + eps)).alias(
-                "run_scaling_factor"
-            )
-        )
+            local_shift_frames = []
+            for run_index in quant_df["run_index"].unique().sort().to_list():
+                run_anchor_df = anchor_dev_df.filter(
+                    pl.col("run_index") == run_index
+                ).sort(rt_column)
+                run_quant_df = quant_df.filter(pl.col("run_index") == run_index)
+                run_rt_arr = run_quant_df[rt_column].to_numpy()
 
-        # 4) apply normalization
-        quant_df = (
-            quant_df.join(
-                run_scale_df.select(["run_index", "run_scaling_factor"]),
-                on="run_index",
-                how="left",
-            )
-            .with_columns(
-                (pl.col("ms2_area") / (pl.col("run_scaling_factor") + eps)).alias(
-                    f"normalized_ms2_area"
+                if run_anchor_df.height < min_periods:
+                    # too few anchors observed in this particular run
+                    local_shift_arr = np.zeros(run_quant_df.height, dtype=np.float64)
+                else:
+                    win = min(window_size, run_anchor_df.height)
+                    n_min = min(min_periods, run_anchor_df.height)
+                    rolling_df = run_anchor_df.select(
+                        rt_column,
+                        pl.col("local_residual")
+                        .rolling_median(window_size=win, min_samples=n_min, center=True)
+                        .alias("rolling_shift"),
+                    ).drop_nulls("rolling_shift")
+
+                    # collapse duplicate RTs, then linearly interpolate onto
+                    # every precursor's RT (edges clamp to nearest anchor value)
+                    curve_df = (
+                        rolling_df.group_by(rt_column)
+                        .agg(pl.col("rolling_shift").median())
+                        .sort(rt_column)
+                    )
+                    if curve_df.height == 0:
+                        local_shift_arr = np.zeros(
+                            run_quant_df.height, dtype=np.float64
+                        )
+                    else:
+                        curve_rt = curve_df[rt_column].to_numpy()
+                        curve_shift = curve_df["rolling_shift"].to_numpy()
+                        # center the local curve so it carries no global-level shift
+                        curve_shift = curve_shift - np.median(curve_shift)
+                        local_shift_arr = np.interp(run_rt_arr, curve_rt, curve_shift)
+
+                logger.debug(
+                    "RT normalization run %s: %d anchors, "
+                    "local_log2_shift median=%.4f min=%.4f max=%.4f",
+                    run_index,
+                    run_anchor_df.height,
+                    float(np.median(local_shift_arr)),
+                    float(np.min(local_shift_arr)),
+                    float(np.max(local_shift_arr)),
+                )
+                local_shift_frames.append(
+                    run_quant_df.select("run_index", "precursor_index").with_columns(
+                        pl.Series("local_log2_shift", local_shift_arr)
+                    )
+                )
+
+            local_shift_df = pl.concat(local_shift_frames)
+            result_df = (
+                quant_df.join(global_shift_df, on="run_index", how="left")
+                .join(local_shift_df, on=["run_index", "precursor_index"], how="left")
+                .with_columns(
+                    pl.col("global_log2_shift").fill_null(0.0),
+                    pl.col("local_log2_shift").fill_null(0.0),
                 )
             )
-            .drop("run_scaling_factor")
+
+        result_df = result_df.with_columns(
+            (
+                2.0 ** (-(pl.col("global_log2_shift") + pl.col("local_log2_shift")))
+            ).alias("normalization_factor")
+        ).with_columns(
+            pl.when(pl.col("ms2_quantity").is_not_null())
+            .then(pl.col("ms2_quantity") * pl.col("normalization_factor"))
+            .otherwise(None)
+            .alias("ms2_quantity_normalized")
         )
 
-        return quant_df
+        return result_df

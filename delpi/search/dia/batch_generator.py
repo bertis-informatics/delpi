@@ -17,7 +17,7 @@ from delpi.search.dia.peak_token import (
     THEO_TOKEN_DIM,
     MAX_EXP_PEAK_TOKENS,
 )
-from delpi.constants import QUANT_FRAGMENTS, RT_WINDOW_LEN, RT_WINDOW_RADIUS
+from delpi.constants import RT_WINDOW_RADIUS
 
 
 def count_total_batches(peak_counts_arr: np.ndarray, batch_size: int = 512) -> int:
@@ -62,7 +62,7 @@ def _make_batch_in_parallel(
     X_theo: np.ndarray,
     X_exp: np.ndarray,
     X_indices: np.ndarray,
-    X_quant: np.ndarray,
+    X_rank: np.ndarray,
     ms1_mass_tol: float,
     ms2_mass_tol: float,
     ms1_scale_arr: np.ndarray,
@@ -73,7 +73,7 @@ def _make_batch_in_parallel(
 
     cur_batch_size = batch_indices.shape[0]
     X_indices[:] = -1
-    X_quant[:] = 0.0
+    X_rank[:] = -1
     ms1_scale_arr[:] = -1.0
 
     # for i, k in enumerate(batch_indices):
@@ -97,7 +97,7 @@ def _make_batch_in_parallel(
             ms2_mass_tol=ms2_mass_tol,
             x_exp=X_exp[i],
             x_ind=X_indices[i],
-            x_quant=X_quant[i],
+            x_rank=X_rank[i],
         )
         X_precursor_index[i] = precursor_index0 + min_precursor_index
         ms1_scale_arr[i] = ms1_scale
@@ -115,9 +115,7 @@ def _allocate_dia_buffer(batch_size: int, num_theoretical_peaks: int):
         "X_precursor_index": np.empty(batch_size, dtype=np.uint32),
         "ms1_scale_arr": np.empty(batch_size, dtype=np.float32),
         "X_indices": np.empty((batch_size, 128), dtype=np.int32),
-        "X_quant": np.empty(
-            (batch_size, QUANT_FRAGMENTS, RT_WINDOW_LEN), dtype=np.float32
-        ),
+        "X_rank": np.empty((batch_size, MAX_EXP_PEAK_TOKENS), dtype=np.int8),
     }
 
 
@@ -161,7 +159,7 @@ def generate_batches(
             buf["X_theo"],
             buf["X_exp"],
             buf["X_indices"],
-            buf["X_quant"],
+            buf["X_rank"],
             ms1_mass_tol,
             ms2_mass_tol,
             buf["ms1_scale_arr"],
@@ -173,6 +171,6 @@ def generate_batches(
             buf["X_theo"][:cur_batch_size, :, :],
             buf["X_exp"][:cur_batch_size, :num_peaks, :],
             buf["X_indices"][:cur_batch_size, :],
-            buf["X_quant"][:cur_batch_size, :, :],
+            buf["X_rank"][:cur_batch_size, :num_peaks],
             buf["ms1_scale_arr"][:cur_batch_size],
         )

@@ -20,7 +20,6 @@ from delpi.model.classifier import DelPiModel
 from delpi.search.config import SearchConfig
 from delpi.search.result_manager import ResultManager
 from delpi.database.peptide_database import PeptideDatabase
-from delpi.search.tda.tda_processor import TDAProcessor
 from delpi.model.pmsm_scale import PeptideMultiSpectraMatchScaler
 from delpi.model.rt_calibrator import RetentionTimeCalibrator
 from delpi.search.tl.data_prep import TransferLearningDataPreparator
@@ -30,7 +29,6 @@ from delpi.search.progress.tqdm_tracker import TqdmProgressTracker
 from delpi.search.progress.callback_tracker import CallbackProgressTracker
 from delpi.utils.fdr import calculate_q_value
 from delpi.utils.log_config import configure_logging
-from delpi.constants import DEFAULT_Q_VALUE_CUTOFF
 from delpi import MODEL_DIR
 
 logger = logging.getLogger(__name__)
@@ -282,40 +280,6 @@ class BaseSearchEngine(ABC):
         finally:
             if progress_queue is not None:
                 progress_queue.put(None)  # sentinel — tells parent we're done
-
-    def perform_tda(self, result_manager: ResultManager) -> pl.DataFrame:
-        """Run-specific TDA using TensorDataset for fast training/inference."""
-        logger.info("Target-decoy analysis started")
-
-        q_value_cutoff = self.search_config.config.get(
-            "q_value_cutoff", DEFAULT_Q_VALUE_CUTOFF
-        )
-        use_protein_picker = self.search_config.config.get("use_protein_picker", True)
-        grouping_type = self.search_config.config.get(
-            "grouping_type", "parsimonious_grouping"
-        )
-        group_key = self.get_results_group_key()
-        search_batch_size = self.search_config.config.get("batch_size", 512)
-        processor = TDAProcessor(
-            db_dir=self.get_db_dir(),
-            output_dir=self.search_config.output_dir,
-            device=self.device,
-            q_value_cutoff=q_value_cutoff,
-            use_protein_picker=use_protein_picker,
-            grouping_type=grouping_type,
-            batch_size=search_batch_size * 4,
-        )
-        pmsm_df = processor.run_single(result_manager, group_key)
-
-        counts = ResultManager.compute_id_statistics(pmsm_df, q_value_cutoff)
-        logger.info(
-            "FDR estimated: "
-            f"#Precursors: {counts['precursors']}, "
-            f"#Peptides: {counts['peptides']}, "
-            f"#Protein Groups: {counts['protein_groups']} "
-            f"at {q_value_cutoff:.2f} FDR"
-        )
-        return pmsm_df.filter(pl.col("precursor_q_value") <= q_value_cutoff)
 
     def _perform_rt_calibration(
         self, run: Union[DIARun, DDARun], before_full_search: bool

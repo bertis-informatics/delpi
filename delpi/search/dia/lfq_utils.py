@@ -9,9 +9,79 @@ from delpi.search.dia.peak_token import (
     EXP_TIME_INDEX_IDX,
     EXP_AB_IDX,
 )
-from delpi.constants import RT_WINDOW_LEN, MAX_FRAGMENTS
+from delpi.constants import RT_WINDOW_LEN, RT_WINDOW_RADIUS, MAX_FRAGMENTS, QUANT_FRAGMENTS
 
 MAX_THEO_INDEX = MAX_FRAGMENTS - 1
+
+
+@nb.njit(parallel=True, cache=True)
+def get_pmsm_median_intensity(x_exp: np.ndarray, neighbor_window: int = 0) -> np.ndarray:
+    """Median intensity of matched, center-window, monoisotopic fragment ion
+    peaks, computed directly from ``x_exp``'s peak annotations -- no separate
+    XIC array needed. Shared by DIA and DDA, since both build ``x_exp`` with
+    the same ``EXP_TIME_INDEX_IDX`` convention (center == ``RT_WINDOW_RADIUS``).
+    """
+    N, M = x_exp.shape[:2]
+    out = np.empty(N, dtype=np.float32)
+
+    for n in nb.prange(N):
+        x_arr = x_exp[n]
+        values = np.empty(M, dtype=np.float32)
+        k = 0
+        for j in range(M):
+            if (
+                x_arr[j, EXP_IS_PRECURSOR_IDX] == 0
+                and x_arr[j, EXP_MS_LEVEL_IDX] == 2
+                and x_arr[j, EXP_ISOTOPE_INDEX_IDX] == 0
+            ):
+                t = nb.int8(x_arr[j, EXP_TIME_INDEX_IDX])
+                if abs(t - RT_WINDOW_RADIUS) <= neighbor_window:
+                    values[k] = x_arr[j, EXP_AB_IDX]
+                    k += 1
+
+        if k == 0:
+            out[n] = np.nan
+            continue
+
+        vals = np.sort(values[:k])
+        mid = k // 2
+        if k % 2 == 1:
+            out[n] = vals[mid]
+        else:
+            out[n] = (vals[mid - 1] + vals[mid]) * 0.5
+
+    return out
+
+
+@nb.njit(parallel=True, cache=True)
+def get_xic_array(x_exp: np.ndarray, x_rank: np.ndarray) -> np.ndarray:
+    """Build a ``(QUANT_FRAGMENTS, RT_WINDOW_LEN)`` max-held fragment-intensity
+    array per PmSM directly from ``x_exp``, channel-indexed by ``x_rank``
+    (each matched fragment peak's theoretical-intensity rank, as set by
+    `delpi.search.dia.peak_token._set_x_exp` -- 0 == the library's most
+    intense predicted fragment for this precursor; -1 == not ranked).
+
+    Rank, not peak position, is required downstream: cross-run MaxLFQ
+    (`perform_lfq`) selects fragment channels once per precursor group and
+    reuses the same channel indices for every run's row, so the same
+    theoretical fragment must always land in the same channel.
+    """
+    N, M = x_exp.shape[:2]
+    xic = np.zeros((N, QUANT_FRAGMENTS, RT_WINDOW_LEN), dtype=np.float32)
+
+    for n in nb.prange(N):
+        x_arr = x_exp[n]
+        rank_arr = x_rank[n]
+        for j in range(M):
+            channel = rank_arr[j]
+            if 0 <= channel < QUANT_FRAGMENTS and x_arr[j, EXP_ISOTOPE_INDEX_IDX] == 0:
+                t = nb.int8(x_arr[j, EXP_TIME_INDEX_IDX])
+                if 0 <= t < RT_WINDOW_LEN:
+                    ab = x_arr[j, EXP_AB_IDX]
+                    if xic[n, channel, t] < ab:
+                        xic[n, channel, t] = ab
+
+    return xic
 
 
 @nb.njit(parallel=True, cache=True)

@@ -6,8 +6,7 @@ from delpi.database.numba.spec_lib_container import TheoreticalPeakContainer
 from delpi.model.input import TheoPeakInput, ExpPeakInput
 from delpi.search.dia.peak_group import PeakIndexContainer
 from delpi.utils.peak import find_peak_index
-from delpi.constants import QUANT_FRAGMENTS, RT_WINDOW_LEN, RT_WINDOW_RADIUS
-
+from delpi.constants import RT_WINDOW_RADIUS
 
 MAX_EXP_PEAK_TOKENS = 512
 
@@ -89,7 +88,7 @@ def _set_x_exp(
     x_exp: np.ndarray,
     counter: int,
     x_ind: np.ndarray = None,
-    x_quant: np.ndarray = None,
+    x_rank: np.ndarray = None,
 ):
     if is_precursor:
         mz_arr = theo_peaks.precursor_mz_arr
@@ -142,18 +141,11 @@ def _set_x_exp(
                 x_exp[counter, EXP_REV_CLEAVAGE_INDEX_IDX] = theo_rev_cleavage_index
                 x_exp[counter, EXP_TIME_INDEX_IDX] = time_index
 
-                ##  xic_arr for quantification
-                if (
-                    (x_quant is not None)
-                    and (is_precursor == False)
-                    and (theo_isotope_index == 0)
-                ):
-                    theo_rank = num_fragments - theo_i - 1
-                    if (
-                        theo_rank < QUANT_FRAGMENTS
-                        and x_quant[theo_rank, time_index] < ab
-                    ):
-                        x_quant[theo_rank, time_index] = ab
+                # theoretical-intensity rank of this fragment (0 = library's most
+                # intense predicted fragment for this precursor), for any
+                # isotope; get_xic_array filters to monoisotopic via x_exp itself
+                if (x_rank is not None) and (is_precursor == False):
+                    x_rank[counter] = num_fragments - theo_i - 1
 
                 # save matched peak indices at the RT center
                 if (
@@ -187,7 +179,7 @@ def get_x_exp(
     ms2_mass_tol: float = 10,
     x_exp: np.ndarray = None,
     x_ind: np.ndarray = None,
-    x_quant: np.ndarray = None,
+    x_rank: np.ndarray = None,
 ):
     # precursor_index0 = precursor_index - frag_db.min_precursor_index
     frame_index = frame_num_map.frame_num_to_index_arr[frame_num]
@@ -264,7 +256,7 @@ def get_x_exp(
         x_exp=x_exp,
         counter=counter,
         x_ind=x_ind,
-        x_quant=x_quant,
+        x_rank=x_rank,
     )
 
     return x_exp[:counter], ms1_scale

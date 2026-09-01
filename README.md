@@ -238,8 +238,9 @@ DelPi generates the following output files:
 | *precursor_q_value* | Run-specific precursor-level q-value |
 | *peptide_q_value* | Run-specific peptide-level q-value |
 | *protein_group_q_value* | Run-specific protein group-level q-value |
-| *ms1_area* | Integrated area under the precursor ion chromatogram in MS1 spectra |
-| *ms2_area* | *(DIA only, optional)* Precursor abundance quantified from fragment-level signals |
+| *ms1_quantity* | Integrated area under the precursor ion chromatogram in MS1 spectra |
+| *ms2_quantity* | *(DIA only, optional)* Precursor abundance quantified from fragment-level signals, before run/RT-dependent normalization |
+| *ms2_quantity_normalized* | *(DIA only, optional)* `ms2_quantity` after run/RT-dependent normalization across runs; used as the input to MaxLFQ protein-group quantification |
 
 </details>
 
@@ -252,7 +253,7 @@ DelPi generates the following output files:
 |-----------|-------------|
 | *run_name* | Name of the LC–MS run |
 | *protein_group* | Protein group inferred according to the parsimony principle (FASTA IDs separated by semicolons) |
-| *abundance* | Protein abundance calculated using the MaxLFQ algorithm (Cox et al., 2014) |
+| *maxlfq_abundance* | Protein abundance calculated using the MaxLFQ algorithm (Cox et al., 2014) from normalized precursor quantities (`ms2_quantity_normalized`) |
 
 </details>
 

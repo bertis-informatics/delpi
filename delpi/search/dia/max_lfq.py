@@ -198,7 +198,7 @@ def maxlfq_legacy(
     result_schema = {
         protein_col: protein_dtype,
         run_col: run_dtype,
-        "abundance": pl.Float32,
+        "maxlfq_abundance": pl.Float32,
     }
 
     if df.height == 0:
@@ -284,7 +284,7 @@ def maxlfq(
     result_schema = {
         protein_col: protein_dtype,
         run_col: run_dtype,
-        "abundance": pl.Float32,
+        "maxlfq_abundance": pl.Float32,
     }
 
     if df.height == 0:
@@ -336,7 +336,7 @@ def maxlfq(
         {
             protein_col: protein_lookup[out_protein_idx],
             run_col: run_lookup[out_run_idx],
-            "abundance": out_abundance,
+            "maxlfq_abundance": out_abundance,
         },
         schema=result_schema,
     )

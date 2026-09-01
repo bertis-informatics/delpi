@@ -27,7 +27,7 @@ from delpi.search.base_engine import BaseSearchEngine
 from delpi.search.dda.peak_group import find_peak_groups
 from delpi.search.dda.batch_generator import count_total_batches, generate_batches
 from delpi.search.clustering import cluster_matches
-from delpi.search.dia.lfq_utils import get_ms1_area_dda
+from delpi.search.dia.lfq_utils import get_ms1_area_dda, get_pmsm_median_intensity
 from delpi.utils.device_ctx import make_inference_contexts
 from delpi.utils.prefetch import Prefetcher, pin_numpy_tuple
 from delpi.constants import ISOLATION_LOWER_TOL, ISOLATION_UPPER_TOL
@@ -175,9 +175,14 @@ class DDASearchEngine(BaseSearchEngine):
                 results["features"].append(x_feature)
                 results["peak_indices"].append(x_ind)
                 results["observed_rt"].append(observed_rt)
+
+                x_exp = x_exp_t.numpy()[mask]
+                ms1_scale_arr = ms1_scale_t.numpy()[mask]
+
+                # cheap scalar per PmSM -- always saved, regardless of save_quant
+                results["median_intensity"].append(get_pmsm_median_intensity(x_exp))
+
                 if save_quant:
-                    x_exp = x_exp_t.numpy()[mask]
-                    ms1_scale_arr = ms1_scale_t.numpy()[mask]
                     results["ms1_area"].append(get_ms1_area_dda(x_exp, ms1_scale_arr))
 
             batch_progress.advance(1)

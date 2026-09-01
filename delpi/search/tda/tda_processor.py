@@ -1,14 +1,16 @@
 """
 Unified Target-Decoy Analysis Processor
 
-Supports both run-specific (single-run) and global (cross-run) TDA pipelines.
-Common logic (split, build dataset, train, score, cluster selection) is shared;
-the two entry points differ only in data loading, cluster grouping, and FDR scope.
+Cross-run (2-fold CV) PmSM scoring. PmSM assignment and FDR control are
+separate concerns handled by the caller -- see
+:func:`~delpi.search.pmsm_assignment.assign_pmsms_across_runs` and
+:class:`~delpi.search.tda.fdr_analyzer.FDRAnalyzer`, both run on the
+DataFrame returned by :meth:`TDAProcessor.run_global`.
 """
 
 import logging
 from pathlib import Path
-from typing import Callable, List, Literal, Tuple
+from typing import Callable, Literal, Tuple
 
 SplitLevel = Literal["pmsm", "precursor", "peptide"]
 GroupingType = Literal["lead_only", "parsimonious_grouping"]
@@ -21,7 +23,6 @@ from torch.utils.data import TensorDataset
 from delpi.database.peptide_database import PeptideDatabase
 from delpi.search.result_aggregator import ResultsAggregator
 from delpi.search.result_manager import ResultManager
-from delpi.search.tda.fdr_analyzer import FDRAnalyzer
 from delpi.search.tda.trainer import TargetDecoyTrainer
 from delpi.constants import (
     DEFAULT_Q_VALUE_CUTOFF,
@@ -69,97 +70,11 @@ class TDAProcessor:
     # Public entry points
     # ==================================================================
 
-    def run_single(
-        self,
-        result_manager: ResultManager,
-        group_key: str,
-        training_params: dict = None,
-    ) -> pl.DataFrame:
-        """Run-specific TDA for a single LC-MS run (2-fold CV).
-
-        Split granularity is controlled by ``self.split_level``.
-        All features fit in memory, so no subsampling is applied.
-
-        Writes ``score`` and ``precursor_q_value`` arrays back into *group_key*
-        inside *result_manager*, aligned to the original HDF pmsm_index order.
-        Entries that did not survive cluster/precursor deduplication are NaN.
-
-        Returns
-        -------
-        pl.DataFrame
-            Best-scoring PmSMs (one per precursor) with ``score`` and
-            ``precursor_q_value`` columns.
-        """
-        pmsm_df, feature_arr = self._load_single_run(
-            result_manager, group_key, self.db_dir
-        )
-
-        num_decoys = pmsm_df["is_decoy"].sum()
-        num_targets = pmsm_df.shape[0] - num_decoys
-        logger.info(
-            f"Training a classifier with {num_targets:,} positive and {num_decoys:,} negative PmSMs"
-        )
-
-        feature_fn = self._make_array_feature_fn(feature_arr)
-
-        fold_a, fold_b = self._split_pmsm_df(pmsm_df, level=self.split_level)
-
-        # Fold A trains → score Fold B
-        ds_a = self._build_tensor_dataset(fold_a, feature_fn)
-        model_a = self._train_model(
-            ds_a,
-            model_version=f"{result_manager.run_name}_f0",
-            training_params=training_params,
-        )
-        scores_b = self._score(fold_b, model_a, feature_fn)
-
-        # Fold B trains → score Fold A
-        ds_b = self._build_tensor_dataset(fold_b, feature_fn)
-        model_b = self._train_model(
-            ds_b,
-            model_version=f"{result_manager.run_name}_f1",
-            training_params=training_params,
-        )
-        scores_a = self._score(fold_a, model_b, feature_fn)
-
-        # Merge scored folds – every PmSM now has a score
-        scored_a = fold_a.with_columns(pl.Series(values=scores_a, name="score"))
-        scored_b = fold_b.with_columns(pl.Series(values=scores_b, name="score"))
-        full_scored_df = pl.concat([scored_a, scored_b], how="vertical")
-
-        # Best per cluster, then best per precursor.
-        # Tie-break on pmsm_index to make selection deterministic when
-        # multiple PmSMs in a group share the same score.
-        pmsm_df = full_scored_df.group_by("cluster").agg(
-            pl.all().sort_by(["score", "pmsm_index"]).last()
-        )
-
-        fdr = FDRAnalyzer(
-            q_value_cutoff=self.q_value_cutoff,
-            db_dir=self.db_dir,
-            use_protein_picker=self.use_protein_picker,
-            grouping_type=self.grouping_type,
-        )
-        pmsm_df = fdr.perform_run_specific_analysis(pmsm_df)
-
-        q_value_arr = np.full(feature_arr.shape[0], np.nan, dtype=np.float32)
-        score_arr = np.full(feature_arr.shape[0], np.nan, dtype=np.float32)
-        score_arr[full_scored_df["pmsm_index"]] = full_scored_df["score"].to_numpy()
-        q_value_arr[pmsm_df["pmsm_index"]] = pmsm_df["precursor_q_value"].to_numpy()
-
-        result_manager.write_dict(
-            group_key, {"score": score_arr, "precursor_q_value": q_value_arr}
-        )
-
-        return pmsm_df
-
     def run_global(
         self,
         result_aggregator: ResultsAggregator,
         group_key: str,
         training_params: dict = None,
-        run_protein_grouping: bool = True,
-        library_confidence_df: pl.DataFrame = None,
         pass_label: str = "global",
     ) -> pl.DataFrame:
         """Cross-run TDA across multiple LC-MS runs (2-fold CV).
@@ -172,21 +87,16 @@ class TDAProcessor:
         sampling (each of size ``ensemble_train_ratio`` × N_fold) with
         different seeds, and averages their logits.
 
-        When ``library_confidence_df`` is provided (second pass of the
-        two-pass MBR search), protein-group membership is reused from the
-        first pass for targets and freshly computed for decoys — see
-        :meth:`FDRAnalyzer.perform_global_analysis`. This takes precedence
-        over ``run_protein_grouping``, which otherwise controls whether
-        protein inference is performed from scratch (first pass) or skipped
-        entirely.
-
         ``pass_label`` (e.g. ``"first"``/``"second"``) is used as the prefix
         for saved model artifacts/logs (``{pass_label}_tda_{fold}``) so that
         first- and second-pass training runs don't collide/overwrite each
         other and are easy to tell apart on disk.
 
-        Returns an annotated PmSM DataFrame with global and run-specific
-        q-values.
+        Returns every scored PmSM (joined with `frame_num`/`predicted_rt`/
+        `observed_rt`/`is_decoy`/etc.) -- **not yet** assigned or
+        FDR-annotated; the caller is expected to run
+        :func:`~delpi.search.pmsm_assignment.assign_pmsms_across_runs` and
+        then :class:`~delpi.search.tda.fdr_analyzer.FDRAnalyzer` on the result.
         """
         pmsm_df = self._load_multi_run(result_aggregator, group_key)
         feature_fn = self._make_aggregator_feature_fn(result_aggregator, group_key)
@@ -215,7 +125,7 @@ class TDAProcessor:
             model_version_prefix=model_version_prefix,
         )
 
-        # Merge scored folds, then select best per (run, cluster)
+        # Merge scored folds
         scored_a = fold_a.with_columns(pl.Series(values=scores_a, name="score")).select(
             "run_index", "pmsm_index", "cluster", "score"
         )
@@ -228,38 +138,14 @@ class TDAProcessor:
         scored_df.write_parquet(self.output_dir / "pmsm_scores.parquet")
         # scored_df = pl.read_parquet(self.output_dir / "pmsm_scores.parquet")
 
-        pmsm_df = scored_df.group_by(["run_index", "cluster"]).agg(
-            pl.all().sort_by(["score", "pmsm_index"]).last()
-        )
-        pmsm_df = pmsm_df.join(
-            full_pmsm_df.select(pl.exclude("cluster")),
-            how="left",
+        # Bring in the rest of each PmSM's columns (frame_num, predicted_rt,
+        # observed_rt, is_decoy, ...) so the returned DataFrame is
+        # self-contained for the assignment/FDR steps that follow.
+        return scored_df.join(
+            full_pmsm_df.select(pl.exclude("cluster", "score")),
             on=["run_index", "pmsm_index"],
-        ).drop("cluster")
-
-        logger.info(
-            f"Selected {pmsm_df.shape[0]} non-redundant PmSMs "
-            f"(one per run/cluster) from {len(scored_df)} scored PmSMs"
+            how="left",
         )
-
-        pmsm_df = self._join_database_columns(pmsm_df, result_aggregator.db_dir)
-
-        fdr = FDRAnalyzer(
-            q_value_cutoff=self.q_value_cutoff,
-            db_dir=self.db_dir,
-            use_protein_picker=self.use_protein_picker,
-            grouping_type=self.grouping_type,
-        )
-        pmsm_df = fdr.perform_global_analysis(
-            pmsm_df,
-            protein_inference=run_protein_grouping,
-            library_confidence_df=library_confidence_df,
-        )
-        pmsm_df = fdr.batch_run_specific_analysis(pmsm_df)
-        pmsm_df = pmsm_df.join(
-            result_aggregator.get_run_df(), on="run_index", how="left"
-        )
-        return pmsm_df
 
     def write_back_scores(
         self,
@@ -332,45 +218,6 @@ class TDAProcessor:
     # ==================================================================
 
     @staticmethod
-    def _load_single_run(
-        result_manager: ResultManager,
-        group_key: str,
-        db_dir: Path,
-    ) -> tuple[pl.DataFrame, np.ndarray]:
-        """Load PmSM data and features for a single run."""
-        results_dict = result_manager.read_dict(
-            group_key,
-            data_keys=[
-                "precursor_index",
-                "frame_num",
-                "cluster",
-                "predicted_rt",
-                "observed_rt",
-                "logit",
-            ],
-        )
-        pmsm_df = pl.DataFrame(results_dict).with_row_index("pmsm_index")
-        pmsm_df = PeptideDatabase.join(
-            db_dir,
-            pmsm_df,
-            precursor_columns=["precursor_charge"],
-            modification_columns=["mod_ids", "mod_sites"],
-            peptide_columns=[
-                "peptide",
-                "sequence_length",
-                "is_decoy",
-                "protein_index",
-            ],
-        )
-
-        # Read embeddings directly into (N, FEATURE_DIM) array; fill RT diff
-        feature_arr = result_manager.load_features(group_key, feature_dim=FEATURE_DIM)
-        feature_arr[:, -1] = (
-            pmsm_df["observed_rt"] - pmsm_df["predicted_rt"]
-        ).to_numpy() / RT_SCALE
-        return pmsm_df, feature_arr
-
-    @staticmethod
     def _load_multi_run(
         result_aggregator: ResultsAggregator,
         group_key: str,
@@ -389,15 +236,6 @@ class TDAProcessor:
     # ==================================================================
     # Feature loading strategies
     # ==================================================================
-
-    @staticmethod
-    def _make_array_feature_fn(all_features: np.ndarray) -> FeatureLoader:
-        """Feature loader that indexes a pre-built (N, FEATURE_DIM) array."""
-
-        def _load(df: pl.DataFrame) -> np.ndarray:
-            return all_features[df["pmsm_index"]]
-
-        return _load
 
     @staticmethod
     def _make_aggregator_feature_fn(
@@ -591,41 +429,6 @@ class TDAProcessor:
                 logits = model(x_all[start:end].to(device))
                 scores[start:end] = logits.flatten().cpu().numpy()
         return scores
-
-    @staticmethod
-    def _select_best(
-        test_df: pl.DataFrame,
-        score_arr: np.ndarray,
-        group_keys: List[str],
-        full_pmsm_df: pl.DataFrame = None,
-    ) -> pl.DataFrame:
-        """Keep the highest-scoring PmSM per group (cluster or run+cluster).
-
-        When *full_pmsm_df* is provided (global mode), the result is joined
-        back to the full DataFrame to recover all columns.
-        """
-        scored = test_df.with_columns(pl.Series(values=score_arr, name="score"))
-
-        if full_pmsm_df is not None:
-            # Global: select minimal columns, join back after grouping
-            scored = scored.select("run_index", "pmsm_index", "cluster", "score")
-
-        pmsm_df = scored.group_by(group_keys).agg(
-            pl.all().sort_by(["score", "pmsm_index"]).last()
-        )
-
-        if full_pmsm_df is not None:
-            pmsm_df = pmsm_df.join(
-                full_pmsm_df.select(pl.exclude("cluster")),
-                how="left",
-                on=["run_index", "pmsm_index"],
-            ).drop("cluster")
-
-        logger.info(
-            f"Selected {pmsm_df.shape[0]} non-redundant PmSMs "
-            f"(one per {'/'.join(group_keys)}) from {len(score_arr)} PmSMs"
-        )
-        return pmsm_df
 
     @staticmethod
     def _join_database_columns(

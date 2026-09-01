@@ -124,6 +124,7 @@ class ResultsAggregator:
             "predicted_rt",
             "observed_rt",
             "logit",
+            "median_intensity",
         ],
     ) -> pl.DataFrame:
 

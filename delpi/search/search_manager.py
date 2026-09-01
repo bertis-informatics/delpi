@@ -34,6 +34,8 @@ from delpi.search.tl.second_pass import (
     select_paired_decoys,
 )
 from delpi.search.tda.tda_processor import TDAProcessor
+from delpi.search.tda.fdr_analyzer import FDRAnalyzer
+from delpi.search.pmsm_assignment import assign_pmsms_across_runs
 from delpi.search.search_state import SearchState
 from delpi.search.progress import CallbackProgressTracker
 from delpi.search.dia.max_lfq import maxlfq
@@ -549,6 +551,62 @@ class SearchManager:
             refined_db_dir / "library_confidence.parquet"
         )
 
+    def _score_pmsms(
+        self,
+        processor: TDAProcessor,
+        result_aggregator: ResultsAggregator,
+        group_key: str,
+        pass_label: str,
+    ) -> pl.DataFrame:
+        """Train the identification classifier (2-fold CV) and score every PmSM."""
+        return processor.run_global(
+            result_aggregator,
+            group_key,
+            training_params={
+                "num_warmup_steps": 5,
+                "max_epochs": 50,
+                "train_split": 0.8,
+                "early_stopping_patience": 5,
+            },
+            pass_label=pass_label,
+        )
+
+    def _assign_pmsms(
+        self,
+        scored_df: pl.DataFrame,
+        processor: TDAProcessor,
+        result_aggregator: ResultsAggregator,
+    ) -> pl.DataFrame:
+        """Select the final per-run PmSM subset (score + median intensity + alignment-group DP)."""
+        intensity_weight = self.search_config.config.get("intensity_weight", 4.0)
+        pmsm_df = assign_pmsms_across_runs(scored_df, intensity_weight=intensity_weight)
+        return processor._join_database_columns(pmsm_df, result_aggregator.db_dir)
+
+    def _apply_fdr(
+        self,
+        pmsm_df: pl.DataFrame,
+        result_aggregator: ResultsAggregator,
+        q_value_cutoff: float,
+        use_protein_picker: bool,
+        grouping_type: str,
+        run_protein_grouping: bool,
+        library_confidence_df: pl.DataFrame,
+    ) -> pl.DataFrame:
+        """Run FDR control -- a separate concern from scoring/assignment (TDAProcessor)."""
+        fdr = FDRAnalyzer(
+            q_value_cutoff=q_value_cutoff,
+            db_dir=self.get_db_dir(),
+            use_protein_picker=use_protein_picker,
+            grouping_type=grouping_type,
+        )
+        pmsm_df = fdr.perform_global_analysis(
+            pmsm_df,
+            protein_inference=run_protein_grouping,
+            library_confidence_df=library_confidence_df,
+        )
+        pmsm_df = fdr.batch_run_specific_analysis(pmsm_df)
+        return pmsm_df.join(result_aggregator.get_run_df(), on="run_index", how="left")
+
     def perform_global_tda(
         self,
         state: SearchState,
@@ -607,18 +665,24 @@ class SearchManager:
             batch_size=search_batch_size * 4,
             split_level="peptide",
         )
-        pmsm_df = processor.run_global(
+
+        # 1) score every PmSM, 2) assign one PmSM per run/precursor, 3) FDR control
+        # -- three separate concerns, each owned by a different class/function.
+        scored_df = self._score_pmsms(
+            processor,
             result_aggregator,
             group_key,
-            training_params={
-                "num_warmup_steps": 5,
-                "max_epochs": 50,
-                "train_split": 0.8,
-                "early_stopping_patience": 5,
-            },
-            run_protein_grouping=run_protein_grouping,
-            library_confidence_df=library_confidence_df,
             pass_label="first" if state < SearchState.SECOND_SEARCH else "second",
+        )
+        pmsm_df = self._assign_pmsms(scored_df, processor, result_aggregator)
+        pmsm_df = self._apply_fdr(
+            pmsm_df,
+            result_aggregator,
+            q_value_cutoff,
+            use_protein_picker,
+            grouping_type,
+            run_protein_grouping,
+            library_confidence_df,
         )
 
         if state == SearchState.FIRST_TDA:
@@ -633,8 +697,7 @@ class SearchManager:
         # q-values instead of this pass's own (diagnostic-only) global
         # q-value, since only library-confirmed precursors are reportable.
         # (protein_group/master_protein and library_*_q_value columns are
-        # already joined onto pmsm_df above, inside run_global ->
-        # FDRAnalyzer.perform_global_analysis.)
+        # already joined onto pmsm_df above, via FDRAnalyzer.perform_global_analysis.)
         self.log_id_statistics_table(
             pmsm_df,
             q_value_cutoff,
@@ -658,32 +721,34 @@ class SearchManager:
             db_dir=self.get_db_dir(), search_config=self.search_config
         )
 
-        lfq = LabelFreeQuantifier(
-            result_aggregator,
-            q_value_cutoff=q_value_cutoff,
-            group_key=self.get_results_group_key(),
-            acq_method=self.search_config.config.get("acquisition_method", "DDA"),
-            library_q_value_column=library_q_value_column,
+        # FDR filtering is this caller's responsibility, not LabelFreeQuantifier's
+        # (it only quantifies whatever it's given): only PmSMs passing both the
+        # run-specific and library-level cutoffs are handed to LFQ.
+        target_pmsm_df = pmsm_df.filter(
+            (pl.col("is_decoy") == False)
+            & (pl.col(library_q_value_column) <= q_value_cutoff)
+            & (pl.col("precursor_q_value") <= q_value_cutoff)
         )
 
-        quant_df = lfq.perform_quantification(pmsm_df)
-        ## [TODO] DIA quantification
-        ## For DDA, MS1 area is estimated for each PmSM
-        ## For DIA, MS1 area is estimated for each precursor (across all PmSMs)
-        if lfq.acq_method == "DIA":
-            pmsm_df = (
-                pmsm_df.select(pl.exclude("ms1_area", "ms2_area"))
-                .group_by(["run_index", "precursor_index"])
-                .agg(pl.all().sort_by("score").last())
-                .join(quant_df, on=["run_index", "precursor_index"], how="left")
-            )
-        else:
-            pmsm_df = (
-                pmsm_df.select(pl.exclude("ms1_area", "ms2_area"))
-                .group_by(["run_index", "precursor_index"])
-                .agg(pl.all().sort_by("score").last())
-                .join(quant_df, on=["run_index", "pmsm_index"], how="left")
-            )
+        lfq = LabelFreeQuantifier(
+            result_aggregator,
+            group_key=self.get_results_group_key(),
+            acq_method=self.search_config.config.get("acquisition_method", "DDA"),
+        )
+
+        # LabelFreeQuantifier returns a minimal DataFrame keyed by
+        # (run_index, precursor_index) with just the new quant columns; only
+        # rows passing the FDR filter above were quantified, so this must be
+        # joined back onto the full pmsm_df (per-run assignment upstream
+        # already guarantees at most one PmSM per (run_index, precursor_index),
+        # so a plain left join is all that's needed -- no re-selection).
+        quant_df = lfq.perform_quantification(target_pmsm_df)
+        value_columns = [
+            c for c in quant_df.columns if c not in ("run_index", "precursor_index")
+        ]
+        pmsm_df = pmsm_df.select(pl.exclude(value_columns)).join(
+            quant_df, on=["run_index", "precursor_index"], how="left"
+        )
 
         ## run MaxLFQ
         if self.search_config.config.get("acquisition_method", "DDA").upper() == "DIA":
@@ -696,13 +761,18 @@ class SearchManager:
             df = (
                 pmsm_df.filter(pl.col("is_decoy") == False)
                 .filter(pl.col(protein_group_q_value_column) <= q_value_cutoff)
-                .filter(pl.col("ms2_area").is_not_null() & (pl.col("ms2_area") > 0))
+                .filter(
+                    pl.col("ms2_quantity_normalized").is_not_null()
+                    & (pl.col("ms2_quantity_normalized") > 0)
+                )
             )
+            # protein-group abundance is computed from run/RT-normalized
+            # precursor quantities, not the raw ms2_quantity.
             pg_quant_df = maxlfq(
                 df,
                 min_peptides_per_protein=1,
                 peptide_col="precursor_index",
-                intensity_col="ms2_area",
+                intensity_col="ms2_quantity_normalized",
             )
             pg_quant_df = pg_quant_df.join(
                 result_aggregator.get_run_df(), on="run_index", how="left"

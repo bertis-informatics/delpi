@@ -56,11 +56,11 @@ def run_search(
     batch_size: Union[str, int] = "auto",
     progress=None,
 ):
-    config_path = r"/data1/benchmark/DIA/2025-SCP/delpi-test/params.yaml"
-    device: str = "cuda:0"
-    log_level: str = "info"
-    batch_size = 512
-    progress = None
+    # config_path = r"/data1/benchmark/DIA/2025-SCP/delpi-test/params.yaml"
+    # device: str = "cuda:0"
+    # log_level: str = "info"
+    # batch_size = 512
+    # progress = None
 
     config_file = Path(config_path)
     if not config_file.exists():
@@ -100,29 +100,27 @@ def run_search(
     if enable_tl:
         # self.save_pmsm_df(first_pmsm_df, filename_stem="pmsm_results.first")
 
-        # Transfer learning: dual-FDR + top-k target selection for
-        # predictor fine-tuning, refined target-decoy library
-        # construction (paired decoys) and library confidence.
-        first_pmsm_df = pl.read_parquet(self.output_dir / "pmsm_results.first.parquet")
+        # first_pmsm_df = pl.read_parquet(self.output_dir / "pmsm_results.first.parquet")
 
-        self.perform_transfer_learning(first_pmsm_df)
+        # rt_predictor, ms2_predictor = self.perform_transfer_learning(first_pmsm_df)
+
+        # self.build_refined_library(first_pmsm_df, rt_predictor, ms2_predictor)
 
         # Second pass: re-search every run against the refined library
-        self.execute_batch()
+        # self.execute_batch()
 
-        library_confidence_df = pl.read_parquet(
-            self.search_config.refined_db_dir / "library_confidence.parquet"
+        # Second pass: global re-scoring against the refined library.
+        # Target protein-group membership + library q-values are reused
+        # from the first pass and decoys are freshly grouped (see
+        # FDRAnalyzer.perform_global_analysis); the resulting global
+        # q-value here is diagnostic only, so results are reported/
+        # filtered using the first-pass-derived library q-value instead.
+        pmsm_df = self.perform_global_tda(
+            SearchState.SECOND_TDA, run_protein_grouping=False
         )
-
-        # Second pass: global re-scoring (diagnostic only) without
-        # protein grouping; reuse first-pass protein grouping via
-        # library_confidence.parquet instead.
-        second_pmsm_df = self.perform_global_tda(
-            state=SearchState.SECOND_TDA, run_protein_grouping=False
-        )
-        pmsm_df = self.join_library_confidence(second_pmsm_df)
         library_q_value_column = "library_precursor_q_value"
     else:
+        first_pmsm_df = pl.read_parquet(self.output_dir / "pmsm_results.first.parquet")
         pmsm_df = first_pmsm_df
         library_q_value_column = "global_precursor_q_value"
 
@@ -143,20 +141,20 @@ def run_search(
     logger.info("DelPi workflow completed successfully")
 
 
-# def main():
-#     """Main entry point."""
-#     try:
-#         args = parse_arguments()
-#         run_search(
-#             config_path=args.config_path,
-#             device=args.device,
-#             log_level=args.log_level,
-#             batch_size=args.batch_size,
-#         )
-#     except Exception as e:
-#         logger.error(f"DelPi search failed: {str(e)}")
-#         sys.exit(1)
+def main():
+    """Main entry point."""
+    try:
+        args = parse_arguments()
+        run_search(
+            config_path=args.config_path,
+            device=args.device,
+            log_level=args.log_level,
+            batch_size=args.batch_size,
+        )
+    except Exception as e:
+        logger.error(f"DelPi search failed: {str(e)}")
+        sys.exit(1)
 
 
-# if __name__ == "__main__":
-#     main()
+if __name__ == "__main__":
+    main()

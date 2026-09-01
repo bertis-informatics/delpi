@@ -29,7 +29,11 @@ from delpi.search.search_state import SearchState
 from delpi.search.dia.quick_search import run_quick_search
 from delpi.search.dia.peak_group import find_peak_groups
 from delpi.search.dia.batch_generator import count_total_batches, generate_batches
-from delpi.search.dia.lfq_utils import get_ms1_area
+from delpi.search.dia.lfq_utils import (
+    get_ms1_area,
+    get_pmsm_median_intensity,
+    get_xic_array,
+)
 from delpi.search.clustering import cluster_matches
 from delpi.utils.device_ctx import make_inference_contexts
 from delpi.utils.prefetch import Prefetcher, pin_numpy_tuple
@@ -129,7 +133,7 @@ class DIASearchEngine(BaseSearchEngine):
             x_theo_t = tensors[2]
             x_exp_t = tensors[3]
             x_ind_t = tensors[4]
-            x_quant_t = tensors[5]
+            x_rank_t = tensors[5]
             ms1_scale_t = tensors[6]
 
             n = x_theo_t.shape[0]
@@ -164,11 +168,18 @@ class DIASearchEngine(BaseSearchEngine):
                 results["features"].append(x_feature)
                 results["observed_rt"].append(observed_rt)
                 results["peak_indices"].append(x_ind)
+
+                x_exp = x_exp_t.numpy()[mask]
+                ms1_scale_arr = ms1_scale_t.numpy()[mask]
+
+                # cheap scalar per PmSM -- always saved, regardless of save_quant,
+                # so PmSM assignment never depends on whether xic_array was persisted
+                results["median_intensity"].append(get_pmsm_median_intensity(x_exp))
+
                 if save_quant:
-                    x_exp = x_exp_t.numpy()[mask]
-                    ms1_scale_arr = ms1_scale_t.numpy()[mask]
+                    x_rank = x_rank_t.numpy()[mask]
                     results["ms1_area"].append(get_ms1_area(x_exp, ms1_scale_arr))
-                    results["xic_array"].append(x_quant_t.numpy()[mask])
+                    results["xic_array"].append(get_xic_array(x_exp, x_rank))
 
             batch_progress.advance(1)
 
