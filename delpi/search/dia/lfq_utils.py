@@ -9,17 +9,30 @@ from delpi.search.dia.peak_token import (
     EXP_TIME_INDEX_IDX,
     EXP_AB_IDX,
 )
-from delpi.constants import RT_WINDOW_LEN, RT_WINDOW_RADIUS, MAX_FRAGMENTS, QUANT_FRAGMENTS
+from delpi.constants import (
+    RT_WINDOW_LEN,
+    RT_WINDOW_RADIUS,
+    MAX_FRAGMENTS,
+    QUANT_FRAGMENTS,
+)
 
 MAX_THEO_INDEX = MAX_FRAGMENTS - 1
 
 
 @nb.njit(parallel=True, cache=True)
-def get_pmsm_median_intensity(x_exp: np.ndarray, neighbor_window: int = 0) -> np.ndarray:
+def get_pmsm_median_intensity(
+    x_exp: np.ndarray, ms2_scale_arr: np.ndarray, neighbor_window: int = 0
+) -> np.ndarray:
     """Median intensity of matched, center-window, monoisotopic fragment ion
     peaks, computed directly from ``x_exp``'s peak annotations -- no separate
     XIC array needed. Shared by DIA and DDA, since both build ``x_exp`` with
     the same ``EXP_TIME_INDEX_IDX`` convention (center == ``RT_WINDOW_RADIUS``).
+
+    ``x_exp``'s AB column is normalized to a per-PmSM max of 1 (see
+    `_set_x_exp`'s fragment-ion scaling), so the median computed from it must
+    be rescaled by ``ms2_scale_arr`` (that same call's fragment-ion max ab,
+    as returned by `get_x_exp`) to recover the original intensity scale --
+    the same role ``ms1_scale_arr`` plays in `get_ms1_area`.
     """
     N, M = x_exp.shape[:2]
     out = np.empty(N, dtype=np.float32)
@@ -46,15 +59,21 @@ def get_pmsm_median_intensity(x_exp: np.ndarray, neighbor_window: int = 0) -> np
         vals = np.sort(values[:k])
         mid = k // 2
         if k % 2 == 1:
-            out[n] = vals[mid]
+            med = vals[mid]
         else:
-            out[n] = (vals[mid - 1] + vals[mid]) * 0.5
+            med = (vals[mid - 1] + vals[mid]) * 0.5
+        # median of a positively-scaled sample == scale * median(sample),
+        # so rescaling once at the end is equivalent to (and cheaper than)
+        # rescaling every value before taking the median
+        out[n] = med * ms2_scale_arr[n]
 
     return out
 
 
 @nb.njit(parallel=True, cache=True)
-def get_xic_array(x_exp: np.ndarray, x_rank: np.ndarray) -> np.ndarray:
+def get_xic_array(
+    x_exp: np.ndarray, x_rank: np.ndarray, ms2_scale_arr: np.ndarray
+) -> np.ndarray:
     """Build a ``(QUANT_FRAGMENTS, RT_WINDOW_LEN)`` max-held fragment-intensity
     array per PmSM directly from ``x_exp``, channel-indexed by ``x_rank``
     (each matched fragment peak's theoretical-intensity rank, as set by
@@ -65,6 +84,12 @@ def get_xic_array(x_exp: np.ndarray, x_rank: np.ndarray) -> np.ndarray:
     (`perform_lfq`) selects fragment channels once per precursor group and
     reuses the same channel indices for every run's row, so the same
     theoretical fragment must always land in the same channel.
+
+    ``x_exp``'s AB column is normalized to a per-PmSM max of 1, so the result
+    is rescaled by ``ms2_scale_arr`` (see `get_pmsm_median_intensity`) to
+    recover absolute intensity -- max-hold then scale is equivalent to scale
+    then max-hold for a positive per-row factor, so it's applied once per row
+    after the max-hold loop.
     """
     N, M = x_exp.shape[:2]
     xic = np.zeros((N, QUANT_FRAGMENTS, RT_WINDOW_LEN), dtype=np.float32)
@@ -80,6 +105,7 @@ def get_xic_array(x_exp: np.ndarray, x_rank: np.ndarray) -> np.ndarray:
                     ab = x_arr[j, EXP_AB_IDX]
                     if xic[n, channel, t] < ab:
                         xic[n, channel, t] = ab
+        xic[n] *= ms2_scale_arr[n]
 
     return xic
 

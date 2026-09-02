@@ -28,16 +28,17 @@ from delpi.search.result_manager import ResultManager
 from delpi.search.tl.rt_trainer import TransferLearningTrainerForRT
 from delpi.search.tl.trainer import TransferLearningTrainer
 from delpi.search.tl.spec_lib_generator import RefinedSpectralLibGenerator
+from delpi.database.peptide_database import PeptideDatabase
+from delpi.search.tda.tda_processor import TDAProcessor
+from delpi.search.tda.fdr_analyzer import FDRAnalyzer
+from delpi.search.search_state import SearchState
+from delpi.search.progress import CallbackProgressTracker
 from delpi.search.tl.second_pass import (
     select_tl_training_pmsms,
     select_second_pass_targets,
     select_paired_decoys,
 )
-from delpi.search.tda.tda_processor import TDAProcessor
-from delpi.search.tda.fdr_analyzer import FDRAnalyzer
 from delpi.search.pmsm_assignment import assign_pmsms_across_runs
-from delpi.search.search_state import SearchState
-from delpi.search.progress import CallbackProgressTracker
 from delpi.search.dia.max_lfq import maxlfq
 from delpi.utils.mp import get_multiprocessing_context
 from delpi.database.utils import get_modified_sequence
@@ -551,37 +552,6 @@ class SearchManager:
             refined_db_dir / "library_confidence.parquet"
         )
 
-    def _score_pmsms(
-        self,
-        processor: TDAProcessor,
-        result_aggregator: ResultsAggregator,
-        group_key: str,
-        pass_label: str,
-    ) -> pl.DataFrame:
-        """Train the identification classifier (2-fold CV) and score every PmSM."""
-        return processor.run_global(
-            result_aggregator,
-            group_key,
-            training_params={
-                "num_warmup_steps": 5,
-                "max_epochs": 50,
-                "train_split": 0.8,
-                "early_stopping_patience": 5,
-            },
-            pass_label=pass_label,
-        )
-
-    def _assign_pmsms(
-        self,
-        scored_df: pl.DataFrame,
-        processor: TDAProcessor,
-        result_aggregator: ResultsAggregator,
-    ) -> pl.DataFrame:
-        """Select the final per-run PmSM subset (score + median intensity + alignment-group DP)."""
-        intensity_weight = self.search_config.config.get("intensity_weight", 4.0)
-        pmsm_df = assign_pmsms_across_runs(scored_df, intensity_weight=intensity_weight)
-        return processor._join_database_columns(pmsm_df, result_aggregator.db_dir)
-
     def _apply_fdr(
         self,
         pmsm_df: pl.DataFrame,
@@ -666,15 +636,27 @@ class SearchManager:
             split_level="peptide",
         )
 
-        # 1) score every PmSM, 2) assign one PmSM per run/precursor, 3) FDR control
-        # -- three separate concerns, each owned by a different class/function.
-        scored_df = self._score_pmsms(
-            processor,
+        # 1) score every PmSM
+        scored_df = processor.run_global(
             result_aggregator,
             group_key,
+            training_params={
+                "num_warmup_steps": 5,
+                "max_epochs": 50,
+                "train_split": 0.8,
+                "early_stopping_patience": 5,
+            },
             pass_label="first" if state < SearchState.SECOND_SEARCH else "second",
         )
-        pmsm_df = self._assign_pmsms(scored_df, processor, result_aggregator)
+
+        # 2) assign one PmSM per run/precursor (score + median intensity + alignment-group DP)
+        intensity_weight = self.search_config.config.get("intensity_weight", 4.0)
+        pmsm_df = assign_pmsms_across_runs(scored_df, intensity_weight=intensity_weight)
+        pmsm_df = PeptideDatabase.join_with_protein_annotations(
+            result_aggregator.db_dir, pmsm_df
+        )
+
+        # 3) FDR control
         pmsm_df = self._apply_fdr(
             pmsm_df,
             result_aggregator,

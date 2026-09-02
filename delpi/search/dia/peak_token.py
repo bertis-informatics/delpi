@@ -242,7 +242,7 @@ def get_x_exp(
         counter=counter,
     )
 
-    counter, _ = _set_x_exp(
+    counter, ms2_scale = _set_x_exp(
         theo_peaks,
         is_precursor=False,
         ms_level=2,
@@ -259,4 +259,7 @@ def get_x_exp(
         x_rank=x_rank,
     )
 
-    return x_exp[:counter], ms1_scale
+    # ms2_scale is the fragment-ion max ab used to rescale x_exp's AB column
+    # (normalized to max 1) back to absolute intensity -- see get_ms1_area and
+    # get_pmsm_median_intensity, which are the only consumers of ms2_scale.
+    return x_exp[:counter], ms1_scale, ms2_scale

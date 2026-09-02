@@ -141,11 +141,12 @@ class TDAProcessor:
         # Bring in the rest of each PmSM's columns (frame_num, predicted_rt,
         # observed_rt, is_decoy, ...) so the returned DataFrame is
         # self-contained for the assignment/FDR steps that follow.
-        return scored_df.join(
+        scored_df = scored_df.join(
             full_pmsm_df.select(pl.exclude("cluster", "score")),
             on=["run_index", "pmsm_index"],
             how="left",
         )
+        return scored_df
 
     def write_back_scores(
         self,
@@ -429,58 +430,3 @@ class TDAProcessor:
                 logits = model(x_all[start:end].to(device))
                 scores[start:end] = logits.flatten().cpu().numpy()
         return scores
-
-    @staticmethod
-    def _join_database_columns(
-        pmsm_df: pl.DataFrame,
-        db_dir: Path,
-    ) -> pl.DataFrame:
-        """Attach precursor/modification/peptide/fasta_id columns from the database."""
-        # Columns added by the join — drop them first if already present to
-        # avoid polars creating duplicate (_right) columns.
-        _join_added = {
-            "peptidoform_index",
-            "peptide_index",
-            "precursor_charge",
-            "mod_ids",
-            "mod_sites",
-            "peptide",
-            "sequence_length",
-            "is_decoy",
-            "protein_index",
-            "fasta_id",
-        }
-        cols_to_drop = [c for c in pmsm_df.columns if c in _join_added]
-        pmsm_df = PeptideDatabase.join(
-            db_dir,
-            pmsm_df.drop(cols_to_drop),
-            precursor_columns=["precursor_charge"],
-            modification_columns=["mod_ids", "mod_sites"],
-            peptide_columns=[
-                "peptide",
-                "sequence_length",
-                "is_decoy",
-                "protein_index",
-            ],
-        )
-
-        # Attach a semicolon-joined `fasta_id` column per precursor, derived
-        # from the protein sequence database (was previously done via
-        # FDRAnalyzer.add_fasta_id_column, now folded in here so all DB joins
-        # live in one place).
-        fasta_id_df = (
-            pl.scan_parquet(db_dir / "sequence_df.parquet")
-            .select(pl.col("protein_index", "fasta_id"))
-            .collect()
-        )
-        fasta_lookup_df = (
-            pmsm_df.select(pl.col("precursor_index", "protein_index"))
-            .unique(subset="precursor_index", keep="first")
-            .explode("protein_index")
-            .join(fasta_id_df, on="protein_index", how="left")
-            .group_by("precursor_index")
-            .agg(pl.col("fasta_id"))
-            .with_columns(pl.col("fasta_id").list.sort().list.join(";"))
-        )
-
-        return pmsm_df.join(fasta_lookup_df, on="precursor_index", how="left")

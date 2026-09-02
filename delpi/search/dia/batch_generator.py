@@ -66,6 +66,7 @@ def _make_batch_in_parallel(
     ms1_mass_tol: float,
     ms2_mass_tol: float,
     ms1_scale_arr: np.ndarray,
+    ms2_scale_arr: np.ndarray,
 ):
     frame_num_arr = peak_group_container.frame_num_arr
     precursor_index0_arr = peak_group_container.precursor_index0_arr
@@ -75,6 +76,7 @@ def _make_batch_in_parallel(
     X_indices[:] = -1
     X_rank[:] = -1
     ms1_scale_arr[:] = -1.0
+    ms2_scale_arr[:] = -1.0
 
     # for i, k in enumerate(batch_indices):
     for i in nb.prange(cur_batch_size):
@@ -84,7 +86,7 @@ def _make_batch_in_parallel(
 
         theo_peaks = get_theoretical_peaks(speclib_container, precursor_index0)
         _ = get_x_theo(theo_peaks, X_theo[i])
-        _, ms1_scale = get_x_exp(
+        _, ms1_scale, ms2_scale = get_x_exp(
             precursor_index0=precursor_index0,
             frame_num=frame_num,
             theo_peaks=theo_peaks,
@@ -101,6 +103,7 @@ def _make_batch_in_parallel(
         )
         X_precursor_index[i] = precursor_index0 + min_precursor_index
         ms1_scale_arr[i] = ms1_scale
+        ms2_scale_arr[i] = ms2_scale
 
 
 def _allocate_dia_buffer(batch_size: int, num_theoretical_peaks: int):
@@ -114,6 +117,7 @@ def _allocate_dia_buffer(batch_size: int, num_theoretical_peaks: int):
         ),
         "X_precursor_index": np.empty(batch_size, dtype=np.uint32),
         "ms1_scale_arr": np.empty(batch_size, dtype=np.float32),
+        "ms2_scale_arr": np.empty(batch_size, dtype=np.float32),
         "X_indices": np.empty((batch_size, 128), dtype=np.int32),
         "X_rank": np.empty((batch_size, MAX_EXP_PEAK_TOKENS), dtype=np.int8),
     }
@@ -163,6 +167,7 @@ def generate_batches(
             ms1_mass_tol,
             ms2_mass_tol,
             buf["ms1_scale_arr"],
+            buf["ms2_scale_arr"],
         )
 
         yield (
@@ -173,4 +178,5 @@ def generate_batches(
             buf["X_indices"][:cur_batch_size, :],
             buf["X_rank"][:cur_batch_size, :num_peaks],
             buf["ms1_scale_arr"][:cur_batch_size],
+            buf["ms2_scale_arr"][:cur_batch_size],
         )

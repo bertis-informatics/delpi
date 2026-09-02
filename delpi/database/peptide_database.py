@@ -320,3 +320,59 @@ class PeptideDatabase:
         ).collect()
 
         return label_df
+
+    @classmethod
+    def join_with_protein_annotations(
+        cls,
+        db_dir: Path,
+        pmsm_df: pl.DataFrame,
+    ) -> pl.DataFrame:
+        """Attach precursor/modification/peptide/fasta_id columns from the database.
+
+        Like :meth:`join`, but also attaches a semicolon-joined ``fasta_id``
+        column per precursor, derived from the protein sequence database.
+        """
+        # Columns added by the join — drop them first if already present to
+        # avoid polars creating duplicate (_right) columns.
+        _join_added = {
+            "peptidoform_index",
+            "peptide_index",
+            "precursor_charge",
+            "mod_ids",
+            "mod_sites",
+            "peptide",
+            "sequence_length",
+            "is_decoy",
+            "protein_index",
+            "fasta_id",
+        }
+        cols_to_drop = [c for c in pmsm_df.columns if c in _join_added]
+        pmsm_df = cls.join(
+            db_dir,
+            pmsm_df.drop(cols_to_drop),
+            precursor_columns=["precursor_charge"],
+            modification_columns=["mod_ids", "mod_sites"],
+            peptide_columns=[
+                "peptide",
+                "sequence_length",
+                "is_decoy",
+                "protein_index",
+            ],
+        )
+
+        fasta_id_df = (
+            pl.scan_parquet(db_dir / "sequence_df.parquet")
+            .select(pl.col("protein_index", "fasta_id"))
+            .collect()
+        )
+        fasta_lookup_df = (
+            pmsm_df.select(pl.col("precursor_index", "protein_index"))
+            .unique(subset="precursor_index", keep="first")
+            .explode("protein_index")
+            .join(fasta_id_df, on="protein_index", how="left")
+            .group_by("precursor_index")
+            .agg(pl.col("fasta_id"))
+            .with_columns(pl.col("fasta_id").list.sort().list.join(";"))
+        )
+
+        return pmsm_df.join(fasta_lookup_df, on="precursor_index", how="left")

@@ -76,7 +76,9 @@ class ResultsAggregator:
                         {
                             "seq_len": np.full(n_samples, int(n), dtype=np.uint16),
                             "index": np.arange(n_samples, dtype=np.uint32),
-                            "precursor_index": precursor_index.astype(np.uint32, copy=False),
+                            "precursor_index": precursor_index.astype(
+                                np.uint32, copy=False
+                            ),
                         }
                     )
                 )
