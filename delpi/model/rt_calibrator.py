@@ -97,7 +97,7 @@ class RetentionTimeCalibrator(LinearProjectionCalibrator):
     ):
 
         super().__init__(min_rt_in_seconds, max_rt_in_seconds)
-        assert max_rt_tolerance > min_rt_tolerance
+        assert max_rt_tolerance >= min_rt_tolerance
 
         self.min_rt_tol_in_seconds = self.lc_grad_len * min_rt_tolerance
         self.max_rt_tol_in_seconds = self.lc_grad_len * max_rt_tolerance

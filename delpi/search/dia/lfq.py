@@ -14,52 +14,6 @@ from delpi.search.dia.lfq_utils import perform_lfq
 logger = logging.getLogger(__name__)
 
 
-def _subslice_quantification_window(
-    all_xic_arrays: np.ndarray, quant_window_radius: int
-) -> np.ndarray:
-    """Cut ``all_xic_arrays``'s (n_pmsms, n_fragments, RT_WINDOW_LEN) time
-    axis down to ``center +/- quant_window_radius`` -- the single window
-    every downstream MS2 LFQ step (fragment correlation, cross-run
-    consistency filtering, final quantity) must use. Returns a fresh
-    C-contiguous array (never a strided view) so it's safe to pass into
-    Numba.
-    """
-    if isinstance(quant_window_radius, bool) or not isinstance(
-        quant_window_radius, int
-    ):
-        raise ValueError(
-            f"quant_window_radius must be an int, got {quant_window_radius!r}"
-        )
-    if not (1 <= quant_window_radius <= RT_WINDOW_RADIUS):
-        raise ValueError(
-            f"quant_window_radius must be in [1, {RT_WINDOW_RADIUS}], got "
-            f"{quant_window_radius!r}"
-        )
-    if all_xic_arrays.ndim != 3:
-        raise ValueError(
-            "all_xic_arrays must be 3D (n_pmsms, n_fragments, n_time), got "
-            f"ndim={all_xic_arrays.ndim!r}"
-        )
-    if all_xic_arrays.shape[2] != RT_WINDOW_LEN:
-        raise ValueError(
-            f"all_xic_arrays' time axis must have RT_WINDOW_LEN={RT_WINDOW_LEN} "
-            f"points, got {all_xic_arrays.shape[2]!r}"
-        )
-
-    center = all_xic_arrays.shape[2] // 2
-    start = center - quant_window_radius
-    stop = center + quant_window_radius + 1
-    quant_xic_arrays = np.ascontiguousarray(all_xic_arrays[:, :, start:stop])
-
-    if quant_xic_arrays.shape[2] != 2 * quant_window_radius + 1:
-        raise ValueError(
-            "quantification window subslice has an unexpected number of time "
-            f"points: {quant_xic_arrays.shape[2]!r}"
-        )
-
-    return quant_xic_arrays
-
-
 class LabelFreeQuantifier:
     """
     Handles label-free quantification across multiple DIA search results.
@@ -153,7 +107,6 @@ class LabelFreeQuantifier:
         min_interference_runs: int = 3,
         interference_min_log2_fold: float = 3.0,
         interference_z_threshold: float = 4.0,
-        quant_window_radius: int = None,
     ) -> pl.DataFrame:
         """Calculate MS1/MS2 peak areas and run cross-run LFQ.
 
@@ -162,13 +115,6 @@ class LabelFreeQuantifier:
         assignment upstream of FDR control) and to already be FDR-filtered
         by the caller, so no per-precursor re-selection or confidence
         filtering is needed here.
-
-        `quant_window_radius` cuts the raw ``RT_WINDOW_LEN``-point MS2 XIC
-        down to ``center +/- quant_window_radius`` (see
-        `_subslice_quantification_window`) exactly once, right after reading
-        it -- every downstream MS2 LFQ step (fragment correlation, cross-run
-        consistency filtering, final quantity) then uses that same window,
-        never the raw one.
 
         `target_fragments`/`max_fragments`/`corr_thresh` control the
         shape-correlation-based fragment selection (`target_fragments` is a
@@ -194,12 +140,6 @@ class LabelFreeQuantifier:
             sorted_df, group_key=self.group_key
         )
 
-        quant_xic_arrays = (
-            all_xic_arrays
-            if quant_window_radius is None
-            else _subslice_quantification_window(all_xic_arrays, quant_window_radius)
-        )
-
         idx_df = (
             sorted_df.group_by("precursor_index", maintain_order=True)
             .agg(pl.len())
@@ -211,7 +151,7 @@ class LabelFreeQuantifier:
         all_ms2_ab_arr = perform_lfq(
             precursor_index_arr,
             stop_index_arr,
-            quant_xic_arrays,
+            all_xic_arrays,
             target_fragments=target_fragments,
             min_quant_fragments=min_quant_fragments,
             max_fragments=max_fragments,

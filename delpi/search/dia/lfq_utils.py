@@ -583,7 +583,6 @@ def _perform_lfq_numba(
     min_interference_runs,
     interference_min_log2_fold,
     interference_z_threshold,
-    quant_window_radius,
     epsilon,
 ):
     # NaN (not 0) marks precursors left unquantified because too few
@@ -619,12 +618,6 @@ def _perform_lfq_numba(
             # for every run of this precursor, don't restore removed fragments
             continue
 
-        if quant_window_radius is not None:
-            center = sub_xic_arr.shape[2] // 2
-            start = center - quant_window_radius
-            stop = center + quant_window_radius + 1
-            sub_xic_arr = sub_xic_arr[:, :, start:stop]
-
         for j in range(sub_xic_arr.shape[0]):
             total = 0.0
             for k in final_indices:
@@ -648,7 +641,6 @@ def perform_lfq(
     interference_min_log2_fold: float = 2.0,
     interference_z_threshold: float = 4.0,
     epsilon: float = 1e-6,
-    quant_window_radius: int = None,
 ):
     """Per-precursor cross-run MS2 fragment-area quantification.
 
@@ -693,6 +685,5 @@ def perform_lfq(
         min_interference_runs,
         interference_min_log2_fold,
         interference_z_threshold,
-        quant_window_radius,
         epsilon,
     )

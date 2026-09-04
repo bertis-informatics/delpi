@@ -40,10 +40,6 @@ from delpi.search.tl.second_pass import (
 )
 from delpi.search.pmsm_assignment import assign_pmsms_across_runs
 from delpi.search.dia.max_lfq import maxlfq
-from delpi.search.rt_candidate_filter import (
-    filter_cross_run_rt_candidates,
-    IS_RT_SUPPORTED_COLUMN,
-)
 from delpi.utils.mp import get_multiprocessing_context
 from delpi.database.utils import get_modified_sequence
 from delpi.constants import (
@@ -658,14 +654,6 @@ class SearchManager:
         cutoff = pl.min_horizontal(max_score - 1.0, max_score * 0.5)
         scored_df = scored_df.filter(pl.col("score") > cutoff)
 
-        # 3) Filter cross-run RT candidates using the reference implementation
-        xic_peak_interval = result_aggregator.get_xic_peak_interval()
-        scored_df = filter_cross_run_rt_candidates(
-            scored_df,
-            rt_bandwidth=xic_peak_interval * 3,
-            min_rt_support=1e-6,
-        )
-
         # 3) assign one PmSM per run/precursor (score + median intensity + alignment-group DP)
         intensity_weight = self.search_config.config.get("intensity_weight", 4.0)
         pmsm_df = assign_pmsms_across_runs(scored_df, intensity_weight=intensity_weight)
@@ -727,7 +715,6 @@ class SearchManager:
             (pl.col("is_decoy") == False)
             & (pl.col(library_q_value_column) <= q_value_cutoff)
             & (pl.col("precursor_q_value") <= q_value_cutoff)
-            & (pl.col("is_rt_supported"))
         )
 
         lfq = LabelFreeQuantifier(
