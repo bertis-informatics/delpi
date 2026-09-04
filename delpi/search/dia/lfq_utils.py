@@ -21,12 +21,21 @@ MAX_THEO_INDEX = MAX_FRAGMENTS - 1
 
 @nb.njit(parallel=True, cache=True)
 def get_pmsm_median_intensity(
-    x_exp: np.ndarray, ms2_scale_arr: np.ndarray, neighbor_window: int = 0
+    x_exp: np.ndarray,
+    x_rank: np.ndarray,
+    ms2_scale_arr: np.ndarray,
+    neighbor_window: int = 1,
+    top_k: int = 6,
 ) -> np.ndarray:
-    """Median intensity of matched, center-window, monoisotopic fragment ion
-    peaks, computed directly from ``x_exp``'s peak annotations -- no separate
-    XIC array needed. Shared by DIA and DDA, since both build ``x_exp`` with
-    the same ``EXP_TIME_INDEX_IDX`` convention (center == ``RT_WINDOW_RADIUS``).
+    """Median intensity of matched, center-window, monoisotopic, top-
+    ``QUANT_FRAGMENTS``-ranked fragment ion peaks, computed directly from
+    ``x_exp``'s peak annotations -- no separate XIC array needed. Shared by
+    DIA and DDA, since both build ``x_exp``/``x_rank`` with the same
+    conventions (center == ``RT_WINDOW_RADIUS``; ``x_rank`` only set, and
+    always >= 0, for fragment peaks -- see `_set_x_exp`).
+
+    Restricting to ``0 <= x_rank < QUANT_FRAGMENTS`` keeps this consistent
+    with `get_xic_array`, which only ever holds those same ranked channels.
 
     ``x_exp``'s AB column is normalized to a per-PmSM max of 1 (see
     `_set_x_exp`'s fragment-ion scaling), so the median computed from it must
@@ -39,14 +48,12 @@ def get_pmsm_median_intensity(
 
     for n in nb.prange(N):
         x_arr = x_exp[n]
+        rank_arr = x_rank[n]
         values = np.empty(M, dtype=np.float32)
         k = 0
         for j in range(M):
-            if (
-                x_arr[j, EXP_IS_PRECURSOR_IDX] == 0
-                and x_arr[j, EXP_MS_LEVEL_IDX] == 2
-                and x_arr[j, EXP_ISOTOPE_INDEX_IDX] == 0
-            ):
+            rank = rank_arr[j]
+            if 0 <= rank < top_k and x_arr[j, EXP_ISOTOPE_INDEX_IDX] == 0:
                 t = nb.int8(x_arr[j, EXP_TIME_INDEX_IDX])
                 if abs(t - RT_WINDOW_RADIUS) <= neighbor_window:
                     values[k] = x_arr[j, EXP_AB_IDX]
@@ -601,9 +608,9 @@ def get_representative_xic(xic_arr):
 @nb.njit(nogil=True, fastmath=True, cache=True)
 def select_quantifiable_fragments_by_avg_corr(
     xic_arrays,
-    min_fragments=3,
-    max_fragments=9,
-    corr_thresh=0.5,
+    target_fragments=9,
+    max_fragments=12,
+    corr_thresh=0.9,
     cube_corr=False,
     rep_type=0,
 ):
@@ -616,14 +623,19 @@ def select_quantifiable_fragments_by_avg_corr(
 
     Args:
         xic_arrays (numpy.array): [n_runs, n_frags, n_time]
-        min_fragments (int, optional): minimum number of fragments to select. Defaults to 3.
-        max_fragments (int, optional): maximum number of fragments to select. Defaults to 6.
-        corr_thresh (float, optional): minimum correlation threshold. Defaults to 0.5.
+        target_fragments (int, optional): number of fragments this selection
+            aims for -- NOT a hard cutoff for downstream quantity reporting
+            (see `filter_fragments_by_cross_run_intensity`'s
+            `min_quant_fragments` for that). Defaults to 9.
+        max_fragments (int, optional): maximum number of fragments to select. Defaults to 12.
+        corr_thresh (float, optional): minimum correlation threshold. Defaults to 0.9.
         cube_corr (bool, optional): whether to cube correlations. Defaults to False.
         rep_type (int, optional): 0 for consensus, 1 for representative. Defaults to 0.
 
     Returns:
-        numpy.array: Indices of selected fragments sorted by average correlation (descending)
+        numpy.array: Indices of selected fragments sorted by average
+        correlation (descending); an empty array if there are no valid
+        (non-near-zero-intensity) fragments at all.
     """
     n_runs, n_frags, n_time = xic_arrays.shape
     epsilon = 1e-6
@@ -645,13 +657,8 @@ def select_quantifiable_fragments_by_avg_corr(
             valid_indices[valid_len] = frag_idx
             valid_len += 1
 
-    # Return early if not enough valid fragments
     if valid_len == 0:
-        # logically this should not happen
-        return np.arange(n_frags, dtype=np.int32)
-
-    if valid_len <= min_fragments:
-        return valid_indices[:valid_len]
+        return np.empty(0, dtype=np.int32)
 
     # 2. Calculate average correlation for each valid fragment across all runs
     avg_correlations = np.zeros(valid_len, dtype=np.float32)
@@ -698,14 +705,14 @@ def select_quantifiable_fragments_by_avg_corr(
         else:
             break  # Since sorted, no more will meet threshold
 
-    if above_threshold_count >= min_fragments:
+    if above_threshold_count >= target_fragments:
         # We have enough fragments above threshold
         # Select up to max_fragments among those above threshold
         selected_count = min(above_threshold_count, max_fragments)
     else:
-        # Not enough fragments above threshold
-        # Select top min_fragments regardless of threshold
-        selected_count = min(min_fragments, valid_len)
+        # Not enough fragments above threshold -- aim for target_fragments,
+        # bounded by both how many valid fragments exist and max_fragments
+        selected_count = min(target_fragments, valid_len, max_fragments)
 
     # Build the selected indices array
     selected_indices = np.empty(selected_count, dtype=np.int32)
@@ -715,18 +722,222 @@ def select_quantifiable_fragments_by_avg_corr(
     return selected_indices
 
 
+@nb.njit(cache=True, nogil=True)
+def filter_fragments_by_cross_run_intensity(
+    xic_arrays: np.ndarray,
+    selected_indices: np.ndarray,
+    min_quant_fragments: int,
+    min_interference_runs: int,
+    interference_min_log2_fold: float,
+    interference_z_threshold: float,
+    epsilon: float,
+) -> np.ndarray:
+    """Drop shape-correlated fragments whose relative intensity is an outlier in only some runs.
+
+    Shape correlation (`select_quantifiable_fragments_by_avg_corr`) is scale
+    invariant, so a fragment can pass it even if one run's intensity is
+    contaminated (e.g. co-eluting interference, or partial signal loss) while
+    its XIC shape still looks normal. This detects that case using only
+    *relative*, run-centered fragment intensities (never a fragment's/run's
+    absolute level), so it never flags a fragment for being globally weak,
+    nor a run for having globally high/low precursor abundance (see the
+    module's fixed integration window -- `xic_arrays`'s last axis -- carried
+    over unchanged from the caller). Both unusually *high* and unusually
+    *low* run-specific relative fragment intensities are treated as
+    interference (two-sided); a fragment that is consistently high or low
+    across every run is never flagged, since that's absorbed by the
+    per-fragment cross-run reference (`B_k` below).
+
+    ``xic_arrays``: this precursor's ``(n_runs, n_frags, n_time)`` XIC slice
+    (same array `select_quantifiable_fragments_by_avg_corr` was run on).
+    ``selected_indices``: fragment indices (into ``xic_arrays``'s 2nd axis)
+    already chosen by shape correlation.
+
+    Steps (see module caller for the full per-precursor pipeline):
+    1. ``area[r, k] = sum_t xic_arrays[r, selected_indices[k], t]`` (fixed window).
+    2. Per run ``r``, over its positive-finite areas only: run-center
+       ``C_r = median_k log2(area[r, k] + epsilon)``, giving the
+       precursor-abundance-invariant ``R[r, k] = log2(area[r,k]+eps) - C_r``
+       (skipped entirely -- kept NaN -- for runs with < 2 such fragments,
+       since a median of 0-1 points can't be trusted).
+    3. Per fragment ``k``, over runs where ``R[r, k]`` is defined: reference
+       ``B_k = median_r R[r, k]``, residual ``E[r, k] = R[r, k] - B_k``, and
+       robust scale ``1.4826 * median_r |E[r, k]|``. Fragments observed in
+       fewer than `min_interference_runs` such runs are never flagged (not
+       enough evidence).
+    4. Fragment ``k`` is interference (dropped in *every* run for this
+       precursor, not just the offending run -- see module docstring) if any
+       ``abs(E[r, k]) > max(interference_min_log2_fold, interference_z_threshold
+       * scale_k)`` -- two-sided: both unusually *high* and unusually *low*
+       run-specific relative fragment intensities are treated as
+       interference. `interference_min_log2_fold` is an absolute log2-fold
+       threshold, independent of residual direction. A fragment that is
+       consistently high or low across *every* run is never flagged, since
+       that's exactly what the per-fragment reference ``B_k`` absorbs.
+
+    Returns the surviving fragment indices (subset of `selected_indices`, in
+    the same order), or an empty array if fewer than `min_quant_fragments`
+    survive -- the caller must then treat this precursor's quantity as
+    missing rather than restoring any removed fragment.
+    """
+    n_runs = xic_arrays.shape[0]
+    n_time = xic_arrays.shape[2]
+    m = selected_indices.shape[0]
+
+    # 1. fixed-window area per (run, selected fragment) -- unchanged window
+    area = np.zeros((n_runs, m), dtype=np.float32)
+    for r in range(n_runs):
+        for k in range(m):
+            f = selected_indices[k]
+            s = 0.0
+            for t in range(n_time):
+                s += xic_arrays[r, f, t]
+            area[r, k] = s
+
+    # 2. run-centered relative intensity; NaN wherever undefined
+    relative = np.full((n_runs, m), np.nan, dtype=np.float32)
+    log_buf = np.empty(m, dtype=np.float32)
+    for r in range(n_runs):
+        cnt = 0
+        for k in range(m):
+            a = area[r, k]
+            if np.isfinite(a) and a > 0.0:
+                log_buf[cnt] = np.log2(a + epsilon)
+                cnt += 1
+        if cnt < 2:
+            # too few positive-finite fragments to trust this run's median
+            continue
+        sorted_log = np.sort(log_buf[:cnt])
+        mid = cnt // 2
+        if cnt % 2 == 1:
+            center = sorted_log[mid]
+        else:
+            center = (sorted_log[mid - 1] + sorted_log[mid]) * 0.5
+        for k in range(m):
+            a = area[r, k]
+            if np.isfinite(a) and a > 0.0:
+                relative[r, k] = np.log2(a + epsilon) - center
+
+    # 3 & 4. per-fragment cross-run reference/residual/MAD -> interference flag
+    interference = np.zeros(m, dtype=np.bool_)
+    vals_buf = np.empty(n_runs, dtype=np.float32)
+    for k in range(m):
+        cnt = 0
+        for r in range(n_runs):
+            v = relative[r, k]
+            if not np.isnan(v):
+                vals_buf[cnt] = v
+                cnt += 1
+        if cnt < min_interference_runs:
+            continue  # not enough cross-run evidence -> never flagged
+
+        sorted_vals = np.sort(vals_buf[:cnt])
+        mid = cnt // 2
+        if cnt % 2 == 1:
+            reference = sorted_vals[mid]
+        else:
+            reference = (sorted_vals[mid - 1] + sorted_vals[mid]) * 0.5
+
+        abs_resid = np.empty(cnt, dtype=np.float32)
+        for i in range(cnt):
+            abs_resid[i] = abs(vals_buf[i] - reference)
+        sorted_abs = np.sort(abs_resid)
+        if cnt % 2 == 1:
+            mad = sorted_abs[mid]
+        else:
+            mad = (sorted_abs[mid - 1] + sorted_abs[mid]) * 0.5
+        threshold = max(
+            interference_min_log2_fold, interference_z_threshold * 1.4826 * mad
+        )
+
+        for r in range(n_runs):
+            v = relative[r, k]
+            if np.isnan(v):
+                continue
+            residual = v - reference
+            if abs(residual) > threshold:
+                interference[k] = True
+                break
+
+    keep_count = 0
+    for k in range(m):
+        if not interference[k]:
+            keep_count += 1
+
+    if keep_count < min_quant_fragments:
+        return np.empty(0, dtype=np.int32)
+
+    final_indices = np.empty(keep_count, dtype=np.int32)
+    pos = 0
+    for k in range(m):
+        if not interference[k]:
+            final_indices[pos] = selected_indices[k]
+            pos += 1
+    return final_indices
+
+
+def _validate_perform_lfq_params(
+    target_fragments: int,
+    min_quant_fragments: int,
+    max_fragments: int,
+    corr_thresh: float,
+    min_interference_runs: int,
+    interference_min_log2_fold: float,
+    interference_z_threshold: float,
+    epsilon: float,
+) -> None:
+    if min_quant_fragments < 1:
+        raise ValueError(
+            f"min_quant_fragments must be >= 1, got {min_quant_fragments!r}"
+        )
+    if target_fragments < 1:
+        raise ValueError(f"target_fragments must be >= 1, got {target_fragments!r}")
+    if max_fragments < 1:
+        raise ValueError(f"max_fragments must be >= 1, got {max_fragments!r}")
+    if not (min_quant_fragments <= target_fragments <= max_fragments):
+        raise ValueError(
+            "must satisfy min_quant_fragments <= target_fragments <= max_fragments, "
+            f"got min_quant_fragments={min_quant_fragments!r}, "
+            f"target_fragments={target_fragments!r}, max_fragments={max_fragments!r}"
+        )
+    if not (0 <= corr_thresh <= 1):
+        raise ValueError(f"corr_thresh must be in [0, 1], got {corr_thresh!r}")
+    if min_interference_runs < 1:
+        raise ValueError(
+            f"min_interference_runs must be >= 1, got {min_interference_runs!r}"
+        )
+    if interference_min_log2_fold <= 0:
+        raise ValueError(
+            "interference_min_log2_fold must be > 0, got "
+            f"{interference_min_log2_fold!r}"
+        )
+    if interference_z_threshold <= 0:
+        raise ValueError(
+            f"interference_z_threshold must be > 0, got {interference_z_threshold!r}"
+        )
+    if epsilon <= 0:
+        raise ValueError(f"epsilon must be > 0, got {epsilon!r}")
+
+
 @nb.njit(nogil=True, fastmath=True, parallel=True, cache=True)
-def perform_lfq(
+def _perform_lfq_numba(
     precursor_index_arr,
     precursor_stop_index_arr,
     all_xic_arr,
-    min_fragments: int = 6,
-    max_fragments: int = 9,
-    corr_thresh: float = 0.8,
-    rep_type: int = 0,
-    cube_corr: bool = False,
+    target_fragments,
+    min_quant_fragments,
+    max_fragments,
+    corr_thresh,
+    rep_type,
+    cube_corr,
+    min_interference_runs,
+    interference_min_log2_fold,
+    interference_z_threshold,
+    epsilon,
 ):
-    all_ab_arr = np.zeros(all_xic_arr.shape[0], dtype=np.float32)
+    # NaN (not 0) marks precursors left unquantified because too few
+    # fragments survived shape-correlation + interference filtering
+    all_ab_arr = np.full(all_xic_arr.shape[0], np.nan, dtype=np.float32)
 
     for i in nb.prange(precursor_index_arr.shape[0]):
         st = 0 if i == 0 else precursor_stop_index_arr[i - 1]
@@ -735,15 +946,126 @@ def perform_lfq(
 
         selected_indices = select_quantifiable_fragments_by_avg_corr(
             sub_xic_arr,
-            min_fragments=min_fragments,
+            target_fragments=target_fragments,
             max_fragments=max_fragments,
             corr_thresh=corr_thresh,
             cube_corr=cube_corr,
             rep_type=rep_type,
         )
 
+        final_indices = filter_fragments_by_cross_run_intensity(
+            sub_xic_arr,
+            selected_indices,
+            min_quant_fragments,
+            min_interference_runs,
+            interference_min_log2_fold,
+            interference_z_threshold,
+            epsilon,
+        )
+
+        if final_indices.shape[0] == 0:
+            # too few fragments survived interference removal -> leave NaN
+            # for every run of this precursor, don't restore removed fragments
+            continue
+
         for j in range(sub_xic_arr.shape[0]):
-            for k in selected_indices:
-                all_ab_arr[st + j] += np.sum(sub_xic_arr[j, k, :])
+            total = 0.0
+            for k in final_indices:
+                total += np.sum(sub_xic_arr[j, k, :])
+            all_ab_arr[st + j] = total
 
     return all_ab_arr
+
+
+def perform_lfq(
+    precursor_index_arr,
+    precursor_stop_index_arr,
+    all_xic_arr,
+    target_fragments: int = 9,
+    min_quant_fragments: int = 3,
+    max_fragments: int = 12,
+    corr_thresh: float = 0.9,
+    rep_type: int = 0,
+    cube_corr: bool = False,
+    min_interference_runs: int = 3,
+    interference_min_log2_fold: float = 2.0,
+    interference_z_threshold: float = 4.0,
+    epsilon: float = 1e-6,
+):
+    """Per-precursor cross-run MS2 fragment-area quantification.
+
+    For every precursor group (delimited by `precursor_stop_index_arr` into
+    `all_xic_arr`'s rows): pick fragments via
+    `select_quantifiable_fragments_by_avg_corr` (aiming for `target_fragments`,
+    bounded by `max_fragments`/`corr_thresh`), drop any of those flagged by
+    `filter_fragments_by_cross_run_intensity` as cross-run intensity
+    interference, then sum the survivors' fixed-window areas per run.
+
+    `target_fragments` is only a *selection* target -- it never determines
+    whether a precursor's quantity is reported. That's `min_quant_fragments`'s
+    sole job: if fewer than `min_quant_fragments` fragments survive both
+    filters, every run of that precursor gets ``ms2_quantity = NaN`` instead
+    of quantifying from a shrunken (but still valid) fragment set.
+
+    Raises ``ValueError`` (before running any Numba code) if
+    `min_quant_fragments`/`target_fragments`/`max_fragments` aren't a
+    consistent ``min_quant_fragments <= target_fragments <= max_fragments``
+    chain, or if any other parameter is out of range.
+    """
+    _validate_perform_lfq_params(
+        target_fragments,
+        min_quant_fragments,
+        max_fragments,
+        corr_thresh,
+        min_interference_runs,
+        interference_min_log2_fold,
+        interference_z_threshold,
+        epsilon,
+    )
+    return _perform_lfq_numba(
+        precursor_index_arr,
+        precursor_stop_index_arr,
+        all_xic_arr,
+        target_fragments,
+        min_quant_fragments,
+        max_fragments,
+        corr_thresh,
+        rep_type,
+        cube_corr,
+        min_interference_runs,
+        interference_min_log2_fold,
+        interference_z_threshold,
+        epsilon,
+    )
+
+
+@nb.njit(parallel=True, cache=True)
+def pmsm_median_intensity(xic_array, neighbor_window=0):
+    """Median of matched (>0), center-window fragment intensities per PmSM,
+    computed directly from an already-materialized ``(N, M, T)`` xic_array
+    (e.g. from `ResultsAggregator.get_xic_arrays`) -- already on absolute
+    intensity scale, so no rescaling is needed here.
+    """
+    N, M, T = xic_array.shape
+    center = T // 2
+    out = np.empty(N, dtype=xic_array.dtype)
+    for n in nb.prange(N):
+        values = np.empty(M * (2 * neighbor_window + 1), dtype=xic_array.dtype)
+        k = 0
+        for m in range(M):
+            for t in range(center - neighbor_window, center + neighbor_window + 1):
+                v = xic_array[n, m, t]
+                if v > 0:
+                    values[k] = v
+                    k += 1
+        if k == 0:
+            out[n] = np.nan
+            continue
+        vals = np.sort(values[:k])
+        mid = k // 2
+        if k % 2 == 1:
+            out[n] = vals[mid]
+        else:
+            out[n] = (vals[mid - 1] + vals[mid]) * 0.5
+
+    return out

@@ -40,6 +40,7 @@ def _set_x_exp(
     counter: int,
     ms2_frame_num: int,
     x_ind: np.ndarray = None,
+    x_rank: np.ndarray = None,
 ):
     if is_precursor:
         mz_arr = theo_peaks.precursor_mz_arr
@@ -90,6 +91,12 @@ def _set_x_exp(
                 x_exp[counter, EXP_REV_CLEAVAGE_INDEX_IDX] = theo_rev_cleavage_index
                 x_exp[counter, EXP_TIME_INDEX_IDX] = time_idx
 
+                # theoretical-intensity rank of this fragment (0 = library's most
+                # intense predicted fragment for this precursor), for any
+                # isotope; get_pmsm_median_intensity filters isotope via x_exp itself
+                if (x_rank is not None) and (is_precursor == False):
+                    x_rank[counter] = num_fragments - theo_i - 1
+
                 # save matched peak indices at the RT center
                 if (
                     (x_ind is not None)
@@ -127,6 +134,7 @@ def get_x_exp(
     peak_index_container: PeakIndexContainer = None,
     x_exp: np.ndarray = None,
     x_ind: np.ndarray = None,
+    x_rank: np.ndarray = None,
 ):
     if x_exp is None:
         x_exp = np.empty(
@@ -197,6 +205,7 @@ def get_x_exp(
         counter=counter,
         ms2_frame_num=ms2_frame_num,
         x_ind=x_ind,
+        x_rank=x_rank,
     )
 
     # ms2_scale is the fragment-ion max ab used to rescale x_exp's AB column

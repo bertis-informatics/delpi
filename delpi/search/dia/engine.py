@@ -171,17 +171,17 @@ class DIASearchEngine(BaseSearchEngine):
                 results["peak_indices"].append(x_ind)
 
                 x_exp = x_exp_t.numpy()[mask]
+                x_rank = x_rank_t.numpy()[mask]
                 ms1_scale_arr = ms1_scale_t.numpy()[mask]
                 ms2_scale_arr = ms2_scale_t.numpy()[mask]
 
                 # cheap scalar per PmSM -- always saved, regardless of save_quant,
                 # so PmSM assignment never depends on whether xic_array was persisted
                 results["median_intensity"].append(
-                    get_pmsm_median_intensity(x_exp, ms2_scale_arr)
+                    get_pmsm_median_intensity(x_exp, x_rank, ms2_scale_arr)
                 )
 
                 if save_quant:
-                    x_rank = x_rank_t.numpy()[mask]
                     results["ms1_area"].append(get_ms1_area(x_exp, ms1_scale_arr))
                     results["xic_array"].append(
                         get_xic_array(x_exp, x_rank, ms2_scale_arr)

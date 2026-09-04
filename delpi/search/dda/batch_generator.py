@@ -34,6 +34,7 @@ def _make_batch_in_parallel(
     X_theo: np.ndarray,
     X_exp: np.ndarray,
     X_indices: np.ndarray,
+    X_rank: np.ndarray,
     ms1_scale_arr: np.ndarray,
     ms2_scale_arr: np.ndarray,
 ):
@@ -42,6 +43,7 @@ def _make_batch_in_parallel(
 
     cur_batch_size = batch_indices.shape[0]
     X_indices[:] = -1
+    X_rank[:] = -1
     ms1_scale_arr[:] = -1.0
     ms2_scale_arr[:] = -1.0
 
@@ -68,6 +70,7 @@ def _make_batch_in_parallel(
             peak_index_container=peak_index_container,
             x_exp=X_exp[i],
             x_ind=X_indices[i],
+            x_rank=X_rank[i],
         )
         X_precursor_index[i] = precursor_index0 + min_precursor_index
         ms1_scale_arr[i] = ms1_scale
@@ -87,6 +90,7 @@ def _allocate_dda_buffer(batch_size: int, num_theoretical_peaks: int):
         "ms1_scale_arr": np.empty(batch_size, dtype=np.float32),
         "ms2_scale_arr": np.empty(batch_size, dtype=np.float32),
         "X_indices": np.empty((batch_size, 64), dtype=np.int32),
+        "X_rank": np.empty((batch_size, MAX_EXP_PEAK_TOKENS), dtype=np.int8),
     }
 
 
@@ -133,6 +137,7 @@ def generate_batches(
             buf["X_theo"],
             buf["X_exp"],
             buf["X_indices"],
+            buf["X_rank"],
             buf["ms1_scale_arr"],
             buf["ms2_scale_arr"],
         )
@@ -143,6 +148,7 @@ def generate_batches(
             buf["X_theo"][:cur_batch_size, :, :],
             buf["X_exp"][:cur_batch_size, :num_peaks, :],
             buf["X_indices"][:cur_batch_size, :],
+            buf["X_rank"][:cur_batch_size, :num_peaks],
             buf["ms1_scale_arr"][:cur_batch_size],
             buf["ms2_scale_arr"][:cur_batch_size],
         )

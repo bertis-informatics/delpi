@@ -347,9 +347,7 @@ def _compute_intensity_utilities(
     precursors never enter the utility (precursor-relative normalization,
     not raw ``log2(median_intensity)``).
     """
-    max_intensity = (
-        pl.col("median_intensity").max().over("precursor_index")
-    )
+    max_intensity = pl.col("median_intensity").max().over("precursor_index")
     relative_log_intensity = (
         (pl.col("median_intensity") + _INTENSITY_EPSILON)
         / (max_intensity + _INTENSITY_EPSILON)

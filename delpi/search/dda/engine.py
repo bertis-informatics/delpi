@@ -144,8 +144,9 @@ class DDASearchEngine(BaseSearchEngine):
             x_theo_t = tensors[2]
             x_exp_t = tensors[3]
             x_ind_t = tensors[4]
-            ms1_scale_t = tensors[5]
-            ms2_scale_t = tensors[6]
+            x_rank_t = tensors[5]
+            ms1_scale_t = tensors[6]
+            ms2_scale_t = tensors[7]
 
             n = x_theo_t.shape[0]
             X_theo = X_theo_tensor[:n]
@@ -178,12 +179,13 @@ class DDASearchEngine(BaseSearchEngine):
                 results["observed_rt"].append(observed_rt)
 
                 x_exp = x_exp_t.numpy()[mask]
+                x_rank = x_rank_t.numpy()[mask]
                 ms1_scale_arr = ms1_scale_t.numpy()[mask]
                 ms2_scale_arr = ms2_scale_t.numpy()[mask]
 
                 # cheap scalar per PmSM -- always saved, regardless of save_quant
                 results["median_intensity"].append(
-                    get_pmsm_median_intensity(x_exp, ms2_scale_arr)
+                    get_pmsm_median_intensity(x_exp, x_rank, ms2_scale_arr)
                 )
 
                 if save_quant:
