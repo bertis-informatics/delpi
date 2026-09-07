@@ -84,13 +84,12 @@ class BaseSearchEngine(ABC):
 
     def get_save_quant(self) -> bool:
         return (
-            self.state >= SearchState.SECOND_SEARCH
-            or not self.search_config.enable_transfer_learning
+            self.state >= SearchState.SECOND_SEARCH or not self.search_config.enable_mbr
         )
 
-    def get_logit_cutoff(self, base_cutoff: float, loose_delta: float = -3.0) -> float:
+    def get_logit_cutoff(self, base_cutoff: float) -> float:
         return (
-            base_cutoff + loose_delta
+            base_cutoff - 4.0
             if self.state >= SearchState.SECOND_SEARCH
             else base_cutoff
         )
@@ -99,7 +98,7 @@ class BaseSearchEngine(ABC):
         self.state = SearchState(self.state + 1)
 
     def get_db_dir(self):
-        if not self.search_config.enable_transfer_learning:
+        if not self.search_config.enable_mbr:
             return self.search_config.db_dir
         return (
             self.search_config.db_dir
@@ -108,7 +107,7 @@ class BaseSearchEngine(ABC):
         )
 
     def get_results_group_key(self):
-        if not self.search_config.enable_transfer_learning:
+        if not self.search_config.enable_mbr:
             return "first_results"
         return (
             "first_results"
@@ -378,7 +377,7 @@ class BaseSearchEngine(ABC):
             obs_rt=target_df["observed_rt"].to_numpy(),
             degree=5 if self.state < SearchState.SECOND_SEARCH else 2,
             min_rt_tolerance=0.1,
-            max_rt_tolerance=0.15,
+            max_rt_tolerance=0.1,
         )
 
         if after_full_search:

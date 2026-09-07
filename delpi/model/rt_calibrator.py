@@ -227,8 +227,8 @@ class RetentionTimeCalibrator(LinearProjectionCalibrator):
         max_rt_in_seconds: float,
         ref_rt: np.ndarray,
         obs_rt: np.ndarray,
-        min_rt_tolerance: float = 0.15,
-        max_rt_tolerance: float = 0.25,
+        min_rt_tolerance: float = 0.1,
+        max_rt_tolerance: float = 0.15,
         figure_path: Path = None,
         degree: int = 5,
     ) -> Self:

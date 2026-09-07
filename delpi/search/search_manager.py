@@ -109,7 +109,7 @@ class SearchManager:
         return self.search_config.input_files
 
     def get_db_dir(self):
-        if not self.search_config.enable_transfer_learning:
+        if not self.search_config.enable_mbr:
             return self.search_config.db_dir
         return (
             self.search_config.db_dir
@@ -118,7 +118,7 @@ class SearchManager:
         )
 
     def get_results_group_key(self):
-        if not self.search_config.enable_transfer_learning:
+        if not self.search_config.enable_mbr:
             return "first_results"
         return (
             "first_results"
@@ -273,7 +273,7 @@ class SearchManager:
             self.state = SearchState.FIRST_SEARCH
         else:
             self.state = SearchState.SECOND_SEARCH
-            logger.info(f"Second search after transfer learning")
+            logger.info("MBR-guided second-pass search")
 
         logger.info(f"Total runs to process: {len(input_files)}")
 
@@ -484,6 +484,95 @@ class SearchManager:
         )
         spec_generator.save(search_config.refined_db_dir)
 
+        self.save_library_confidence(target_df, spec_generator)
+
+    def build_refined_library_from_original(
+        self,
+        first_pmsm_df: pl.DataFrame,
+    ) -> None:
+        """Build the second-pass refined library by copying entries
+        straight from the first-pass (original) spectral library --
+        no transfer learning / re-prediction involved.
+
+        Target/decoy selection and ``library_confidence.parquet``
+        persistence are identical to :meth:`build_refined_library`; only
+        how the refined library's precursor/fragment rows are populated
+        differs -- they are copied verbatim from ``search_config.db_dir``
+        (including the original ``ref_rt``) instead of being predicted
+        with fine-tuned RT/MS2 models.
+        """
+
+        self.state = SearchState.REFINED_DB_PREP
+
+        search_config = self.search_config
+        q_value_cutoff = search_config.config.get(
+            "q_value_cutoff", DEFAULT_Q_VALUE_CUTOFF
+        )
+
+        logger.info("Selecting second-pass target precursors")
+        target_df = select_second_pass_targets(
+            first_pmsm_df, q_value_cutoff=q_value_cutoff
+        )
+
+        logger.info(f"Selecting paired decoys for {target_df.shape[0]:,} targets")
+        target_df = select_paired_decoys(search_config.db_dir, target_df)
+        target_df = target_df.filter(pl.col("decoy_precursor_index").is_not_null())
+
+        combined_precursor_index_arr = np.unique(
+            np.concatenate(
+                [
+                    target_df["precursor_index"].to_numpy(),
+                    target_df["decoy_precursor_index"].to_numpy(),
+                ]
+            )
+        ).astype(np.uint32)
+
+        logger.info(
+            f"Copying refined library entries from the original library "
+            f"({target_df.shape[0]:,} targets + paired decoys)"
+        )
+
+        # No predictors needed here -- only `_build_database` (the
+        # peptide/modification/precursor construction shared with the TL
+        # path) is used below, so `ref_rt` stays the original library's value.
+        spec_generator = RefinedSpectralLibGenerator(
+            rt_predictor=None,
+            ms2_predictor=None,
+            apply_phospho=self.search_config.is_phospho_search,
+            min_precursor_charge=search_config["precursor"].get("min_charge", 2),
+            max_precursor_charge=search_config["precursor"].get("max_charge", 4),
+            min_precursor_mz=search_config["precursor"].get("min_mz", 300),
+            max_precursor_mz=search_config["precursor"].get("max_mz", 1800),
+            min_fragment_charge=search_config["fragment"].get("min_charge", 1),
+            max_fragment_charge=search_config["fragment"].get("max_charge", 2),
+            min_fragment_mz=search_config["fragment"].get("min_mz", 200),
+            max_fragment_mz=search_config["fragment"].get("max_mz", 1800),
+        )
+        spec_generator._build_database(
+            search_config.db_dir, combined_precursor_index_arr
+        )
+        ## Update the reference retention times in the modification dataframe
+        spec_generator._update_ref_rt(target_df)
+
+        # Copy fragment rows verbatim, remapped from the original library's
+        # g_precursor_index onto the refined library's local precursor_index.
+        spec_generator.speclib_df = (
+            pl.scan_parquet(search_config.db_dir / "speclib_df.parquet")
+            .filter(pl.col("precursor_index").is_in(combined_precursor_index_arr))
+            .rename({"precursor_index": "g_precursor_index"})
+            .join(
+                spec_generator.precursor_df.lazy().select(
+                    pl.col("g_precursor_index", "precursor_index")
+                ),
+                on="g_precursor_index",
+                how="inner",
+            )
+            .sort("precursor_index")
+            .select(list(spec_generator.speclib_df_schema.keys()))
+            .collect()
+        )
+
+        spec_generator.save(search_config.refined_db_dir)
         self.save_library_confidence(target_df, spec_generator)
 
     def save_library_confidence(
@@ -815,8 +904,8 @@ class SearchManager:
             "q_value_cutoff", DEFAULT_Q_VALUE_CUTOFF
         )
 
-        # Final MBR identification: for the two-pass (transfer learning)
-        # search, a precursor-run ID is only accepted when it passes *both*
+        # Final MBR identification: for the two-pass (MBR-guided) search, a
+        # precursor-run ID is only accepted when it passes *both*
         # the library-level cutoff (first-pass global q-value, carried via
         # library_confidence.parquet) and the second-pass run-specific
         # cutoff. The second pass's own global_precursor_q_value is
@@ -889,11 +978,11 @@ class SearchManager:
 
         self.check_result_files()
 
-        enable_tl = self.search_config.enable_transfer_learning
-        if enable_tl:
-            logger.info("Two-stage search (transfer learning enabled)")
+        enable_mbr = self.search_config.enable_mbr
+        if enable_mbr:
+            logger.info("Two-pass search (MBR-guided second-pass search enabled)")
         else:
-            logger.info("Single-stage search (transfer learning disabled)")
+            logger.info("Single-pass search (MBR disabled)")
 
         self.prepare_database()
 
@@ -907,21 +996,24 @@ class SearchManager:
             SearchState.FIRST_TDA, run_protein_grouping=True
         )
 
-        if enable_tl:
+        if enable_mbr:
             self.save_pmsm_df(first_pmsm_df, filename_stem="pmsm_results.first")
 
-            # Transfer learning: dual-FDR + top-k target selection for
-            # predictor fine-tuning, refined target-decoy library
-            # construction (paired decoys) and library confidence.
-            rt_predictor, ms2_predictor = self.perform_transfer_learning(first_pmsm_df)
+            # -- Transfer learning path (disabled) -- fine-tunes RT/MS2
+            # predictors and builds the refined library from their
+            # predictions. Left in place for reference / possible re-enable.
+            # rt_predictor, ms2_predictor = self.perform_transfer_learning(first_pmsm_df)
+            # self.build_refined_library(first_pmsm_df, rt_predictor, ms2_predictor)
 
-            self.build_refined_library(first_pmsm_df, rt_predictor, ms2_predictor)
+            # MBR-guided second-pass search: refined library copied verbatim
+            # from the first-pass library entries -- no TL / re-prediction.
+            self.build_refined_library_from_original(first_pmsm_df)
 
-            # Second pass: re-search every run against the refined library
+            # MBR-guided second-pass search: re-search every run against the refined library
             self.execute_batch()
 
-            # Second pass: global re-scoring against the refined library.
-            # Target protein-group membership + library q-values are reused
+            # MBR-guided second-pass search: global re-scoring against the refined
+            # library. Target protein-group membership + library q-values are reused
             # from the first pass and decoys are freshly grouped (see
             # FDRAnalyzer.perform_global_analysis); the resulting global
             # q-value here is diagnostic only, so results are reported/
@@ -944,7 +1036,7 @@ class SearchManager:
             pmsm_df,
             pg_quant_df,
             library_q_value_column=library_q_value_column,
-            two_pass_mode=enable_tl,
+            two_pass_mode=enable_mbr,
         )
         self.state = SearchState.DONE
 

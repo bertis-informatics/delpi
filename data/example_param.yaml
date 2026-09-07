@@ -21,12 +21,9 @@ ms2_mass_tol_in_ppm: 10
 q_value_cutoff: 0.01
 # protein grouping mode: "lead_only" or "parsimonious_grouping" (default)
 grouping_type: parsimonious_grouping
-# enable_transfer_learning enables the 2-stage search that fine-tunes the models
-# (transfer learning) between a first and second search. When omitted or false,
-# a single-stage search is performed.
-# This is unnecessary for typical global or phospho proteomics searches, but is
-# beneficial for searches involving rare or unseen PTMs.
-enable_transfer_learning: false
+# enable_mbr enables the 2-pass, Match-Between-Runs-guided second-pass search.
+# When omitted or false, a single-pass search is performed.
+enable_mbr: true
 # decoy_method can be either "mutation", or "pseudo_shuffle", or "pseudo_reverse", 
 # default is "mutation", which is recommended for better FDR estimation
 decoy_method: mutation

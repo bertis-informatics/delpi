@@ -188,6 +188,53 @@ class RefinedSpectralLibGenerator(SpectralLibGenerator):
         self.precursor_df.write_parquet(save_dir / "precursor_df.parquet")
         self.speclib_df.write_parquet(save_dir / "speclib_df.parquet")
 
+    def _update_ref_rt(self, target_df: pl.DataFrame):
+        from delpi.model.rt_calibrator import RetentionTimeCalibrator
+
+        tmp_df = (
+            target_df.group_by("peptidoform_index")
+            .agg(
+                pl.col("predicted_rt").median(),
+                pl.col("observed_rt").median(),
+            )
+            .join(
+                self.modification_df.select(
+                    pl.col("peptidoform_index").alias("new_peptidoform_index"),
+                    pl.col("g_peptidoform_index"),
+                    pl.col("ref_rt"),
+                ),
+                left_on="peptidoform_index",
+                right_on="g_peptidoform_index",
+                how="inner",
+            )
+        )
+
+        rt_calibrator = RetentionTimeCalibrator.train(
+            min_rt_in_seconds=tmp_df["ref_rt"].min() - 2,
+            max_rt_in_seconds=tmp_df["ref_rt"].max() + 2,
+            ref_rt=tmp_df["predicted_rt"],
+            obs_rt=tmp_df["ref_rt"],
+            degree=2,
+        )
+        new_ref_rt = rt_calibrator.predict(tmp_df["observed_rt"])["predicted_rt"]
+        tmp_df = tmp_df.with_columns(pl.Series("new_ref_rt", new_ref_rt))
+
+        self.modification_df = (
+            self.modification_df.join(
+                tmp_df.select(["new_peptidoform_index", "new_ref_rt"]),
+                left_on="peptidoform_index",
+                right_on="new_peptidoform_index",
+                how="left",
+            )
+            .with_columns(
+                pl.when(pl.col("new_ref_rt").is_not_null())
+                .then(pl.col("new_ref_rt"))
+                .otherwise(pl.col("ref_rt"))
+                .alias("ref_rt")
+            )
+            .drop("new_ref_rt")
+        )
+
 
 def test():
 

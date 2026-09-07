@@ -163,17 +163,17 @@ class SearchConfig:
         return db_params
 
     @property
-    def enable_transfer_learning(self) -> bool:
-        """Whether to run the 2-stage search with transfer learning.
+    def enable_mbr(self) -> bool:
+        """Whether to run the 2-pass, Match-Between-Runs-guided search.
 
-        When the ``enable_transfer_learning`` option is not specified in the
-        configuration, a single-stage search is performed. Also always
+        When the ``enable_mbr`` option is not specified in the
+        configuration, a single-pass search is performed. Also always
         disabled when there is only a single input run, since the two-pass
         MBR/propagation design requires cross-run global scoring.
         """
         if len(self.input_files) <= 1:
             return False
-        return bool(self.config.get("enable_transfer_learning", True))
+        return bool(self.config.get("enable_mbr", True))
 
     @property
     def is_phospho_search(self) -> bool:
