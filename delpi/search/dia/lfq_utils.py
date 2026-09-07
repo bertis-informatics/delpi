@@ -231,8 +231,18 @@ def _nb_build_L_b(
     # peptides-per-protein, both always well within int32 range
     counts = np.zeros(n_pairs, dtype=np.int32)
 
-    # 1st pass: counts per pair
     N = pep_idx.shape[0]
+
+    # per-run anchor target: max observed log-intensity for this run, over
+    # every row (not just paired ones) - used as a weak fallback reference
+    # for runs left disconnected from the rest by the pairwise ratios below
+    ref = np.full(n_runs, -np.inf, dtype=np.float32)
+    for idx in range(N):
+        r = run_idx[idx]
+        if logI[idx] > ref[r]:
+            ref[r] = logI[idx]
+
+    # 1st pass: counts per pair
     start = 0
     while start < N:
         pid = pep_idx[start]
@@ -334,27 +344,7 @@ def _nb_build_L_b(
                 b[j] -= w * med
             p += 1
 
-    return L, b
-
-
-@nb.njit(cache=True)
-def _nb_find_root(parent: np.ndarray, i: int) -> int:
-    root = i
-    while parent[root] != root:
-        root = parent[root]
-    while parent[i] != root:
-        nxt = parent[i]
-        parent[i] = root
-        i = nxt
-    return root
-
-
-@nb.njit(cache=True)
-def _nb_union(parent: np.ndarray, i: int, j: int):
-    ri = _nb_find_root(parent, i)
-    rj = _nb_find_root(parent, j)
-    if ri != rj:
-        parent[ri] = rj
+    return L, b, ref
 
 
 @nb.njit(cache=True)
@@ -372,15 +362,21 @@ def _nb_maxlfq_all_proteins(
     Vectorized MaxLFQ over all proteins in one compiled pass.
 
     Inputs must already be sorted by (protein_idx, peptide_idx); run_idx is a
-    dense global run code aligned with the other arrays. For each protein
-    this reproduces `_maxlfq_one_protein`'s logic (run/peptide grouping via
-    `_nb_build_L_b`, connected components, per-component gauge fix + solve +
-    rescale), but without any per-protein Python/Polars round trip.
+    dense global run code aligned with the other arrays. For each protein,
+    `_nb_build_L_b` builds the run/peptide pairwise-ratio Laplacian `L`/`b`
+    plus a per-run anchor target `ref`; a single weakly-anchored linear
+    system is then solved for all of the protein's observed runs at once
+    (no per-connected-component splitting), and the result is rescaled once
+    to the protein's total observed intensity - all without any per-protein
+    Python/Polars round trip.
 
     protein_idx/peptide_idx/run_idx are expected as int32 and logI/intensity
     as float32 (dense codes/observed values never need 64-bit range or
-    precision here); the per-protein L/b/solve buffers are float32 too, since
-    MaxLFQ ratios don't need double precision.
+    precision here). The per-protein L/b/ref/solve buffers are promoted to
+    float64: mixing tiny anchor weights with unit-weight pairwise edges in
+    the same Laplacian is more ill-conditioned than the plain pairwise-only
+    system float32 previously handled, so the solve needs the extra
+    precision.
     """
     N = protein_idx.shape[0]
 
@@ -438,7 +434,7 @@ def _nb_maxlfq_all_proteins(
             row = prot_end
             continue
 
-        L, b = _nb_build_L_b(
+        L, b, ref = _nb_build_L_b(
             k,
             peptide_idx[prot_start:prot_end],
             run_local_buf[prot_start:prot_end],
@@ -446,80 +442,41 @@ def _nb_maxlfq_all_proteins(
             min_ratio_count,
         )
 
-        # connected components via union-find over L's off-diagonal pattern
-        # (all bounded by k = local run count for this protein, so int32 is ample)
-        comp_parent = np.empty(k, dtype=np.int32)
-        for t in range(k):
-            comp_parent[t] = t
+        # solve all of the protein's observed runs as one global system rather
+        # than per connected component: splitting by component and rescaling
+        # each independently (old behavior) lets components with different
+        # precursor composition drift to an arbitrary relative scale. A weak
+        # anchor per run toward its own max observed log-intensity (`ref`)
+        # keeps the system solvable even when some runs are disconnected from
+        # the rest by the pairwise ratios, while barely perturbing runs that
+        # already have strong pairwise support (anchor_weight is tiny next to
+        # the unit-weight pairwise edges already accumulated on L's diagonal).
+        L64 = L.astype(np.float64)
+        b64 = b.astype(np.float64)
+        ref64 = ref.astype(np.float64)
+        anchor_weight = 1e-4
         for i in range(k):
-            for j in range(i + 1, k):
-                if L[i, j] != 0.0:
-                    _nb_union(comp_parent, i, j)
+            w = anchor_weight * max(L64[i, i], 1.0)
+            L64[i, i] += w
+            b64[i] += w * ref64[i]
 
-        comp_root = np.empty(k, dtype=np.int32)
-        for i in range(k):
-            comp_root[i] = _nb_find_root(comp_parent, i)
+        # float64 solve: mixing tiny anchor weights with unit-weight pairwise
+        # edges is more ill-conditioned than the anchor-free system, so the
+        # extra precision (vs. the float32 arrays used everywhere else) matters
+        x = np.linalg.solve(L64, b64)
 
-        # counting sort: group local run indices by component root
-        comp_count = np.zeros(k, dtype=np.int32)
-        for i in range(k):
-            comp_count[comp_root[i]] += 1
-        comp_offset = np.zeros(k + 1, dtype=np.int32)
-        for r in range(k):
-            comp_offset[r + 1] = comp_offset[r] + comp_count[r]
-        comp_write = np.zeros(k, dtype=np.int32)
-        comp_members = np.empty(k, dtype=np.int32)
-        for i in range(k):
-            r = comp_root[i]
-            pos = comp_offset[r] + comp_write[r]
-            comp_members[pos] = i
-            comp_write[r] += 1
+        # rescale once for the whole protein (not once per component) so all
+        # of its runs share one consistent abundance scale
+        max_x = np.max(x)
+        relative = np.exp(x - max_x)
+        rel_sum = np.sum(relative)
+        total_intensity = np.sum(intensity_by_run_local[:k])
 
-        for r in range(k):
-            cnt = comp_count[r]
-            if cnt == 0:
-                continue
-            s = comp_offset[r]
-
-            if cnt == 1:
-                idx0 = comp_members[s]
-                out_protein[out_count] = prot
-                out_run[out_count] = local_to_global[idx0]
-                out_abundance[out_count] = intensity_by_run_local[idx0]
-                out_count += 1
-                continue
-
-            L_sub = np.empty((cnt, cnt), dtype=np.float32)
-            b_sub = np.empty(cnt, dtype=np.float32)
-            for a in range(cnt):
-                ia = comp_members[s + a]
-                for c in range(cnt):
-                    L_sub[a, c] = L[ia, comp_members[s + c]]
-                b_sub[a] = b[ia]
-
-            # gauge fixing within this component: x_sub[0] = 0
-            L_sub[0, :] = 0.0
-            L_sub[:, 0] = 0.0
-            L_sub[0, 0] = 1.0
-            b_sub[0] = 0.0
-
-            x_sub = np.linalg.solve(L_sub, b_sub)
-
-            # relative linear-scale profile, rescaled to this component's observed intensity total
-            max_x = np.max(x_sub)
-            relative = np.exp(x_sub - max_x)
-            rel_sum = np.sum(relative)
-
-            total_intensity = 0.0
-            for a in range(cnt):
-                total_intensity += intensity_by_run_local[comp_members[s + a]]
-
-            for a in range(cnt):
-                idxa = comp_members[s + a]
-                out_protein[out_count] = prot
-                out_run[out_count] = local_to_global[idxa]
-                out_abundance[out_count] = relative[a] * total_intensity / rel_sum
-                out_count += 1
+        for a in range(k):
+            out_protein[out_count] = prot
+            out_run[out_count] = local_to_global[a]
+            out_abundance[out_count] = relative[a] * total_intensity / rel_sum
+            out_count += 1
 
         row = prot_end
 
