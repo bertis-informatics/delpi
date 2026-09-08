@@ -271,3 +271,25 @@ class ResultsAggregator:
                 xic_arrays[jj] = xic_arr[ii]
 
         return xic_arrays, ms1_area_arr
+
+    def write_back_scores(
+        self,
+        group_key: str,
+        pmsm_df: pl.DataFrame,
+    ) -> None:
+
+        for run_index, result_manager in self._results_dict.items():
+            sub_df = pmsm_df.filter(pl.col("run_index") == run_index)
+            if sub_df.shape[0] == 0:
+                continue
+
+            num_raw = result_manager.read_dict(
+                group_key, data_keys=["precursor_index"]
+            )["precursor_index"].shape[0]
+            score_arr = np.full(num_raw, np.nan, dtype=np.float32)
+            # q_value_arr = np.full(num_raw, np.nan, dtype=np.float32)
+            idx = sub_df["pmsm_index"].to_numpy()
+            score_arr[idx] = sub_df["score"].to_numpy()
+            # q_value_arr[idx] = sub_df["precursor_q_value"].to_numpy()
+
+            result_manager.write_dict(group_key, {"score": score_arr})

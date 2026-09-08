@@ -75,7 +75,7 @@ class TDAProcessor:
         result_aggregator: ResultsAggregator,
         group_key: str,
         training_params: dict = None,
-        pass_label: str = "global",
+        pass_label: str = "first",
     ) -> pl.DataFrame:
         """Cross-run TDA across multiple LC-MS runs (2-fold CV).
 
@@ -135,7 +135,7 @@ class TDAProcessor:
         scored_df = pl.concat([scored_a, scored_b], how="vertical")
 
         # for debugging: save all scored PmSMs before selection
-        scored_df.write_parquet(self.output_dir / "pmsm_scores.parquet")
+        # scored_df.write_parquet(self.output_dir / "pmsm_scores.parquet")
         # scored_df = pl.read_parquet(self.output_dir / "pmsm_scores.parquet")
 
         # Bring in the rest of each PmSM's columns (frame_num, predicted_rt,
@@ -147,38 +147,6 @@ class TDAProcessor:
             how="left",
         )
         return scored_df
-
-    def write_back_scores(
-        self,
-        pmsm_df: pl.DataFrame,
-        result_aggregator: ResultsAggregator,
-        group_key: str,
-    ) -> None:
-        """Persist ``score`` and run-specific ``precursor_q_value`` from a
-        cross-run (:meth:`run_global`) result back into each run's own HDF
-        group, aligned to that run's original pmsm_index order.
-
-        Used so that later per-run steps (e.g. RT calibration ahead of a
-        following full search) can bootstrap from these results without a
-        redundant run-specific TDA pass.
-        """
-        for run_index, result_manager in result_aggregator._results_dict.items():
-            sub_df = pmsm_df.filter(pl.col("run_index") == run_index)
-            if sub_df.shape[0] == 0:
-                continue
-
-            num_raw = result_manager.read_dict(
-                group_key, data_keys=["precursor_index"]
-            )["precursor_index"].shape[0]
-            score_arr = np.full(num_raw, np.nan, dtype=np.float32)
-            q_value_arr = np.full(num_raw, np.nan, dtype=np.float32)
-            idx = sub_df["pmsm_index"].to_numpy()
-            score_arr[idx] = sub_df["score"].to_numpy()
-            q_value_arr[idx] = sub_df["precursor_q_value"].to_numpy()
-
-            result_manager.write_dict(
-                group_key, {"score": score_arr, "precursor_q_value": q_value_arr}
-            )
 
     def _train_and_score_fold(
         self,

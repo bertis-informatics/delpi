@@ -24,6 +24,8 @@ from delpi.search.config import SearchConfig
 from delpi.search.result_manager import ResultManager
 from delpi.search.search_state import SearchState
 from delpi.search.base_engine import BaseSearchEngine
+from delpi.search.progress.tracker import ProgressTracker
+from delpi.search.progress.dummy_tracker import DummyProgressTracker
 from delpi.search.dda.peak_group import find_peak_groups
 from delpi.search.dda.batch_generator import count_total_batches, generate_batches
 from delpi.search.clustering import cluster_matches
@@ -32,8 +34,6 @@ from delpi.utils.device_ctx import make_inference_contexts
 from delpi.utils.prefetch import Prefetcher, pin_numpy_tuple
 from delpi.constants import ISOLATION_LOWER_TOL, ISOLATION_UPPER_TOL
 from delpi.model.input import THEORETICAL_PEAK, EXPERIMENTAL_PEAK
-from delpi.search.progress.tracker import ProgressTracker
-from delpi.search.progress.dummy_tracker import DummyProgressTracker
 
 logger = logging.getLogger(__name__)
 
@@ -397,13 +397,6 @@ class DDASearchEngine(BaseSearchEngine):
         logger.info("RT calibration fitted")
 
         if self.state == SearchState.FIRST_SEARCH:
-            # result_manager.write_df(
-            #     df=run.meta_df.select(pl.exclude("peak_start", "peak_stop")),
-            #     key="meta_df",
-            # )
-            # run.meta_df.select(pl.exclude("peak_start", "peak_stop")).write_parquet(
-            #     result_manager.output_dir / f"{result_manager.run_name}.meta_df.parquet"
-            # )
             result_manager.write_attr("lc_peak_width", self.lc_peak_width)
             result_manager.write_attr(
                 "gradient_length_in_seconds", run.gradient_length_in_seconds

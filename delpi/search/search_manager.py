@@ -691,9 +691,7 @@ class SearchManager:
 
         search_config = self.search_config
         group_key = self.get_results_group_key()
-        q_value_cutoff = search_config.config.get(
-            "q_value_cutoff", DEFAULT_Q_VALUE_CUTOFF
-        )
+        q_value_cutoff = search_config.q_value_cutoff
         use_protein_picker = search_config.config.get("use_protein_picker", True)
         grouping_type = search_config.config.get(
             "grouping_type", "parsimonious_grouping"
@@ -736,6 +734,7 @@ class SearchManager:
             },
             pass_label="first" if state < SearchState.SECOND_SEARCH else "second",
         )
+        result_aggregator.write_back_scores(group_key, scored_df)
 
         # 2) Filter out low-scoring PmSMs before assignment
         max_score = pl.col("score").max().over(["precursor_index", "run_index"])
@@ -760,19 +759,6 @@ class SearchManager:
             library_confidence_df,
         )
 
-        if state == SearchState.FIRST_TDA:
-            # Persist score/precursor_q_value back into each run's own
-            # "first_results" HDF group so that the RT calibration bootstrap
-            # ahead of the second full search (see
-            # BaseSearchEngine._perform_rt_calibration) can reuse them
-            # without a redundant run-specific TDA pass.
-            processor.write_back_scores(pmsm_df, result_aggregator, group_key)
-
-        # Second pass: report/aggregate using the first-pass-derived library
-        # q-values instead of this pass's own (diagnostic-only) global
-        # q-value, since only library-confirmed precursors are reportable.
-        # (protein_group/master_protein and library_*_q_value columns are
-        # already joined onto pmsm_df above, via FDRAnalyzer.perform_global_analysis.)
         self.log_id_statistics_table(
             pmsm_df,
             q_value_cutoff,
@@ -788,9 +774,7 @@ class SearchManager:
 
         logger.info("Performing cross-run quantification")
         self.state = SearchState.QUANTIFICATION
-        q_value_cutoff = self.search_config.config.get(
-            "q_value_cutoff", DEFAULT_Q_VALUE_CUTOFF
-        )
+        q_value_cutoff = self.search_config.q_value_cutoff
 
         result_aggregator = ResultsAggregator(
             db_dir=self.get_db_dir(), search_config=self.search_config
@@ -899,9 +883,7 @@ class SearchManager:
             "output_format", DEFAULT_REPORT_FORMAT
         ).lower()
         output_decoy = self.search_config.config.get("output_decoy", True)
-        q_value_cutoff = self.search_config.config.get(
-            "q_value_cutoff", DEFAULT_Q_VALUE_CUTOFF
-        )
+        q_value_cutoff = self.search_config.q_value_cutoff
 
         # Final MBR identification: for the two-pass (MBR-guided) search, a
         # precursor-run ID is only accepted when it passes *both*

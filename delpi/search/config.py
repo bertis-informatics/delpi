@@ -1,11 +1,13 @@
 from typing import Union, List
 from pathlib import Path
 
+
 from pymsio import MassSpecFileReader
 from delpi.chem.modification_param import ModificationParam
 from delpi.search.result_manager import ResultManager
 from delpi.database.decoy_generator import DecoyGenerator
 from delpi.utils.yaml_file import load_yaml, save_yaml
+from delpi.constants import DEFAULT_Q_VALUE_CUTOFF
 
 SUPPORTED_FILE_TYPES = (".raw", ".mzml", ".mzml.gz", "h5")
 
@@ -44,6 +46,10 @@ class SearchConfig:
 
     def save(self, yaml_path: Union[Path, str]):
         save_yaml(yaml_path, self.config)
+
+    @property
+    def q_value_cutoff(self):
+        return self.config.get("q_value_cutoff", DEFAULT_Q_VALUE_CUTOFF)
 
     @property
     def acquisition_method(self) -> str:
