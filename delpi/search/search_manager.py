@@ -138,12 +138,11 @@ class SearchManager:
         Returns:
             BaseSearchEngine subclass instance
         """
-        # Determine acquisition method from config
-        acq_method = self.search_config.config.get("acquisition_method", "DIA")
+        acq_method = self.search_config.acquisition_method
 
-        if acq_method.upper() == "DDA":
+        if acq_method == "DDA":
             return DDASearchEngine(self.search_config, self.device, self.state)
-        elif acq_method.upper() == "DIA":
+        elif acq_method == "DIA":
             return DIASearchEngine(self.search_config, self.device, self.state)
         else:
             raise ValueError(
@@ -809,7 +808,7 @@ class SearchManager:
         lfq = LabelFreeQuantifier(
             result_aggregator,
             group_key=self.get_results_group_key(),
-            acq_method=self.search_config.config.get("acquisition_method", "DDA"),
+            acq_method=self.search_config.acquisition_method,
         )
 
         # LabelFreeQuantifier returns a minimal DataFrame keyed by
@@ -827,7 +826,7 @@ class SearchManager:
         )
 
         ## run MaxLFQ
-        if self.search_config.config.get("acquisition_method", "DDA").upper() == "DIA":
+        if self.search_config.acquisition_method == "DIA":
             logger.info("Performing protein quantification with MaxLFQ ")
             protein_group_q_value_column = (
                 "library_protein_group_q_value"

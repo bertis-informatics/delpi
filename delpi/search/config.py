@@ -46,6 +46,11 @@ class SearchConfig:
         save_yaml(yaml_path, self.config)
 
     @property
+    def acquisition_method(self) -> str:
+        """Acquisition method for this search: 'DDA' or 'DIA' (default 'DIA')."""
+        return self.config.get("acquisition_method", "DIA").upper()
+
+    @property
     def db_dir(self):
         return Path(self.config["database_directory"])
 
@@ -167,13 +172,15 @@ class SearchConfig:
         """Whether to run the 2-pass, Match-Between-Runs-guided search.
 
         When the ``enable_mbr`` option is not specified in the
-        configuration, a single-pass search is performed. Also always
-        disabled when there is only a single input run, since the two-pass
+        configuration, the default depends on the acquisition method: DIA
+        defaults to enabled, DDA defaults to disabled. Also always disabled
+        when there is only a single input run, since the two-pass
         MBR/propagation design requires cross-run global scoring.
         """
         if len(self.input_files) <= 1:
             return False
-        return bool(self.config.get("enable_mbr", True))
+        default = self.acquisition_method == "DIA"
+        return bool(self.config.get("enable_mbr", default))
 
     @property
     def is_phospho_search(self) -> bool:
