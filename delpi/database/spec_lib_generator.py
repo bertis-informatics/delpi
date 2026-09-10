@@ -45,7 +45,7 @@ class SpectralLibGenerator:
         max_charge: int = 2,
         prefix_ion_type=BaseIonType.B,
         suffix_ion_type=BaseIonType.Y,
-        max_fragments=16,
+        max_fragments: int = 16,
         apply_phospho=False,
         device: Union[str, torch.device] = "cuda:0",
         ms2_predictor: Ms2SpectrumPredictor = None,

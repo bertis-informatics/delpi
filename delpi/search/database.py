@@ -72,6 +72,7 @@ def build_database(
             device=device,
             use_multiprocessing=True,
             precursor_chunk_size=65_536,
+            save_dir=db_dir,
             batch_size=batch_size,
             progress=progress,
         )
@@ -79,6 +80,7 @@ def build_database(
         db.save(save_dir=db_dir)
         logger.info(f"Complete building database, saved to: {db_dir}")
     finally:
+        progress.complete()
         progress.close()
         if progress_queue is not None:
             progress_queue.put(None)  # sentinel — tells parent we're done
