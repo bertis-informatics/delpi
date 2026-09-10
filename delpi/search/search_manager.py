@@ -159,7 +159,13 @@ class SearchManager:
 
             from delpi.search.database import build_database_in_subprocess
 
-            build_database_in_subprocess(self.search_config, self.device)
+            batch_size = self.search_config.config.get("batch_size", 512)
+            build_database_in_subprocess(
+                self.search_config,
+                self.device,
+                batch_size=batch_size,
+                progress=self._progress,
+            )
         else:
             logger.info(f"Use existing peptide database: {self.search_config.db_dir}")
 
@@ -225,36 +231,49 @@ class SearchManager:
         self._resolve_batch_size()
 
     def _resolve_batch_size(self) -> None:
-        """Resolve ``batch_size`` in search config from 'auto' or an explicit value.
-
-        Rule of thumb: 1024 for 24 GB GPU, scaling linearly and rounding
-        down to the nearest power of 2.  Clamped to [256, 2048].
+        """Resolve ``batch_size`` from 'auto' or an explicit value.
+        Auto batch size is determined from nominal GPU VRAM:
+                <  8 GB : 256
+                8-15 GB : 512
+                16-31 GB: 1024
+                >= 32 GB: 2048
+        CUDA-reported total memory is rounded to the nearest GB to account
+        for the small difference between nominal and reported VRAM.
         """
         raw = self.search_config.config.get("batch_size", "auto")
+
         if isinstance(raw, int) or (isinstance(raw, str) and raw.isdigit()):
             self.search_config.config["batch_size"] = int(raw)
             return
 
-        # auto – determine from GPU memory
         device = self._validated_device
-        if device is not None and device.type == "cuda":
-            mem_gb = torch.cuda.get_device_properties(device).total_memory / (1024**3)
-        else:
-            mem_gb = 12  # conservative fallback
 
-        raw_bs = mem_gb / 24 * 1024
-        # round to nearest power of 2
-        log2 = (
-            raw_bs.bit_length() - 1
-            if isinstance(raw_bs, int)
-            else int(raw_bs).bit_length() - 1
-        )
-        lower = 1 << log2
-        upper = 1 << (log2 + 1)
-        bs = lower if (raw_bs - lower) < (upper - raw_bs) else upper
-        bs = max(256, min(bs, 2048))
+        if device is not None and device.type == "cuda":
+            total_memory = torch.cuda.get_device_properties(device).total_memory
+            reported_mem_gb = total_memory / (1024**3)
+
+            # e.g. 15.8 GiB reported by CUDA -> nominal 16 GB GPU
+            nominal_mem_gb = int(reported_mem_gb + 0.5)
+
+            if nominal_mem_gb >= 32:
+                bs = 2048
+            elif nominal_mem_gb >= 16:
+                bs = 1024
+            elif nominal_mem_gb >= 8:
+                bs = 512
+            else:
+                bs = 256
+
+            logger.info(
+                f"Auto-resolved batch size: {bs} "
+                f"(GPU memory: {reported_mem_gb:.1f} GiB, "
+                f"nominal: ~{nominal_mem_gb} GB)"
+            )
+        else:
+            bs = 512
+            logger.info(f"Auto-resolved batch size: {bs} " "(CUDA GPU not available)")
+
         self.search_config.config["batch_size"] = bs
-        logger.info(f"Auto-resolved batch size: {bs}")
 
     def execute_batch(self) -> None:
         """Execute workflow for all input files using separate processes.

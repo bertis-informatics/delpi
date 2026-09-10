@@ -161,6 +161,7 @@ def _select_intense_fragments(
 
     intensity_arr = intensity_arr.flatten()
     mz_arr = mz_arr.flatten()
+    is_prefix_flat_arr = ion_type_container.is_prefix_arr[ion_type_index_arr]
     # cleavage_index_arr.flatten()
 
     undetectable_mask = (
@@ -171,7 +172,14 @@ def _select_intense_fragments(
     intensity_arr[undetectable_mask] = 0
     zero_mask = intensity_arr == 0
     intensity_arr[zero_mask] = 1e-4 * np.random.rand(zero_mask.sum())
-    sorted_ii = intensity_arr.argsort()[-max_fragments:]
+
+    # argsort() alone doesn't break intensity ties reproducibly, so use two
+    # stable sorts (numba has no np.lexsort) to sort by intensity with
+    # is_prefix as the tie-break key.
+    secondary_order = is_prefix_flat_arr.argsort(kind="mergesort")
+    primary_order = intensity_arr[secondary_order].argsort(kind="mergesort")
+    sorted_ii = secondary_order[primary_order][-max_fragments:]
+
     intensity_arr /= intensity_arr[sorted_ii[-1]]
     ion_type_arr = ion_type_index_arr[sorted_ii]
 
@@ -235,6 +243,72 @@ def update_speclib_arr(
 
         # update speclib arrays
         st = precursor_index * max_fragments
+        ed = st + max_fragments
+        out_precursor_index_arr[st:ed] = precursor_index
+        out_clevage_index_arr[st:ed] = cleavage_index_arr
+        out_is_prefix_arr[st:ed] = is_prefix_arr
+        out_charge_arr[st:ed] = charge_arr
+        out_mz_arr[st:ed] = mz_arr
+        out_pred_intensity_arr[st:ed] = pred_intensity_arr
+        for k in range(max_fragments):
+            out_rank_arr[st + k] = max_fragments - k
+
+
+@nb.njit(parallel=True, cache=True)
+def update_speclib_chunk_arr(
+    out_precursor_index_arr: np.ndarray,
+    out_clevage_index_arr: np.ndarray,
+    out_is_prefix_arr: np.ndarray,
+    out_charge_arr: np.ndarray,
+    out_mz_arr: np.ndarray,
+    out_pred_intensity_arr: np.ndarray,
+    out_rank_arr: np.ndarray,
+    prefix_mass_container: PrefixMassArrayContainer,
+    ion_type_container: IonTypeContainer,
+    peptidoform_index_arr: np.ndarray,
+    batch_precursor_index_arr: np.ndarray,
+    batch_intensity_arr: np.ndarray,
+    chunk_start_precursor_index: int,
+    max_fragments: int = 16,
+    detectable_min_mz: float = 200.0,
+    detectable_max_mz: float = 2000.0,
+):
+    # Same as update_speclib_arr(), except output rows are written to a
+    # chunk-local position while global IDs are still used for lookups.
+
+    ion_count = ion_type_container.charge_arr.shape[0]
+    batch_intensity_arr = batch_intensity_arr[..., :ion_count]
+    batch_count, cleavage_count, _ = batch_intensity_arr.shape
+    prefix_mass_stop_idx_arr = prefix_mass_container.mass_array_stop_index
+
+    for i in nb.prange(batch_count):
+        intensity_arr = batch_intensity_arr[i, ...]
+        precursor_index = batch_precursor_index_arr[i]  # global ID
+        peptidoform_index = peptidoform_index_arr[precursor_index]
+        st = (
+            0
+            if peptidoform_index == 0
+            else prefix_mass_stop_idx_arr[peptidoform_index - 1]
+        )
+        prefix_mass_arr = prefix_mass_container.prefix_mass_array[
+            st : st + cleavage_count + 1
+        ]
+
+        cleavage_index_arr, is_prefix_arr, charge_arr, mz_arr, pred_intensity_arr = (
+            _select_intense_fragments(
+                ion_type_container,
+                prefix_mass_arr,
+                precursor_index,  # global ID: random seed must not use local index
+                intensity_arr,
+                max_fragments,
+                detectable_min_mz,
+                detectable_max_mz,
+            )
+        )
+
+        # output position is chunk-local, but the stored ID stays global
+        local_index = np.int64(precursor_index) - np.int64(chunk_start_precursor_index)
+        st = local_index * max_fragments
         ed = st + max_fragments
         out_precursor_index_arr[st:ed] = precursor_index
         out_clevage_index_arr[st:ed] = cleavage_index_arr
