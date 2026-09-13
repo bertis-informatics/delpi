@@ -334,15 +334,20 @@ class BaseSearchEngine(ABC):
                         "observed_rt",
                         "predicted_rt",
                         "score",
-                        "precursor_q_value",
                     ],
                 )
                 pmsm_df = (
                     pl.DataFrame(results_dict)
-                    .filter(pl.col("precursor_q_value").is_not_null())
                     .group_by("precursor_index")
                     .agg(pl.all().sort_by("score").last())
                 )
+                pmsm_df = calculate_q_value(pmsm_df, out_column="precursor_q_value")
+                # pmsm_df = (
+                #     pl.DataFrame(results_dict)
+                #     .filter(pl.col("precursor_q_value").is_not_null())
+                #     .group_by("precursor_index")
+                #     .agg(pl.all().sort_by("score").last())
+                # )
 
                 ## update precursor_index for refined DB
                 precursor_df = (
@@ -375,9 +380,9 @@ class BaseSearchEngine(ABC):
             max_rt_in_seconds=meta_df.item(-1, "time_in_seconds"),
             ref_rt=target_df["ref_rt"].to_numpy(),
             obs_rt=target_df["observed_rt"].to_numpy(),
-            degree=5 if self.state < SearchState.SECOND_SEARCH else 2,
+            degree=2,
             min_rt_tolerance=0.1,
-            max_rt_tolerance=0.1,
+            max_rt_tolerance=0.11,
         )
 
         if after_full_search:

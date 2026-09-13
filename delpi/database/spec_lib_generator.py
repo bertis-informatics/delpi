@@ -16,7 +16,7 @@ from delpi.lcms.fragmentation import Fragmentation
 from delpi.lcms.neutral_loss import NeutralLoss
 from delpi.model.spec_lib import Ms2SpectrumPredictor, RetentionTimePredictor
 from delpi.model.spec_lib.dataset import PeptideDataset
-from delpi.utils.batch_sampler import SeqDataBatchSampler
+from delpi.utils.batch_sampler import SeqDataBatchSampler, ChunkedSeqDataBatchSampler
 from delpi.database.numba.prefix_mass_array import PrefixMassArrayContainer
 from delpi.database.numba.spec_lib_utils import (
     update_speclib_arr,
@@ -232,7 +232,7 @@ class SpectralLibGenerator:
         precursor_df: pl.DataFrame,
         prefix_mass_container: PrefixMassArrayContainer,
         save_dir: Union[str, Path],
-        batch_size: int = 512,
+        batch_size: int = 1024,
         chunk_size: int = 65_536,
         detectable_min_mz: float = 200,
         detectable_max_mz: float = 1800,
@@ -241,9 +241,11 @@ class SpectralLibGenerator:
         """Predict MS2 spectra and stream the result to a single Parquet file.
 
         Unlike predict_ms2_spectra(), this never allocates output arrays for
-        the full library: precursor_df is processed in contiguous chunks of
-        at most chunk_size precursors, and only one chunk's worth of output
-        rows (chunk_size * max_fragments) is held in memory at a time.
+        the full library: only one chunk's worth of output rows
+        (chunk_size * max_fragments) is held in memory at a time. The input
+        pipeline (Dataset/Sampler/DataLoader/Prefetcher/GPU buffers) is
+        still built only once for the whole prediction; chunk boundaries
+        are detected from the batch stream itself.
         """
 
         if batch_size <= 0:
@@ -260,22 +262,21 @@ class SpectralLibGenerator:
         # Owned (created + completed/closed here) only when the caller didn't
         # supply a tracker; a single bar spans the whole task, not per-chunk.
         # An externally-supplied tracker's own total is set arbitrarily by
-        # its creator, so a fresh child sized to the real total batch count
-        # (summed across all chunks) is created here to drive the subtask
-        # bar (position 1); the caller's tracker only receives proportional
-        # progress via that child's advance()/complete() calls.
-        total_batches = self._count_total_batches(
-            peptide_df, modification_df, precursor_df, batch_size, chunk_size
-        )
+        # its creator, so a fresh child sized to the real precursor count is
+        # created here to drive the subtask bar (position 1); the caller's
+        # tracker only receives proportional progress via that child's
+        # advance()/complete() calls. Progress unit is precursors processed,
+        # not batches, since batch count would require a Dataset/Sampler
+        # pre-pass this refactor is specifically meant to avoid.
         own_progress = progress is None
         if own_progress:
             progress = TqdmProgressTracker(
-                total=max(total_batches, 1), description="Predicting MS2 spectra"
+                total=max(n_precursors, 1), description="Predicting MS2 spectra"
             )
             batch_progress = progress
         else:
             batch_progress = progress.create_child(
-                "Predicting MS2 spectra", total=max(total_batches, 1), portion=100
+                "Predicting MS2 spectra", total=max(n_precursors, 1), portion=100
             )
 
         tmp_path = output_path.with_name(f"{output_path.name}.tmp-{uuid.uuid4().hex}")
@@ -329,10 +330,32 @@ class SpectralLibGenerator:
         max_fragments = self.max_fragments
         n_precursors = precursor_df.shape[0]
 
-        # global mapping: must be indexed by global precursor_index, never
-        # rebuilt from a chunk-local slice.
+        # precursor_index must be contiguous/global (row position == ID):
+        # relied on below both for chunk-boundary detection from a batch's
+        # precursor_index values, and by update_speclib_chunk_arr's local-
+        # index math.
+        self._assert_contiguous_precursor_index(precursor_df, 0, n_precursors)
+
+        # global mapping: indexed by global precursor_index throughout.
         peptidoform_index_arr = precursor_df["peptidoform_index"].to_numpy()
         ion_type_container = self.fragmentation.get_ion_types()
+
+        # Dataset/Sampler/DataLoader/Prefetcher are built exactly once for
+        # the whole prediction; ChunkedSeqDataBatchSampler groups batches by
+        # sequence_length while guaranteeing no batch spans two chunks, so
+        # chunk transitions can be detected from the batch stream alone.
+        precursor_ds = PeptideDataset(
+            precursor_df, modification_df, peptide_df, level="precursor"
+        )
+        batch_sampler = ChunkedSeqDataBatchSampler(
+            precursor_ds,
+            batch_size=batch_size,
+            chunk_size=chunk_size,
+            batch_grouping_column="sequence_length",
+        )
+        dl = DataLoader(
+            dataset=precursor_ds, batch_sampler=batch_sampler, num_workers=0
+        )
 
         max_token_len = peptide_df["sequence_length"].max() + 3
         mod_feat_dim = self.ms2_predictor.mod_embedding.in_features
@@ -362,147 +385,112 @@ class SpectralLibGenerator:
 
         ms2_predictor = self.ms2_predictor
 
+        def flush_chunk(chunk_start, chunk_end, processed_mask):
+            if not processed_mask.all():
+                missing = np.flatnonzero(~processed_mask) + chunk_start
+                raise ValueError(
+                    f"missing precursor(s) in chunk [{chunk_start}, {chunk_end}): "
+                    f"{missing[:10]}"
+                )
+            chunk_row_count = (chunk_end - chunk_start) * max_fragments
+            chunk_table = pa.Table.from_pydict(
+                {
+                    "precursor_index": out_precursor_index_arr[:chunk_row_count],
+                    "cleavage_index": out_clevage_index_arr[:chunk_row_count],
+                    "is_prefix": out_is_prefix_arr[:chunk_row_count],
+                    "charge": out_charge_arr[:chunk_row_count],
+                    "mz": out_mz_arr[:chunk_row_count],
+                    "predicted_intensity": out_pred_intensity_arr[:chunk_row_count],
+                    "rank": out_rank_arr[:chunk_row_count],
+                },
+                schema=arrow_schema,
+            )
+            writer.write_table(chunk_table, row_group_size=chunk_row_count)
+
+        current_chunk_start = None
+        current_chunk_end = None
+        processed_mask = None
+
         with torch.inference_mode():
-            for chunk_start in range(0, n_precursors, effective_chunk_size):
-                chunk_end = min(chunk_start + effective_chunk_size, n_precursors)
-                chunk_len = chunk_end - chunk_start
-
-                precursor_chunk_df = precursor_df.slice(chunk_start, chunk_len)
-                self._assert_contiguous_precursor_index(
-                    precursor_chunk_df, chunk_start, chunk_end
+            for batch in Prefetcher(dl, transform=pin_tensor_dict):
+                batch_precursor_index_arr = (
+                    batch["precursor_index"].to(torch.uint32).numpy()
                 )
 
-                # modification_df/peptide_df stay full: peptidoform_index
-                # values referenced by this chunk are not contiguous.
-                precursor_ds = PeptideDataset(
-                    precursor_chunk_df, modification_df, peptide_df, level="precursor"
-                )
-                batch_sampler = SeqDataBatchSampler(
-                    precursor_ds,
-                    batch_grouping_column="sequence_length",
-                    batch_size=batch_size,
-                    shuffle=False,
-                )
-                dl = DataLoader(
-                    dataset=precursor_ds, batch_sampler=batch_sampler, num_workers=0
-                )
-
-                processed_mask = np.zeros(chunk_len, dtype=np.bool_)
-
-                for batch in Prefetcher(dl, transform=pin_tensor_dict):
-                    batch_precursor_index_arr = (
-                        batch["precursor_index"].to(torch.uint32).numpy()
-                    )
-
-                    # validate batch IDs are within the current chunk range
-                    # before handing them to the JIT helper.
-                    if (
-                        batch_precursor_index_arr.min() < chunk_start
-                        or batch_precursor_index_arr.max() >= chunk_end
-                    ):
-                        raise ValueError(
-                            "batch precursor_index out of chunk range "
-                            f"[{chunk_start}, {chunk_end})"
+                # Chunk boundaries are inferred from global precursor_index
+                # values; the sampler guarantees a batch never spans two
+                # chunks, so the first row's chunk is the whole batch's.
+                batch_chunk_start = (
+                    int(batch_precursor_index_arr[0]) // chunk_size
+                ) * chunk_size
+                if current_chunk_start != batch_chunk_start:
+                    if current_chunk_start is not None:
+                        flush_chunk(
+                            current_chunk_start, current_chunk_end, processed_mask
                         )
-
-                    local_idx = batch_precursor_index_arr.astype(np.int64) - chunk_start
-                    if processed_mask[local_idx].any():
-                        dup = batch_precursor_index_arr[processed_mask[local_idx]]
-                        raise ValueError(
-                            f"duplicate precursor_index in chunk: {dup[:10]}"
-                        )
-                    processed_mask[local_idx] = True
-
-                    x_aa_t = batch["x_aa"]
-                    x_mod_t = batch["x_mod"]
-                    x_meta_t = batch["x_meta"]
-
-                    n, L = x_aa_t.shape
-                    X_aa_buf[:n, :L].copy_(x_aa_t, non_blocking=True)
-                    X_mod_buf[:n, :L, :].copy_(x_mod_t, non_blocking=True)
-                    X_meta_buf[:n].copy_(x_meta_t, non_blocking=True)
-
-                    y_pred = ms2_predictor(
-                        X_aa_buf[:n, :L], X_mod_buf[:n, :L, :], X_meta_buf[:n]
+                    current_chunk_start = batch_chunk_start
+                    current_chunk_end = min(
+                        current_chunk_start + chunk_size, n_precursors
                     )
-                    batch_intensity_arr = y_pred.detach().cpu().numpy()
-
-                    update_speclib_chunk_arr(
-                        out_precursor_index_arr,
-                        out_clevage_index_arr,
-                        out_is_prefix_arr,
-                        out_charge_arr,
-                        out_mz_arr,
-                        out_pred_intensity_arr,
-                        out_rank_arr,
-                        prefix_mass_container,
-                        ion_type_container,
-                        peptidoform_index_arr,
-                        batch_precursor_index_arr,
-                        batch_intensity_arr,
-                        chunk_start_precursor_index=chunk_start,
-                        max_fragments=max_fragments,
-                        detectable_min_mz=detectable_min_mz,
-                        detectable_max_mz=detectable_max_mz,
+                    processed_mask = np.zeros(
+                        current_chunk_end - current_chunk_start, dtype=np.bool_
                     )
-                    progress.advance(1)
 
-                if not processed_mask.all():
-                    missing = np.flatnonzero(~processed_mask) + chunk_start
+                # validate batch IDs are within the current chunk range
+                # before handing them to the JIT helper.
+                if (
+                    batch_precursor_index_arr.min() < current_chunk_start
+                    or batch_precursor_index_arr.max() >= current_chunk_end
+                ):
                     raise ValueError(
-                        f"missing precursor(s) in chunk [{chunk_start}, {chunk_end}): "
-                        f"{missing[:10]}"
+                        "batch precursor_index out of chunk range "
+                        f"[{current_chunk_start}, {current_chunk_end})"
                     )
 
-                chunk_row_count = chunk_len * max_fragments
-                chunk_table = pa.Table.from_pydict(
-                    {
-                        "precursor_index": out_precursor_index_arr[:chunk_row_count],
-                        "cleavage_index": out_clevage_index_arr[:chunk_row_count],
-                        "is_prefix": out_is_prefix_arr[:chunk_row_count],
-                        "charge": out_charge_arr[:chunk_row_count],
-                        "mz": out_mz_arr[:chunk_row_count],
-                        "predicted_intensity": out_pred_intensity_arr[:chunk_row_count],
-                        "rank": out_rank_arr[:chunk_row_count],
-                    },
-                    schema=arrow_schema,
+                local_idx = (
+                    batch_precursor_index_arr.astype(np.int64) - current_chunk_start
                 )
-                writer.write_table(chunk_table, row_group_size=chunk_row_count)
-                del chunk_table
+                if processed_mask[local_idx].any():
+                    dup = batch_precursor_index_arr[processed_mask[local_idx]]
+                    raise ValueError(f"duplicate precursor_index in chunk: {dup[:10]}")
+                processed_mask[local_idx] = True
 
-    def _count_total_batches(
-        self,
-        peptide_df: pl.DataFrame,
-        modification_df: pl.DataFrame,
-        precursor_df: pl.DataFrame,
-        batch_size: int,
-        chunk_size: int,
-    ) -> int:
-        """Sum batch_sampler.count_num_of_batches() across all chunks so the
-        overall progress total matches how many times the chunk loop below
-        actually advances (once per batch, not once per precursor row)."""
-        n_precursors = precursor_df.shape[0]
-        if n_precursors == 0:
-            return 0
+                x_aa_t = batch["x_aa"]
+                x_mod_t = batch["x_mod"]
+                x_meta_t = batch["x_meta"]
 
-        effective_chunk_size = min(chunk_size, n_precursors)
-        total_batches = 0
-        for chunk_start in range(0, n_precursors, effective_chunk_size):
-            chunk_end = min(chunk_start + effective_chunk_size, n_precursors)
-            precursor_chunk_df = precursor_df.slice(
-                chunk_start, chunk_end - chunk_start
-            )
-            precursor_ds = PeptideDataset(
-                precursor_chunk_df, modification_df, peptide_df, level="precursor"
-            )
-            batch_sampler = SeqDataBatchSampler(
-                precursor_ds,
-                batch_grouping_column="sequence_length",
-                batch_size=batch_size,
-                shuffle=False,
-            )
-            total_batches += batch_sampler.count_num_of_batches()
-        return total_batches
+                n, L = x_aa_t.shape
+                X_aa_buf[:n, :L].copy_(x_aa_t, non_blocking=True)
+                X_mod_buf[:n, :L, :].copy_(x_mod_t, non_blocking=True)
+                X_meta_buf[:n].copy_(x_meta_t, non_blocking=True)
+
+                y_pred = ms2_predictor(
+                    X_aa_buf[:n, :L], X_mod_buf[:n, :L, :], X_meta_buf[:n]
+                )
+                batch_intensity_arr = y_pred.detach().cpu().numpy()
+
+                update_speclib_chunk_arr(
+                    out_precursor_index_arr,
+                    out_clevage_index_arr,
+                    out_is_prefix_arr,
+                    out_charge_arr,
+                    out_mz_arr,
+                    out_pred_intensity_arr,
+                    out_rank_arr,
+                    prefix_mass_container,
+                    ion_type_container,
+                    peptidoform_index_arr,
+                    batch_precursor_index_arr,
+                    batch_intensity_arr,
+                    chunk_start_precursor_index=current_chunk_start,
+                    max_fragments=max_fragments,
+                    detectable_min_mz=detectable_min_mz,
+                    detectable_max_mz=detectable_max_mz,
+                )
+                progress.advance(n)
+
+            if current_chunk_start is not None:
+                flush_chunk(current_chunk_start, current_chunk_end, processed_mask)
 
     @staticmethod
     def _assert_contiguous_precursor_index(
@@ -645,16 +633,6 @@ class SpectralLibGenerator:
             # re-create their own child (sized to the real batch count) from
             # whatever tracker they're given, so this total is never advanced
             # against directly, only completed as a whole.
-            rt_progress = progress.create_child("Predicting RT", total=100, portion=20)
-            rt_df = self.predict_rt(
-                peptide_df=peptide_df,
-                modification_df=modification_df,
-                precursor_df=precursor_df,
-                batch_size=batch_size,
-                progress=rt_progress,
-            )
-            rt_progress.complete()
-
             ms2_progress = progress.create_child(
                 "Predicting MS2 spectra", total=100, portion=80
             )
@@ -683,6 +661,16 @@ class SpectralLibGenerator:
                     progress=ms2_progress,
                 )
             ms2_progress.complete()
+
+            rt_progress = progress.create_child("Predicting RT", total=100, portion=20)
+            rt_df = self.predict_rt(
+                peptide_df=peptide_df,
+                modification_df=modification_df,
+                precursor_df=precursor_df,
+                batch_size=batch_size,
+                progress=rt_progress,
+            )
+            rt_progress.complete()
 
             modification_df = modification_df.join(
                 rt_df, on="peptidoform_index", how="left"

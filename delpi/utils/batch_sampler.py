@@ -96,6 +96,82 @@ class SeqDataBatchSampler(BatchSampler):
         return (len(self.indices) + self.batch_size - 1) // self.batch_size
 
 
+class ChunkedSeqDataBatchSampler(BatchSampler):
+    """Inference-only batch sampler: batches are grouped by
+    ``batch_grouping_column`` (e.g. sequence length) like
+    :class:`SeqDataBatchSampler`, but are additionally constrained to never
+    span two contiguous ``chunk_size``-sized ranges of the dataset's global
+    index space. This lets a chunked-output writer detect chunk boundaries
+    purely from batch contents (e.g. ``index // chunk_size``), without ever
+    re-building the Dataset/DataLoader per chunk.
+
+    Batches are produced lazily, one chunk at a time; the full batch list
+    for the whole dataset is never held in memory at once. Only
+    ``shuffle=False`` inference ordering is supported (no distributed/
+    training behavior, unlike SeqDataBatchSampler).
+    """
+
+    def __init__(
+        self,
+        dataset: Dataset,
+        batch_size: int,
+        chunk_size: int,
+        batch_grouping_column: str = "sequence_length",
+    ):
+        super().__init__(sampler=None, batch_size=batch_size, drop_last=False)
+        if chunk_size <= 0:
+            raise ValueError(f"chunk_size must be positive, got {chunk_size}")
+
+        labels = dataset.labels
+        self._group_values = np.asarray(labels[batch_grouping_column])
+        self._n_samples = len(labels)
+        self.chunk_size = chunk_size
+        self.batch_grouping_column = batch_grouping_column
+
+    def __iter__(self):
+        group_values = self._group_values
+        n = self._n_samples
+        batch_size = self.batch_size
+
+        for chunk_start in range(0, n, self.chunk_size):
+            chunk_end = min(chunk_start + self.chunk_size, n)
+            chunk_groups = group_values[chunk_start:chunk_end]
+
+            # stable sort clusters same-length rows while preserving their
+            # relative (global-index) order; avoids rescanning the chunk
+            # once per unique group value.
+            order = np.argsort(chunk_groups, kind="stable")
+            sorted_groups = chunk_groups[order]
+            global_order = order.astype(np.int64) + chunk_start
+
+            change_points = np.flatnonzero(np.diff(sorted_groups)) + 1
+            group_bounds = np.concatenate(
+                ([0], change_points, [sorted_groups.shape[0]])
+            )
+
+            for g_start, g_end in zip(group_bounds[:-1], group_bounds[1:]):
+                group_indices = global_order[g_start:g_end]
+                for b_start in range(0, group_indices.shape[0], batch_size):
+                    yield group_indices[b_start : b_start + batch_size]
+
+    def count_num_of_batches(self) -> int:
+        """Total batch count, derived only from the cached group-value
+        array (no Dataset/Sampler reconstruction)."""
+        group_values = self._group_values
+        n = self._n_samples
+        total = 0
+        for chunk_start in range(0, n, self.chunk_size):
+            chunk_end = min(chunk_start + self.chunk_size, n)
+            _, counts = np.unique(
+                group_values[chunk_start:chunk_end], return_counts=True
+            )
+            total += int(np.sum((counts + self.batch_size - 1) // self.batch_size))
+        return total
+
+    def __len__(self):
+        return self.count_num_of_batches()
+
+
 def get_batch_sampler_for_seq_data(
     dataset: Dataset,
     batch_grouping_column: str,
