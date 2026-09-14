@@ -448,7 +448,12 @@ class BootstrapRTCalibrator(LinearProjectionCalibrator):
         residual = y_train - estimator.predict(x_train)
         center = float(np.median(residual[inlier_mask]))
         required_half_width = float(np.quantile(np.abs(residual - center), 0.95))
-        half_width = max(required_half_width, self.min_rt_tol_in_seconds)
+        # min_rt_tol_in_seconds/max_rt_tol_in_seconds act as a hard lower/
+        # upper bound on the search half-width, regardless of how wide the
+        # observed residual spread is.
+        half_width = np.clip(
+            required_half_width, self.min_rt_tol_in_seconds, self.max_rt_tol_in_seconds
+        )
 
         diagnostics = {
             "reason": "ok",
@@ -460,9 +465,6 @@ class BootstrapRTCalibrator(LinearProjectionCalibrator):
             "max_half_width": self.max_rt_tol_in_seconds,
             "inlier_mask": inlier_mask,
         }
-        if half_width > self.max_rt_tol_in_seconds:
-            diagnostics["reason"] = "residual_too_wide"
-            return None, diagnostics
 
         self.estimator = estimator
         self.degree = used_degree
