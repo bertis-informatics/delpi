@@ -37,3 +37,6 @@ Issues = "https://github.com/bertis-informatics/pymsio/issues"
 where = ["."]
 include = ["pymsio*"]
 exclude = ["tests*"]
+
+[tool.setuptools.package-data]
+pymsio = ["dlls/thermo_fisher/*.dll"]
