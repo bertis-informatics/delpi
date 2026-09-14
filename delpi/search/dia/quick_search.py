@@ -115,7 +115,7 @@ def _quick_match(
             xic_corr_score = np.mean(extract_upper_triangle(corr_mat) ** 3)
 
         frame_index_arr[i] = min_frame_index + j
-        score_arr[i] = similarity_scores[j] + xic_corr_score + 0.5 * peak_count_score
+        score_arr[i] = similarity_scores[j] + xic_corr_score + peak_count_score
         valid_arr[i] = True
 
     return frame_index_arr, score_arr, valid_arr

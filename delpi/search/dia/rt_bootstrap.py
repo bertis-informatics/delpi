@@ -57,13 +57,13 @@ class RTBootstrapConfig:
     hard_limit: int = 1_000_000
     min_window_frac: float = 0.1
     q_value_cutoff: float = 0.05
-    min_unique_anchors: int = 1000
-    min_anchors_best_effort: int = 500
-    top_n_best_effort: int = 500
+    min_unique_anchors: int = 300
+    min_anchors_best_effort: int = 150
+    top_n_best_effort: int = 300
     max_fit_anchors: int = 5_000
     mad_clip_thresh: float = 3.5
     max_mad_iters: int = 3
-    max_degree: int = 3
+    max_degree: int = 2
     min_rt_tolerance: float = 0.10
     max_rt_tolerance: float = 0.15
     broad_rt_tolerance: float = 0.25
