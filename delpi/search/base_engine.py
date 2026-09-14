@@ -365,13 +365,6 @@ class BaseSearchEngine(ABC):
                     .group_by("precursor_index")
                     .agg(pl.all().sort_by("score").last())
                 )
-                pmsm_df = calculate_q_value(pmsm_df, out_column="precursor_q_value")
-                # pmsm_df = (
-                #     pl.DataFrame(results_dict)
-                #     .filter(pl.col("precursor_q_value").is_not_null())
-                #     .group_by("precursor_index")
-                #     .agg(pl.all().sort_by("score").last())
-                # )
 
                 ## update precursor_index for refined DB
                 precursor_df = (
@@ -379,11 +372,10 @@ class BaseSearchEngine(ABC):
                     .select(pl.col("g_precursor_index", "precursor_index"))
                     .collect()
                 )
-
                 pmsm_df = pmsm_df.rename({"precursor_index": "g_precursor_index"}).join(
                     precursor_df.select(pl.col("g_precursor_index", "precursor_index")),
                     on="g_precursor_index",
-                    how="left",
+                    how="inner",  # consider only library-filtered precursors
                 )
 
                 pmsm_df = PeptideDatabase.join(
@@ -393,6 +385,7 @@ class BaseSearchEngine(ABC):
                     modification_columns=["ref_rt"],
                     peptide_columns=["is_decoy"],
                 )
+                pmsm_df = calculate_q_value(pmsm_df, out_column="precursor_q_value")
 
             target_df = pmsm_df.filter(
                 (pl.col("precursor_q_value") <= q_value_cutoff)
