@@ -68,7 +68,8 @@ class PrecursorGenerator:
                 pl.col("mod_ids").str.split(MOD_SEPARATOR).cast(pl.List(pl.UInt32)),
                 pl.col("mod_sites").str.split(MOD_SEPARATOR).cast(pl.List(pl.Int8)),
             )
-            .explode(pl.all())
+            # rows were pre-filtered on mod_ids.is_not_null(), so lists are never empty; empty_as_null is a no-op
+            .explode(pl.all(), empty_as_null=True)
             .to_numpy()
         )
 
@@ -103,7 +104,8 @@ class PrecursorGenerator:
             modification_df.select(
                 pl.col("peptidoform_index", "precursor_mass"), get_charge
             )
-            .explode("precursor_charge")
+            # min_charge <= max_charge guarantees a non-empty range, so empty_as_null is a no-op
+            .explode("precursor_charge", empty_as_null=True)
             .select(pl.col("peptidoform_index", "precursor_charge"), get_mz)
             .filter(pl.col("precursor_mz").is_between(self.min_mz, self.max_mz))
             .sort(pl.col("precursor_mz", "peptidoform_index"))

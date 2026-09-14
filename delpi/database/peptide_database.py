@@ -375,7 +375,7 @@ class PeptideDatabase:
         fasta_lookup_df = (
             pmsm_df.select(pl.col("precursor_index", "protein_index"))
             .unique(subset="precursor_index", keep="first")
-            .explode("protein_index")
+            .explode("protein_index", empty_as_null=True)
             .join(fasta_id_df, on="protein_index", how="left")
             .group_by("precursor_index")
             .agg(pl.col("fasta_id"))

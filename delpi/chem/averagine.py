@@ -3,7 +3,6 @@ import polars as pl
 from delpi import DATA_DIR
 from delpi.constants import C13C12_MASS_DIFF
 
-
 averagine_df = pl.read_parquet(DATA_DIR / "averagine.parquet").with_columns(
     pl.col("mass").cast(pl.UInt32).alias("nominal_mass"), pl.col("envelope")
 )
@@ -31,7 +30,7 @@ def get_precursor_lib_df(max_isotopes, min_mass=300, max_mass=7000):
                 "isotope_index"
             ),
         )
-        .explode(["isotope_index", "envelope", "rank"])
+        .explode(["isotope_index", "envelope", "rank"], empty_as_null=True)
         .filter(pl.col("isotope_index") < max_isotopes)
         .rename({"envelope": "predicted_intensity"})
         .sort(["mass", "rank"])
