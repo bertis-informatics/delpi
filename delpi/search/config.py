@@ -95,7 +95,9 @@ class SearchConfig:
             ValueError: If required parameters are missing or invalid
         """
         if "input_files" not in self.config:
-            raise ValueError("Missing required parameter 'input_files' in configuration")
+            raise ValueError(
+                "Missing required parameter 'input_files' in configuration"
+            )
 
         # Check required parameters
         required_fields = ["output_directory", "database_directory"]
@@ -173,7 +175,7 @@ class SearchConfig:
 
     @property
     def is_phospho_search(self) -> bool:
-        mod_params = self.config.get("modification", {}).get("mod_param_set", [])
+        mod_params = self.config.get("modification", {}).get("mod_param_set", []) or []
         for mod in mod_params:
             if mod.get("mod_name", "").lower() == "phospho":
                 return True
@@ -190,6 +192,10 @@ class SearchConfig:
         Returns:
             bool: True if parameters are identical, False otherwise
         """
+        # yaml `null` (e.g. mod_param_set: null) loads as None, not []
+        mod_params1 = mod_params1 or []
+        mod_params2 = mod_params2 or []
+
         if len(mod_params1) != len(mod_params2):
             return False
 
