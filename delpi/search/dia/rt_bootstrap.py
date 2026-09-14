@@ -61,7 +61,8 @@ class RTBootstrapConfig:
     max_degree: int = 3
     min_rt_tolerance: float = 0.10
     narrow_max_half_width_frac: float = 0.15
-    broad_rt_tolerance: float = 0.3333
+    broad_rt_tolerance: float = 0.30
+    top_n_best_effort: int = 500
     max_fragments: int = 6
     max_precursor_isotopes: int = 1
     max_fragment_isotopes: int = 1
@@ -496,6 +497,34 @@ class DIARTBootstrapCalibrator:
             return None, diag, fit_df
         return calibrator, diag, fit_df
 
+    def _top_score_fit(
+        self, cumulative_df: pl.DataFrame, scale_floor: float
+    ) -> Tuple[Optional[BootstrapRTCalibrator], dict, pl.DataFrame]:
+        """Absolute last resort before the broad fallback: ignore the
+        q-value/RT-bin-coverage requirements entirely and fit directly on
+        the ``top_n_best_effort`` highest-scoring target matches (one per
+        peptidoform), still subject to `BootstrapRTCalibrator`'s own robust
+        MAD/monotonicity/residual-width QC."""
+        target_df = cumulative_df.filter(
+            (~pl.col("is_decoy"))
+            & pl.col("ref_rt").is_finite()
+            & pl.col("observed_rt").is_finite()
+        )
+        if target_df.height == 0:
+            return None, {"reason": "no_target_matches"}, target_df
+
+        top_df = (
+            target_df.sort(["score", "precursor_index"], descending=[True, False])
+            .unique("peptidoform_index", keep="first")
+            .head(self.cfg.top_n_best_effort)
+        )
+        calibrator, diag = BootstrapRTCalibrator(**self._calibrator_kwargs).fit(
+            top_df["ref_rt"].to_numpy(),
+            top_df["observed_rt"].to_numpy(),
+            scale_floor=scale_floor,
+        )
+        return calibrator, diag, top_df
+
     def _save_diagnostic_figure(
         self,
         calibrator,
@@ -615,9 +644,8 @@ class DIARTBootstrapCalibrator:
 
         n_unique_anchors = 0
         if cumulative_rounds:
-            anchors_df, _counts = self.anchor_selector.select(
-                pl.concat(cumulative_rounds, how="vertical")
-            )
+            cumulative_df = pl.concat(cumulative_rounds, how="vertical")
+            anchors_df, _counts = self.anchor_selector.select(cumulative_df)
             n_unique_anchors = anchors_df.height
 
             # Budget/candidates exhausted without ever reaching
@@ -653,6 +681,34 @@ class DIARTBootstrapCalibrator:
                         calibrator, anchors_df, fit_df, diag, success=True
                     )
                     return result
+
+            # Still no usable fit (either too few q-value-qualified anchors,
+            # or the best-effort fit above failed QC): drop the q-value/
+            # RT-bin-coverage requirements entirely and fit on the raw
+            # top-scoring target matches, before giving up to the broad
+            # fallback bounds.
+            calibrator, diag, fit_df = self._top_score_fit(cumulative_df, scale_floor)
+            last_diag = diag
+            if calibrator is not None:
+                logger.warning(
+                    f"[{self._dia_run.name}] DIA RT bootstrap top-score fallback fit used "
+                    f"(anchors={n_unique_anchors} below target={self.cfg.min_unique_anchors}, "
+                    f"top_n={fit_df.height}): rounds={n_rounds} evaluated={n_evaluated} "
+                    f"degree={diag.get('degree')} half_width={diag.get('half_width', float('nan')):.1f}s"
+                )
+                result = RTBootstrapResult(
+                    calibrator=calibrator,
+                    success=True,
+                    fallback_reason=None,
+                    n_rounds=n_rounds,
+                    n_evaluated=n_evaluated,
+                    n_unique_anchors=fit_df.height,
+                    diagnostics=diag,
+                )
+                self._save_diagnostic_figure(
+                    calibrator, anchors_df, fit_df, diag, success=True
+                )
+                return result
 
         reason = last_diag.get(
             "reason", "budget_or_candidates_exhausted_without_valid_fit"
