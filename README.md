@@ -192,7 +192,7 @@ Create a YAML configuration file based on the [example template](data/example_pa
 | Field | Description |
 |-------|-------------|
 | *acquisition_method* | Acquisition mode (`DIA` or `DDA`) |
-| *input_files* or *input_dir* | Paths to LC–MS/MS data files. If *input_dir* is specified, all mzML files within the directory will be automatically processed. |
+| *input_files* | Paths to LC–MS/MS data files. Accepts a single string or a list, where each entry is either an explicit file path or a glob pattern (`*`, `?`, `[]`, and recursive `**` are supported), e.g. `/data/*.mzML` or `/data/**/*.mzML`. |
 | *fasta_file* | Protein database in FASTA format |
 | *output_directory* | Directory where search results will be written |
 | *database_directory* | Directory for storing internally generated in silico spectral libraries (if libraries generated using the same FASTA file and search options already exist, they will be reused) |

@@ -126,13 +126,6 @@ class RetentionTimeCalibrator(LinearProjectionCalibrator):
         y_pred = estimator.predict(x_train)
         residuals = y_train - y_pred
 
-        # mask = np.abs(y_train - 5000) < 300
-        # np.mean( residuals[mask & (residuals > 0)])
-        # np.mean( residuals[mask & (residuals < 0)])
-        # residuals[mask]
-        # np.mean( residuals[mask] )
-        # np.mean( residuals[~mask] )
-
         #### Residual Modeling with Heteroscedasticity-Aware Error Modeling
         mask = residuals > 0
         upper_residual_estimator = make_pipeline(
@@ -296,7 +289,6 @@ class RetentionTimeCalibrator(LinearProjectionCalibrator):
 
             group = f[group_name]
 
-            # 기본 파라미터들로 객체 생성
             min_rt_tolerance = group.attrs["min_rt_tol_in_seconds"] / (
                 group.attrs["max_rt_in_seconds"] - group.attrs["min_rt_in_seconds"]
             )
@@ -344,6 +336,165 @@ class RetentionTimeCalibrator(LinearProjectionCalibrator):
         )
 
         return estimator
+
+
+class BootstrapRTCalibrator(LinearProjectionCalibrator):
+    """MAD-robust, degree-<=`max_degree` RT calibrator used only by the DIA
+    bootstrap calibration pipeline (:mod:`delpi.search.dia.rt_bootstrap`).
+    Not persisted via HDF; used only transiently before the first full DIA
+    search.
+
+    Follows the same scikit-learn
+    ``Pipeline(PolynomialFeatures, LinearRegression)`` pattern as
+    :class:`RetentionTimeCalibrator`, but unlike it, this iteratively
+    rejects outliers (MAD clipping), picks the highest degree (up to
+    `max_degree`) that still yields a monotonic, positive-trend fit, and
+    derives its RT half-width from the residual distribution rather than a
+    separately-fit residual model.
+    """
+
+    def __init__(
+        self,
+        min_rt_in_seconds: float,
+        max_rt_in_seconds: float,
+        max_degree: int = 3,
+        mad_clip_thresh: float = 3.5,
+        max_mad_iters: int = 3,
+        min_rt_tolerance: float = 0.10,
+        max_rt_tolerance: float = 0.15,
+    ):
+        super().__init__(min_rt_in_seconds, max_rt_in_seconds)
+        assert max_rt_tolerance >= min_rt_tolerance
+
+        self.max_degree = max_degree
+        self.mad_clip_thresh = mad_clip_thresh
+        self.max_mad_iters = max_mad_iters
+        self.min_rt_tol_in_seconds = self.lc_grad_len * min_rt_tolerance
+        self.max_rt_tol_in_seconds = self.lc_grad_len * max_rt_tolerance
+        self.degree = None
+        self.estimator = None
+        self.half_width_in_seconds = None
+
+    def _fit_degree(
+        self, x_train: np.ndarray, y_train: np.ndarray, degree: int, scale_floor: float
+    ):
+        """One MAD-clipping/refitting cycle; stops early once the inlier
+        mask stabilizes. Returns ``(estimator_or_None, inlier_mask)``."""
+        inlier_mask = np.ones(x_train.shape[0], dtype=bool)
+        estimator = None
+        for _ in range(self.max_mad_iters):
+            if int(np.sum(inlier_mask)) < degree + 1:
+                return None, inlier_mask
+            estimator = make_pipeline(
+                PolynomialFeatures(degree=degree, include_bias=False),
+                LinearRegression(),
+            ).fit(x_train[inlier_mask], y_train[inlier_mask])
+            residual = y_train - estimator.predict(x_train)
+            center = np.median(residual[inlier_mask])
+            mad = max(
+                1.4826 * np.median(np.abs(residual[inlier_mask] - center)), scale_floor
+            )
+            new_mask = np.abs(residual - center) <= self.mad_clip_thresh * mad
+            if np.array_equal(new_mask, inlier_mask):
+                break
+            inlier_mask = new_mask
+        return estimator, inlier_mask
+
+    def fit(
+        self,
+        ref_rt: Union[np.ndarray, List, pl.Series],
+        obs_rt: Union[np.ndarray, List, pl.Series],
+        scale_floor: float = 1.0,
+    ) -> tuple:
+        """Fit a bootstrap RT mapping. Returns ``(self_or_None, diagnostics)``;
+        ``diagnostics`` always has a ``reason`` key and, on success, an
+        ``inlier_mask`` aligned with the input ``ref_rt``/``obs_rt`` order.
+        """
+        x_train = self._to_array(ref_rt).astype(np.float64).reshape(-1, 1)
+        y_train = self._to_array(obs_rt).astype(np.float64)
+        n = x_train.shape[0]
+        if (
+            n < 3
+            or not np.all(np.isfinite(x_train))
+            or not np.all(np.isfinite(y_train))
+        ):
+            return None, {"reason": "too_few_or_nonfinite_anchors", "n": n}
+        if not np.isfinite(self.lc_grad_len) or self.lc_grad_len <= 0:
+            return None, {"reason": "degenerate_run_rt_bounds"}
+
+        scale_floor = max(float(scale_floor), 1e-6)
+        x_grid = np.linspace(x_train.min(), x_train.max(), 50).reshape(-1, 1)
+
+        estimator, inlier_mask, used_degree = None, np.ones(n, dtype=bool), None
+        for degree in range(min(self.max_degree, n - 1), 0, -1):
+            candidate, candidate_mask = self._fit_degree(
+                x_train, y_train, degree, scale_floor
+            )
+            if candidate is None:
+                continue
+            predicted_grid = candidate.predict(x_grid)
+            if not np.all(np.isfinite(predicted_grid)) or np.any(
+                np.diff(predicted_grid) < -1e-6
+            ):
+                continue
+            if degree == 1 and predicted_grid[-1] <= predicted_grid[0]:
+                continue
+            estimator, inlier_mask, used_degree = candidate, candidate_mask, degree
+            break
+
+        if estimator is None:
+            return None, {"reason": "non_monotonic_or_invalid_fit", "n": n}
+
+        residual = y_train - estimator.predict(x_train)
+        center = float(np.median(residual[inlier_mask]))
+        required_half_width = float(np.quantile(np.abs(residual - center), 0.95))
+        half_width = max(required_half_width, self.min_rt_tol_in_seconds)
+
+        diagnostics = {
+            "reason": "ok",
+            "degree": used_degree,
+            "n_anchors": n,
+            "n_inliers": int(np.sum(inlier_mask)),
+            "required_half_width": required_half_width,
+            "half_width": half_width,
+            "max_half_width": self.max_rt_tol_in_seconds,
+            "inlier_mask": inlier_mask,
+        }
+        if half_width > self.max_rt_tol_in_seconds:
+            diagnostics["reason"] = "residual_too_wide"
+            return None, diagnostics
+
+        self.estimator = estimator
+        self.degree = used_degree
+        self.half_width_in_seconds = half_width
+        return self, diagnostics
+
+    def predict(self, ref_rt: Union[np.ndarray, List, pl.Series]) -> pl.DataFrame:
+        if self.estimator is None:
+            raise NotFittedError()
+
+        x = self._to_array(ref_rt).astype(np.float64).reshape(-1, 1)
+        x_flat = x.reshape(-1)
+        finite_mask = np.isfinite(x_flat)
+
+        # sklearn's PolynomialFeatures rejects non-finite input outright, so
+        # non-finite ref_rt is mapped directly to the RT bounds instead of
+        # being extrapolated through the fitted model.
+        predicted = np.empty(x_flat.shape[0], dtype=np.float64)
+        if np.any(finite_mask):
+            predicted[finite_mask] = self.estimator.predict(x[finite_mask])
+        predicted[np.isnan(x_flat)] = self.min_rt_in_seconds
+        predicted[x_flat == np.inf] = self.max_rt_in_seconds
+        predicted[x_flat == -np.inf] = self.min_rt_in_seconds
+
+        df = pl.DataFrame(
+            {"predicted_rt": predicted.astype(np.float32)},
+            schema={"predicted_rt": pl.Float32},
+        ).with_columns(
+            lower=pl.lit(self.half_width_in_seconds, dtype=pl.Float32),
+            upper=pl.lit(self.half_width_in_seconds, dtype=pl.Float32),
+        )
+        return self._set_lower_upper_bounds(df)
 
 
 def test():

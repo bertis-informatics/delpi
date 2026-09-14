@@ -119,6 +119,17 @@ class BaseSearchEngine(ABC):
     def perform_quick_search(self, run: Union[DIARun, DDARun]) -> pl.DataFrame:
         pass
 
+    def perform_rt_bootstrap(
+        self, run: Union[DIARun, DDARun], figure_path: Path = None
+    ):
+        """Optional hook for the RT-stratified, checkpointed initial DIA
+        bootstrap calibration (delpi.search.dia.rt_bootstrap). Engines that
+        don't support it (e.g. DDA) return None, and `_perform_rt_calibration`
+        falls back to the legacy `perform_quick_search()` + ordinary
+        RetentionTimeCalibrator.train() path.
+        """
+        return None
+
     @abstractmethod
     def perform_search(
         self, lcms_data: MassSpecData, progress: ProgressTracker = None
@@ -306,6 +317,19 @@ class BaseSearchEngine(ABC):
             db_dir = self.get_db_dir()
 
         if self.state == SearchState.FIRST_SEARCH and before_full_search:
+            bootstrap_result = self.perform_rt_bootstrap(run, figure_path=fig_path)
+            if bootstrap_result is not None:
+                if not bootstrap_result.success:
+                    logger.warning(
+                        f"[{run.name}] DIA RT bootstrap calibration fell back to "
+                        f"broad bounds (reason={bootstrap_result.fallback_reason}, "
+                        f"rounds={bootstrap_result.n_rounds}, "
+                        f"evaluated={bootstrap_result.n_evaluated}, "
+                        f"anchors={bootstrap_result.n_unique_anchors})"
+                    )
+                return bootstrap_result.calibrator
+
+            # Legacy path: engines without RT-bootstrap support (e.g. DDA).
             q_value_cutoff = 0.05
             pmsm_df = self.perform_quick_search(run)
             target_df = pmsm_df.filter(pl.col("is_decoy") == False)

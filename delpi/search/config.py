@@ -6,7 +6,7 @@ from pymsio import MassSpecFileReader
 from delpi.chem.modification_param import ModificationParam
 from delpi.search.result_manager import ResultManager
 from delpi.database.decoy_generator import DecoyGenerator
-from delpi.utils.yaml_file import load_yaml, save_yaml
+from delpi.utils.yaml_file import load_yaml, save_yaml, resolve_input_files
 from delpi.constants import DEFAULT_Q_VALUE_CUTOFF
 
 SUPPORTED_FILE_TYPES = (".raw", ".mzml", ".mzml.gz", "h5")
@@ -21,25 +21,10 @@ class SearchConfig:
 
     def _get_input_files(self):
 
-        input_files = []
-        if "input_dir" in self.config:
-            input_dir = Path(self.config["input_dir"])
-            for ext in SUPPORTED_FILE_TYPES:
-                input_files.extend(input_dir.glob(f"*{ext}", case_sensitive=False))
-            if len(input_files) < 1:
-                raise ValueError(f"Cannot find any input files from {input_dir}")
-            # Make sure the input files are ordered consistently
-            input_files = sorted(input_files)
-        elif "input_files" in self.config:
-            for input_file in self.config["input_files"]:
-                if input_file.lower().endswith(SUPPORTED_FILE_TYPES):
-                    input_files.append(Path(input_file))
-                else:
-                    raise ValueError(f"Unsupported file type for {input_file}")
-        else:
-            raise ValueError("Missing 'input_files' or 'input_dir' in configuration")
+        if "input_files" not in self.config:
+            raise ValueError("Missing 'input_files' in configuration")
 
-        return input_files
+        return resolve_input_files(self.config["input_files"], SUPPORTED_FILE_TYPES)
 
     def __getitem__(self, key):
         return self.config[key]
@@ -109,10 +94,8 @@ class SearchConfig:
         Raises:
             ValueError: If required parameters are missing or invalid
         """
-        if "input_files" not in self.config and "input_dir" not in self.config:
-            raise ValueError(
-                "Missing required parameter 'input_files' or 'input_dir' in configuration"
-            )
+        if "input_files" not in self.config:
+            raise ValueError("Missing required parameter 'input_files' in configuration")
 
         # Check required parameters
         required_fields = ["output_directory", "database_directory"]

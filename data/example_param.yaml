@@ -1,8 +1,8 @@
 # acquisition_method can be either "DDA" or "DIA"
 acquisition_method: DIA
 
-# input_files is a list of raw files to be searched.
-# input_dir can be specified instead of input_files, and all raw files in the directory will be searched.
+# input_files accepts a single path/glob string, or a list of paths/glob patterns.
+# Entries may be explicit file paths or glob patterns (supports *, ?, [], and recursive **).
 input_files:
   - /data1/MassSpecData/DIA-QE/DIA/collinsb_X1803_171-A.mzML
   - /data1/MassSpecData/DIA-QE/DIA/collinsb_X1803_172-B.mzML
@@ -10,6 +10,10 @@ input_files:
   - /data1/MassSpecData/DIA-QE/DIA/collinsb_X1803_174-B.mzML
   - /data1/MassSpecData/DIA-QE/DIA/collinsb_X1803_175-A.mzML
   - /data1/MassSpecData/DIA-QE/DIA/collinsb_X1803_176-B.mzML
+# Equivalent using a glob pattern instead of an explicit list:
+# input_files: /data1/MassSpecData/DIA-QE/DIA/*.mzML
+# Recursive glob across subdirectories is also supported:
+# input_files: /data1/MassSpecData/**/*.mzML
 
 output_directory: /data1/MassSpecData/DIA-QE/DIA/delpi
 output_format: parquet # output_format can be either "tsv" or "parquet"

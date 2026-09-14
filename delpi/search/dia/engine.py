@@ -27,6 +27,7 @@ from delpi.search.result_manager import ResultManager
 from delpi.model.rt_calibrator import RetentionTimeCalibrator
 from delpi.search.search_state import SearchState
 from delpi.search.dia.quick_search import run_quick_search
+from delpi.search.dia.rt_bootstrap import DIARTBootstrapCalibrator
 from delpi.search.dia.peak_group import find_peak_groups
 from delpi.search.dia.batch_generator import count_total_batches, generate_batches
 from delpi.search.dia.lfq_utils import (
@@ -410,3 +411,11 @@ class DIASearchEngine(BaseSearchEngine):
         )
 
         return pmsm_df
+
+    def perform_rt_bootstrap(self, run: DIARun, figure_path=None):
+        return DIARTBootstrapCalibrator(
+            run,
+            db_dir=self.search_config.db_dir,
+            ms2_tol_in_ppm=self.search_config["ms2_mass_tol_in_ppm"],
+            figure_path=figure_path,
+        ).run()

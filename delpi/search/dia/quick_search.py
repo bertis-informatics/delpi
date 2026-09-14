@@ -25,19 +25,35 @@ def _quick_match(
     speclib_container: SpectralLibContainer,
     ms2_peak_df: PeakContainer,
     frame_num_map: DIAWindowFrameNumMap,
+    precursor_index0_arr: np.ndarray,
     fragment_mz_tol: float = 10.0,
     # similarity_cutoff=0.8,
 ):
+    """Quick-match a (possibly strict subset of) local precursor indices.
+
+    ``precursor_index0_arr`` selects which local precursors (0-based, into
+    ``speclib_container``) to evaluate; outputs are aligned 1:1 with it
+    (not with the full container). ``valid_arr[i]`` is False when precursor
+    ``precursor_index0_arr[i]`` has no usable RT/XIC window (empty or
+    inverted RT range, or an out-of-bounds frame index) -- callers must
+    filter by ``valid_arr`` before using ``frame_index_arr``/``score_arr``.
+    """
 
     num_fragments = speclib_container.max_fragments
-    num_precursors = speclib_container.precursor_mz_arr.shape[0]
-    frame_index_arr = np.empty(num_precursors, dtype=np.int32)
-    score_arr = np.empty(num_precursors, dtype=np.float32)
+    n_ms2_frames = frame_num_map.ms2_rt_arr.shape[0]
+    n_sel = precursor_index0_arr.shape[0]
+    frame_index_arr = np.full(n_sel, -1, dtype=np.int32)
+    score_arr = np.full(n_sel, -np.inf, dtype=np.float32)
+    valid_arr = np.zeros(n_sel, dtype=np.bool_)
 
-    for precursor_index0 in nb.prange(num_precursors):
+    for i in nb.prange(n_sel):
+        precursor_index0 = precursor_index0_arr[i]
         min_frame_index, max_frame_index = get_frame_index_range(
             speclib_container, frame_num_map.ms2_rt_arr, precursor_index0
         )
+        # empty/inverted RT window (e.g. predicted RT bound outside the run)
+        if min_frame_index >= n_ms2_frames or max_frame_index < min_frame_index:
+            continue
 
         theo_peaks = get_theoretical_peaks(speclib_container, precursor_index0)
         fragment_mz_arr = theo_peaks.fragment_mz_arr
@@ -56,16 +72,20 @@ def _quick_match(
             max_frame_index,
             num_fragments,
         )
+        if xic_arr.shape[1] == 0:
+            continue
 
         similarity_scores = cosine_similarity_columns(xic_arr, fragment_intensity_arr)
         j = np.argmax(similarity_scores)
+        # clamp the apex neighborhood so it never wraps at either edge
+        lo = j - 1 if j - 1 > 0 else 0
+        hi = j + 2 if j + 2 < xic_arr.shape[1] else xic_arr.shape[1]
 
-        frame_index_arr[precursor_index0] = min_frame_index + j
-        score_arr[precursor_index0] = similarity_scores[j] + 0.1 * np.count_nonzero(
-            xic_arr[:, j - 1 : j + 2]
-        )
+        frame_index_arr[i] = min_frame_index + j
+        score_arr[i] = similarity_scores[j] + 0.1 * np.count_nonzero(xic_arr[:, lo:hi])
+        valid_arr[i] = True
 
-    return frame_index_arr, score_arr
+    return frame_index_arr, score_arr, valid_arr
 
 
 def run_quick_search(
@@ -75,6 +95,13 @@ def run_quick_search(
     min_matches: int = 500000,
     q_value_cutoff: float = 0.05,
 ):
+    """Legacy match-count-based quick search (kept for backward compatibility
+    and as the fallback path for engines that don't implement
+    ``perform_rt_bootstrap``). The primary initial-DIA-calibration path now
+    uses the RT-stratified, checkpointed bootstrap in
+    :mod:`delpi.search.dia.rt_bootstrap`, which calls :func:`_quick_match`
+    per round on sampled precursor subsets.
+    """
 
     num_wins = run.dia_scheme_df.shape[0]
     win_indices = np.random.RandomState(seed=1226).permutation(num_wins)
@@ -108,16 +135,19 @@ def run_quick_search(
         frame_num_map = dia_win.get_frame_num_map()
         ms2_peak_df = dia_win.get_peak_container()
 
-        frame_index_arr, score_arr = _quick_match(
+        num_precursors = speclib_container.precursor_mz_arr.shape[0]
+        all_index0_arr = np.arange(num_precursors, dtype=np.int64)
+        frame_index_arr, score_arr, valid_arr = _quick_match(
             speclib_container,
             ms2_peak_df,
             frame_num_map,
+            all_index0_arr,
             fragment_mz_tol=ms2_tol_in_ppm,
         )
         # score_cutoff = np.median(score_arr, axis=0)
         # mask = np.all(score_arr > score_cutoff, axis=1)
         # mask = score_arr > np.median(score_arr)
-        mask = score_arr > 1.0
+        mask = valid_arr & (score_arr > 1.0)
         precursor_index0_arr = np.flatnonzero(mask).astype(np.uint32)
         frame_index_arr = frame_index_arr[mask]
         score_arr = score_arr[mask]
