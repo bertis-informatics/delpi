@@ -12,7 +12,11 @@ from delpi.lcms.data_container import DIAWindowFrameNumMap, PeakContainer
 from delpi.model.rt_calibrator import LinearProjectionCalibrator
 from delpi.search.dia.peak_group import make_xic_array
 from delpi.utils.fdr import calculate_q_value
-from delpi.utils.numeric import cosine_similarity_columns
+from delpi.utils.numeric import (
+    cosine_similarity_columns,
+    corrcoef,
+    extract_upper_triangle,
+)
 from delpi.utils.peak import find_peak_index
 from delpi.database.numba.spec_lib_utils import (
     get_frame_index_range,
@@ -77,12 +81,41 @@ def _quick_match(
 
         similarity_scores = cosine_similarity_columns(xic_arr, fragment_intensity_arr)
         j = np.argmax(similarity_scores)
-        # clamp the apex neighborhood so it never wraps at either edge
-        lo = j - 1 if j - 1 > 0 else 0
-        hi = j + 2 if j + 2 < xic_arr.shape[1] else xic_arr.shape[1]
+        # the 5-frame co-elution window (center +/- 2) needed for the
+        # fragment-correlation term must fit inside the XIC array
+        if j < 2 or j >= xic_arr.shape[1] - 2:
+            continue
+
+        # peak count over the center +/- 1 neighborhood, normalized to [0, 1]
+        lo, hi = j - 1, j + 2
+        peak_count_score = np.count_nonzero(xic_arr[:, lo:hi]) / (num_fragments * 3)
+
+        # mean cubed pairwise correlation between co-eluting fragment XICs
+        # (center +/- 2), restricted to fragments with a non-zero peak in
+        # that window
+        xic_window = xic_arr[:, j - 2 : j + 3]
+        qualified_mask = np.zeros(num_fragments, dtype=np.bool_)
+        n_qualified = 0
+        for r in range(num_fragments):
+            if np.any(xic_window[r] != 0):
+                qualified_mask[r] = True
+                n_qualified += 1
+
+        xic_corr_score = 0.0
+        if n_qualified >= 2:
+            qualified_xic = np.empty(
+                (n_qualified, xic_window.shape[1]), dtype=xic_window.dtype
+            )
+            idx = 0
+            for r in range(num_fragments):
+                if qualified_mask[r]:
+                    qualified_xic[idx] = xic_window[r]
+                    idx += 1
+            corr_mat = corrcoef(qualified_xic)
+            xic_corr_score = np.mean(extract_upper_triangle(corr_mat) ** 3)
 
         frame_index_arr[i] = min_frame_index + j
-        score_arr[i] = similarity_scores[j] + 0.1 * np.count_nonzero(xic_arr[:, lo:hi])
+        score_arr[i] = similarity_scores[j] + xic_corr_score + 0.5 * peak_count_score
         valid_arr[i] = True
 
     return frame_index_arr, score_arr, valid_arr

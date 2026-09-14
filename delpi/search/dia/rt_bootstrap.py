@@ -57,10 +57,10 @@ class RTBootstrapConfig:
     hard_limit: int = 1_000_000
     min_window_frac: float = 0.1
     q_value_cutoff: float = 0.05
-    min_unique_anchors: int = 500
-    min_anchors_best_effort: int = 300
-    top_n_best_effort: int = 600
-    max_fit_anchors: int = 10_000
+    min_unique_anchors: int = 1000
+    min_anchors_best_effort: int = 500
+    top_n_best_effort: int = 500
+    max_fit_anchors: int = 5_000
     mad_clip_thresh: float = 3.5
     max_mad_iters: int = 3
     max_degree: int = 3
@@ -332,9 +332,7 @@ class DIARTBootstrapCalibrator:
             plt.close(fig)
             logger.info(f"Saved DIA RT bootstrap diagnostics: " f"{self.figure_path}")
         except Exception:
-            logger.exception(
-                f"[{self._dia_run.name}] Failed to save DIA RT bootstrap diagnostics"
-            )
+            logger.exception(f"Failed to save DIA RT bootstrap diagnostics")
 
     # -- orchestration -----------------------------------------------------
 
@@ -384,7 +382,7 @@ class DIARTBootstrapCalibrator:
                     last_diag = diag
                     if calibrator is not None:
                         logger.info(
-                            f"[{self._dia_run.name}] DIA RT bootstrap succeeded: "
+                            f"DIA RT bootstrap succeeded: "
                             f"windows={n_windows} evaluated={n_evaluated} "
                             f"anchors={anchors_df.height} degree={diag.get('degree')} "
                             f"half_width={diag.get('half_width', float('nan')):.1f}s"
@@ -452,7 +450,7 @@ class DIARTBootstrapCalibrator:
             last_diag = diag
             if calibrator is not None:
                 logger.warning(
-                    f"[{self._dia_run.name}] DIA RT bootstrap top-score fallback fit used "
+                    f"DIA RT bootstrap top-score fallback fit used "
                     f"(anchors={n_unique_anchors} below target={self.cfg.min_unique_anchors}, "
                     f"top_n={fit_df.height}): windows={n_windows} evaluated={n_evaluated} "
                     f"degree={diag.get('degree')} half_width={diag.get('half_width', float('nan')):.1f}s"
@@ -497,7 +495,7 @@ class DIARTBootstrapCalibrator:
         diagnostics: Optional[dict] = None,
     ) -> RTBootstrapResult:
         logger.warning(
-            f"[{self._dia_run.name}] DIA RT bootstrap failed, using broad fallback bounds: "
+            f"DIA RT bootstrap failed, using broad fallback bounds: "
             f"reason={reason} rounds={n_rounds} evaluated={n_evaluated} anchors={n_unique_anchors}"
         )
         diagnostics = diagnostics or {"reason": reason}

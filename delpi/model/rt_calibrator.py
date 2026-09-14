@@ -347,10 +347,10 @@ class BootstrapRTCalibrator(LinearProjectionCalibrator):
     Follows the same scikit-learn
     ``Pipeline(PolynomialFeatures, LinearRegression)`` pattern as
     :class:`RetentionTimeCalibrator`, but unlike it, this iteratively
-    rejects outliers (MAD clipping), picks the highest degree (up to
-    `max_degree`) that still yields a monotonic, positive-trend fit, and
-    derives its RT half-width from the residual distribution rather than a
-    separately-fit residual model.
+    rejects outliers (MAD clipping), always fits at a fixed `max_degree`
+    (no monotonicity-driven degree downgrade), and derives its RT
+    half-width from the residual distribution rather than a separately-fit
+    residual model.
     """
 
     def __init__(
@@ -423,27 +423,13 @@ class BootstrapRTCalibrator(LinearProjectionCalibrator):
             return None, {"reason": "degenerate_run_rt_bounds"}
 
         scale_floor = max(float(scale_floor), 1e-6)
-        x_grid = np.linspace(x_train.min(), x_train.max(), 50).reshape(-1, 1)
-
-        estimator, inlier_mask, used_degree = None, np.ones(n, dtype=bool), None
-        for degree in range(min(self.max_degree, n - 1), 0, -1):
-            candidate, candidate_mask = self._fit_degree(
-                x_train, y_train, degree, scale_floor
-            )
-            if candidate is None:
-                continue
-            predicted_grid = candidate.predict(x_grid)
-            if not np.all(np.isfinite(predicted_grid)) or np.any(
-                np.diff(predicted_grid) < -1e-6
-            ):
-                continue
-            if degree == 1 and predicted_grid[-1] <= predicted_grid[0]:
-                continue
-            estimator, inlier_mask, used_degree = candidate, candidate_mask, degree
-            break
+        used_degree = min(self.max_degree, n - 1)
+        estimator, inlier_mask = self._fit_degree(
+            x_train, y_train, used_degree, scale_floor
+        )
 
         if estimator is None:
-            return None, {"reason": "non_monotonic_or_invalid_fit", "n": n}
+            return None, {"reason": "fit_failed", "n": n}
 
         residual = y_train - estimator.predict(x_train)
         center = float(np.median(residual[inlier_mask]))
