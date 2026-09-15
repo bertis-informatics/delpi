@@ -5,8 +5,8 @@ import pickle
 
 import numpy as np
 import polars as pl
-from sklearn.preprocessing import PolynomialFeatures
-from sklearn.linear_model import LinearRegression
+from sklearn.preprocessing import PolynomialFeatures, StandardScaler
+from sklearn.linear_model import LinearRegression, HuberRegressor
 from sklearn.exceptions import NotFittedError
 from sklearn.pipeline import make_pipeline
 
@@ -339,18 +339,18 @@ class RetentionTimeCalibrator(LinearProjectionCalibrator):
 
 
 class BootstrapRTCalibrator(LinearProjectionCalibrator):
-    """MAD-robust, degree-<=`max_degree` RT calibrator used only by the DIA
-    bootstrap calibration pipeline (:mod:`delpi.search.dia.rt_bootstrap`).
+    """Huber-robust, degree-<=`max_degree` RT calibrator used only by the
+    DIA bootstrap calibration pipeline (:mod:`delpi.search.dia.rt_bootstrap`).
     Not persisted via HDF; used only transiently before the first full DIA
     search.
 
-    Follows the same scikit-learn
-    ``Pipeline(PolynomialFeatures, LinearRegression)`` pattern as
-    :class:`RetentionTimeCalibrator`, but unlike it, this iteratively
-    rejects outliers (MAD clipping), always fits at a fixed `max_degree`
-    (no monotonicity-driven degree downgrade), and derives its RT
-    half-width from the residual distribution rather than a separately-fit
-    residual model.
+    Uses a scikit-learn
+    ``Pipeline(PolynomialFeatures, StandardScaler, HuberRegressor)``, always
+    fitting at a fixed `max_degree` (no monotonicity-driven degree
+    downgrade). Outlier rejection relies on `HuberRegressor`'s own
+    `outliers_` mask instead of iterative MAD clipping, and the RT
+    half-width is derived from the residual distribution rather than a
+    separately-fit residual model.
     """
 
     def __init__(
@@ -358,8 +358,6 @@ class BootstrapRTCalibrator(LinearProjectionCalibrator):
         min_rt_in_seconds: float,
         max_rt_in_seconds: float,
         max_degree: int = 3,
-        mad_clip_thresh: float = 3.5,
-        max_mad_iters: int = 3,
         min_rt_tolerance: float = 0.10,
         max_rt_tolerance: float = 0.15,
     ):
@@ -367,44 +365,16 @@ class BootstrapRTCalibrator(LinearProjectionCalibrator):
         assert max_rt_tolerance >= min_rt_tolerance
 
         self.max_degree = max_degree
-        self.mad_clip_thresh = mad_clip_thresh
-        self.max_mad_iters = max_mad_iters
         self.min_rt_tol_in_seconds = self.lc_grad_len * min_rt_tolerance
         self.max_rt_tol_in_seconds = self.lc_grad_len * max_rt_tolerance
         self.degree = None
         self.estimator = None
         self.half_width_in_seconds = None
 
-    def _fit_degree(
-        self, x_train: np.ndarray, y_train: np.ndarray, degree: int, scale_floor: float
-    ):
-        """One MAD-clipping/refitting cycle; stops early once the inlier
-        mask stabilizes. Returns ``(estimator_or_None, inlier_mask)``."""
-        inlier_mask = np.ones(x_train.shape[0], dtype=bool)
-        estimator = None
-        for _ in range(self.max_mad_iters):
-            if int(np.sum(inlier_mask)) < degree + 1:
-                return None, inlier_mask
-            estimator = make_pipeline(
-                PolynomialFeatures(degree=degree, include_bias=False),
-                LinearRegression(),
-            ).fit(x_train[inlier_mask], y_train[inlier_mask])
-            residual = y_train - estimator.predict(x_train)
-            center = np.median(residual[inlier_mask])
-            mad = max(
-                1.4826 * np.median(np.abs(residual[inlier_mask] - center)), scale_floor
-            )
-            new_mask = np.abs(residual - center) <= self.mad_clip_thresh * mad
-            if np.array_equal(new_mask, inlier_mask):
-                break
-            inlier_mask = new_mask
-        return estimator, inlier_mask
-
     def fit(
         self,
         ref_rt: Union[np.ndarray, List, pl.Series],
         obs_rt: Union[np.ndarray, List, pl.Series],
-        scale_floor: float = 1.0,
     ) -> tuple:
         """Fit a bootstrap RT mapping. Returns ``(self_or_None, diagnostics)``;
         ``diagnostics`` always has a ``reason`` key and, on success, an
@@ -422,14 +392,13 @@ class BootstrapRTCalibrator(LinearProjectionCalibrator):
         if not np.isfinite(self.lc_grad_len) or self.lc_grad_len <= 0:
             return None, {"reason": "degenerate_run_rt_bounds"}
 
-        scale_floor = max(float(scale_floor), 1e-6)
         used_degree = min(self.max_degree, n - 1)
-        estimator, inlier_mask = self._fit_degree(
-            x_train, y_train, used_degree, scale_floor
-        )
-
-        if estimator is None:
-            return None, {"reason": "fit_failed", "n": n}
+        estimator = make_pipeline(
+            PolynomialFeatures(degree=used_degree, include_bias=False),
+            StandardScaler(),
+            HuberRegressor(),
+        ).fit(x_train, y_train)
+        inlier_mask = ~estimator[-1].outliers_
 
         residual = y_train - estimator.predict(x_train)
         center = float(np.median(residual[inlier_mask]))

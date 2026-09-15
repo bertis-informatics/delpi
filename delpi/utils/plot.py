@@ -114,8 +114,12 @@ def plot_rt_bootstrap_diagnostics(
             label=f"fit outliers ({int((~inlier_mask).sum()):,})",
         )
 
-    if anchor_ref_rt.size:
-        ref_min, ref_max = float(anchor_ref_rt.min()), float(anchor_ref_rt.max())
+    # fit_df can span a wider RT range than anchors_df (e.g. top-score
+    # fallback), so the plotted curve/bounds must cover both.
+    range_arrs = [arr for arr in (anchor_ref_rt, fit_ref_rt) if arr.size]
+    if range_arrs:
+        ref_min = float(min(arr.min() for arr in range_arrs))
+        ref_max = float(max(arr.max() for arr in range_arrs))
     elif bin_edges.size:
         ref_min, ref_max = float(bin_edges[0]), float(bin_edges[-1])
     else:

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "delpi"
-version = "0.9.1"
+version = "1.1.0"
 description = "DelPi: Deep Learning-based Peptide Identification Software"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -95,7 +95,7 @@ addopts = "-v --tb=short"
 
 [tool.black]
 line-length = 88
-target-version = ['py38']
+target-version = ['py312']
 include = '\.pyi?$'
 extend-exclude = '''
 /(

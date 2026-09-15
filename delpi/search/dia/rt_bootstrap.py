@@ -7,7 +7,7 @@ Replaces the match-count-based `run_quick_search` stopping rule for the
     (like the legacy `run_quick_search`, but incremental/early-stopping)
         -> cumulative target-decoy analysis (AnchorSelector, q-value based)
         -> anchor count check
-        -> robust (MAD, degree<=3) calibration (BootstrapRTCalibrator)
+        -> robust (Huber, degree<=2) calibration (BootstrapRTCalibrator)
         -> stop on success, else keep matching more windows within a hard
            workload budget
         -> if the budget is exhausted, a best-effort fit with whatever
@@ -61,8 +61,6 @@ class RTBootstrapConfig:
     min_anchors_best_effort: int = 150
     top_n_best_effort: int = 300
     max_fit_anchors: int = 5_000
-    mad_clip_thresh: float = 3.5
-    max_mad_iters: int = 3
     max_degree: int = 2
     min_rt_tolerance: float = 0.10
     max_rt_tolerance: float = 0.15
@@ -175,8 +173,6 @@ class DIARTBootstrapCalibrator:
             min_rt_in_seconds=self.min_rt_in_seconds,
             max_rt_in_seconds=self.max_rt_in_seconds,
             max_degree=self.cfg.max_degree,
-            mad_clip_thresh=self.cfg.mad_clip_thresh,
-            max_mad_iters=self.cfg.max_mad_iters,
             min_rt_tolerance=self.cfg.min_rt_tolerance,
             max_rt_tolerance=self.cfg.max_rt_tolerance,
         )
@@ -245,38 +241,22 @@ class DIARTBootstrapCalibrator:
 
     # -- trial fitting -----------------------------------------------------
 
-    def _try_fit(
-        self,
-        anchors_df: pl.DataFrame,
-        scale_floor: float,
-        min_unique_anchors: Optional[int] = None,
-    ):
+    def _try_fit(self, anchors_df: pl.DataFrame):
         fit_df = self.anchor_selector.subsample_for_fit(anchors_df)
         calibrator, diag = BootstrapRTCalibrator(**self._calibrator_kwargs).fit(
             fit_df["ref_rt"].to_numpy(),
             fit_df["observed_rt"].to_numpy(),
-            scale_floor=scale_floor,
         )
-        if calibrator is None:
-            return None, diag, fit_df
-
-        # re-check anchor support against the ORIGINAL qualified anchor
-        # count, not just whatever survived aggressive MAD clipping
-        if not self.anchor_selector.is_sufficient(
-            int(diag["inlier_mask"].sum()), min_unique_anchors=min_unique_anchors
-        ):
-            diag["reason"] = "insufficient_support_after_outlier_rejection"
-            return None, diag, fit_df
         return calibrator, diag, fit_df
 
     def _top_score_fit(
-        self, cumulative_df: pl.DataFrame, scale_floor: float
+        self, cumulative_df: pl.DataFrame
     ) -> Tuple[Optional[BootstrapRTCalibrator], dict, pl.DataFrame]:
         """Absolute last resort before the broad fallback: ignore the
         q-value requirement entirely and fit directly on the
         ``top_n_best_effort`` highest-scoring target matches (one per
         peptidoform), still subject to `BootstrapRTCalibrator`'s own robust
-        MAD/monotonicity/residual-width QC."""
+        Huber/residual-width QC."""
         target_df = cumulative_df.filter(
             (~pl.col("is_decoy"))
             & pl.col("ref_rt").is_finite()
@@ -293,7 +273,6 @@ class DIARTBootstrapCalibrator:
         calibrator, diag = BootstrapRTCalibrator(**self._calibrator_kwargs).fit(
             top_df["ref_rt"].to_numpy(),
             top_df["observed_rt"].to_numpy(),
-            scale_floor=scale_floor,
         )
         return calibrator, diag, top_df
 
@@ -351,7 +330,6 @@ class DIARTBootstrapCalibrator:
 
         win_indices = np.random.RandomState(self.cfg.seed).permutation(num_wins)
         min_windows = max(int(self.cfg.min_window_frac * num_wins), 2)
-        scale_floor = max(2.0 * float(self._dia_run.cycle_time_in_seconds), 1.0)
 
         cumulative_rounds: list[pl.DataFrame] = []
         n_windows, n_evaluated = 0, 0
@@ -378,7 +356,7 @@ class DIARTBootstrapCalibrator:
                 cumulative_df = pl.concat(cumulative_rounds, how="vertical")
                 anchors_df = self.anchor_selector.select(cumulative_df)
                 if self.anchor_selector.is_sufficient(anchors_df.height):
-                    calibrator, diag, fit_df = self._try_fit(anchors_df, scale_floor)
+                    calibrator, diag, fit_df = self._try_fit(anchors_df)
                     last_diag = diag
                     if calibrator is not None:
                         logger.info(
@@ -412,14 +390,9 @@ class DIARTBootstrapCalibrator:
         # Budget/windows exhausted without ever reaching min_unique_anchors:
         # rather than jumping straight to the very wide broad fallback
         # bounds, make one last attempt with whatever qualified anchors were
-        # actually collected (relaxed anchor-count floor, same
-        # monotonicity/residual QC).
+        # actually collected (relaxed anchor-count floor).
         if n_unique_anchors >= self.cfg.min_anchors_best_effort:
-            calibrator, diag, fit_df = self._try_fit(
-                anchors_df,
-                scale_floor,
-                min_unique_anchors=self.cfg.min_anchors_best_effort,
-            )
+            calibrator, diag, fit_df = self._try_fit(anchors_df)
             last_diag = diag
             if calibrator is not None:
                 logger.warning(
@@ -446,7 +419,7 @@ class DIARTBootstrapCalibrator:
         # fit on the raw top-scoring target matches, before giving up to
         # the broad fallback bounds.
         if cumulative_rounds:
-            calibrator, diag, fit_df = self._top_score_fit(cumulative_df, scale_floor)
+            calibrator, diag, fit_df = self._top_score_fit(cumulative_df)
             last_diag = diag
             if calibrator is not None:
                 logger.warning(
