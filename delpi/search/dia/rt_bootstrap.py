@@ -64,7 +64,8 @@ class RTBootstrapConfig:
     max_degree: int = 2
     min_rt_tolerance: float = 0.10
     max_rt_tolerance: float = 0.15
-    broad_rt_tolerance: float = 0.25
+    initial_rt_tolerance: float = 0.25
+    fallback_rt_tolerance: float = 0.35
     max_fragments: int = 6
     max_precursor_isotopes: int = 1
     max_fragment_isotopes: int = 1
@@ -177,6 +178,12 @@ class DIARTBootstrapCalibrator:
             max_rt_tolerance=self.cfg.max_rt_tolerance,
         )
         self.anchor_selector = AnchorSelector(self.cfg)
+        initial_calibrator = LinearProjectionCalibrator(
+            min_rt_in_seconds=self.min_rt_in_seconds,
+            max_rt_in_seconds=self.max_rt_in_seconds,
+            rt_tolerance=self.cfg.initial_rt_tolerance,
+        ).fit(self.spec_reader.modification_df["ref_rt"])
+        self.spec_reader.calibrate_rt(initial_calibrator)
 
     # -- one-time setup ------------------------------------------------------
 
@@ -184,9 +191,8 @@ class DIARTBootstrapCalibrator:
         calibrator = LinearProjectionCalibrator(
             min_rt_in_seconds=self.min_rt_in_seconds,
             max_rt_in_seconds=self.max_rt_in_seconds,
-            rt_tolerance=self.cfg.broad_rt_tolerance,
+            rt_tolerance=self.cfg.fallback_rt_tolerance,
         ).fit(self.spec_reader.modification_df["ref_rt"])
-        self.spec_reader.calibrate_rt(calibrator)
         return calibrator
 
     def _make_bin_edges(self, ref_rt_eligible: np.ndarray) -> np.ndarray:
@@ -408,33 +414,6 @@ class DIARTBootstrapCalibrator:
                     n_rounds=n_windows,
                     n_evaluated=n_evaluated,
                     n_unique_anchors=n_unique_anchors,
-                    diagnostics=diag,
-                )
-                self._save_diagnostic_figure(
-                    calibrator, anchors_df, fit_df, diag, success=True
-                )
-                return result
-
-        # Still no usable fit: drop the q-value requirement entirely and
-        # fit on the raw top-scoring target matches, before giving up to
-        # the broad fallback bounds.
-        if cumulative_rounds:
-            calibrator, diag, fit_df = self._top_score_fit(cumulative_df)
-            last_diag = diag
-            if calibrator is not None:
-                logger.warning(
-                    f"DIA RT bootstrap top-score fallback fit used "
-                    f"(anchors={n_unique_anchors} below target={self.cfg.min_unique_anchors}, "
-                    f"top_n={fit_df.height}): windows={n_windows} evaluated={n_evaluated} "
-                    f"degree={diag.get('degree')} half_width={diag.get('half_width', float('nan')):.1f}s"
-                )
-                result = RTBootstrapResult(
-                    calibrator=calibrator,
-                    success=True,
-                    fallback_reason=None,
-                    n_rounds=n_windows,
-                    n_evaluated=n_evaluated,
-                    n_unique_anchors=fit_df.height,
                     diagnostics=diag,
                 )
                 self._save_diagnostic_figure(

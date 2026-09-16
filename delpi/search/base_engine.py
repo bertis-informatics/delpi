@@ -21,7 +21,10 @@ from delpi.search.config import SearchConfig
 from delpi.search.result_manager import ResultManager
 from delpi.database.peptide_database import PeptideDatabase
 from delpi.model.pmsm_scale import PeptideMultiSpectraMatchScaler
-from delpi.model.rt_calibrator import RetentionTimeCalibrator
+from delpi.model.rt_calibrator import (
+    RetentionTimeCalibrator,
+    LinearProjectionCalibrator,
+)
 from delpi.search.tl.data_prep import TransferLearningDataPreparator
 from delpi.search.search_state import SearchState
 from delpi.search.progress.tracker import ProgressTracker
@@ -318,21 +321,19 @@ class BaseSearchEngine(ABC):
 
         if self.state == SearchState.FIRST_SEARCH and before_full_search:
             bootstrap_result = self.perform_rt_bootstrap(run, figure_path=fig_path)
-            if bootstrap_result is not None:
-                if not bootstrap_result.success:
-                    logger.warning(
-                        f"[{run.name}] DIA RT bootstrap calibration fell back to "
-                        f"broad bounds (reason={bootstrap_result.fallback_reason}, "
-                        f"rounds={bootstrap_result.n_rounds}, "
-                        f"evaluated={bootstrap_result.n_evaluated}, "
-                        f"anchors={bootstrap_result.n_unique_anchors})"
-                    )
-                return bootstrap_result.calibrator
-
+            if not bootstrap_result.success:
+                logger.warning(
+                    f"DIA RT bootstrap calibration fell back to "
+                    f"broad bounds (reason={bootstrap_result.fallback_reason}, "
+                    f"rounds={bootstrap_result.n_rounds}, "
+                    f"evaluated={bootstrap_result.n_evaluated}, "
+                    f"anchors={bootstrap_result.n_unique_anchors})"
+                )
+            return bootstrap_result.calibrator
             # Legacy path: engines without RT-bootstrap support (e.g. DDA).
-            q_value_cutoff = 0.05
-            pmsm_df = self.perform_quick_search(run)
-            target_df = pmsm_df.filter(pl.col("is_decoy") == False)
+            # q_value_cutoff = 0.05
+            # pmsm_df = self.perform_quick_search(run)
+            # target_df = pmsm_df.filter(pl.col("is_decoy") == False)
         else:
             q_value_cutoff = 0.01
             if after_full_search:
@@ -392,15 +393,22 @@ class BaseSearchEngine(ABC):
                 & (pl.col("is_decoy") == False)
             )
 
-        rt_calibrator = RetentionTimeCalibrator.train(
-            min_rt_in_seconds=meta_df.item(0, "time_in_seconds"),
-            max_rt_in_seconds=meta_df.item(-1, "time_in_seconds"),
-            ref_rt=target_df["ref_rt"].to_numpy(),
-            obs_rt=target_df["observed_rt"].to_numpy(),
-            degree=2,
-            min_rt_tolerance=0.1,
-            max_rt_tolerance=0.11,
-        )
+        if target_df.height < 150:
+            rt_calibrator = LinearProjectionCalibrator(
+                min_rt_in_seconds=meta_df.item(0, "time_in_seconds"),
+                max_rt_in_seconds=meta_df.item(-1, "time_in_seconds"),
+                rt_tolerance=0.25,
+            )
+        else:
+            rt_calibrator = RetentionTimeCalibrator.train(
+                min_rt_in_seconds=meta_df.item(0, "time_in_seconds"),
+                max_rt_in_seconds=meta_df.item(-1, "time_in_seconds"),
+                ref_rt=target_df["ref_rt"].to_numpy(),
+                obs_rt=target_df["observed_rt"].to_numpy(),
+                degree=2,
+                min_rt_tolerance=0.1,
+                max_rt_tolerance=0.11,
+            )
 
         if after_full_search:
             # save RT predictions for the full search results
