@@ -12,7 +12,9 @@ from delpi.model.spec_lib import Ms2SpectrumPredictor
 from delpi.database.peptide_database import PeptideDatabase
 from delpi.database.spec_lib_generator import SpectralLibGenerator
 from delpi.database.precursor_generator import PrecursorGenerator
+from delpi.chem.modification_registry import ModificationRegistry
 from delpi.model.spec_lib.rt_predictor import RetentionTimePredictor
+from delpi.utils.yaml_file import load_yaml
 
 
 class RefinedSpectralLibGenerator(SpectralLibGenerator):
@@ -121,8 +123,14 @@ class RefinedSpectralLibGenerator(SpectralLibGenerator):
             min_mz=self.min_precursor_mz,
             max_mz=self.max_precursor_mz,
         )
+        mod_param_set = load_yaml(db_dir / "param.yaml").get("modification", {}).get(
+            "mod_param_set", []
+        )
+        registry = ModificationRegistry.from_mod_param_set(mod_param_set)
         precursor_df, modification_df, prefix_mass_container = (
-            precursor_gen.generate_precursors(peptide_df, modification_df)
+            precursor_gen.generate_precursors(
+                peptide_df, modification_df, registry=registry
+            )
         )
         precursor_df = (
             precursor_df.join(

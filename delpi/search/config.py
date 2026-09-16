@@ -4,6 +4,7 @@ from pathlib import Path
 
 from pymsio import MassSpecFileReader
 from delpi.chem.modification_param import ModificationParam
+from delpi.chem.modification_registry import ModificationRegistry
 from delpi.search.result_manager import ResultManager
 from delpi.database.decoy_generator import DecoyGenerator
 from delpi.utils.yaml_file import load_yaml, save_yaml, resolve_input_files
@@ -18,6 +19,7 @@ class SearchConfig:
         self.yaml_path = Path(yaml_path)
         self.config = load_yaml(self.yaml_path)
         self.input_files = self._get_input_files()
+        self._modification_registry: ModificationRegistry = None
 
     def _get_input_files(self):
 
@@ -87,6 +89,25 @@ class SearchConfig:
 
         return ResultManager(run_name=run_name, output_dir=self.output_dir)
 
+    @property
+    def modification_registry(self) -> ModificationRegistry:
+        """Search-specific registry combining the global UniMod database with
+        any custom (composition-defined) modifications from this config.
+
+        Built once (in the main process) and cached on this ``SearchConfig``,
+        so it is carried along automatically -- via ordinary pickling/fork --
+        whenever this config (or an object holding a reference to it, e.g. a
+        search engine) is handed to a run-level child process.
+        """
+        if self._modification_registry is None:
+            mod_param_set = self.config.get("modification", {}).get(
+                "mod_param_set", []
+            )
+            self._modification_registry = ModificationRegistry.from_mod_param_set(
+                mod_param_set
+            )
+        return self._modification_registry
+
     def check_params(self) -> None:
         """
         Validate essential configuration parameters.
@@ -132,6 +153,10 @@ class SearchConfig:
         for input_file in self.input_files:
             if not input_file.exists():
                 raise FileNotFoundError(f"Input file not found: {input_file}")
+
+        # Build (and validate) the modification registry eagerly, in the
+        # main process, before any run-level child process is launched.
+        self.modification_registry
 
     def get_db_params(self) -> dict:
         """
@@ -199,8 +224,19 @@ class SearchConfig:
         if len(mod_params1) != len(mod_params2):
             return False
 
-        encoded1 = sorted([ModificationParam(**mods).encode() for mods in mod_params1])
-        encoded2 = sorted([ModificationParam(**mods).encode() for mods in mod_params2])
+        # Each list is resolved against its own, self-contained registry
+        # (custom modification definitions, incl. composition, travel with
+        # the mod_param_set itself) so this comparison works whether or not
+        # either list contains custom modifications.
+        registry1 = ModificationRegistry.from_mod_param_set(mod_params1)
+        registry2 = ModificationRegistry.from_mod_param_set(mod_params2)
+
+        encoded1 = sorted(
+            [ModificationParam(**mods, registry=registry1).encode() for mods in mod_params1]
+        )
+        encoded2 = sorted(
+            [ModificationParam(**mods, registry=registry2).encode() for mods in mod_params2]
+        )
 
         return encoded1 == encoded2
 

@@ -284,6 +284,7 @@ class BaseSearchEngine(ABC):
             preparator = TransferLearningDataPreparator(
                 tolerance_in_ppm=self.search_config["ms2_mass_tol_in_ppm"],
                 apply_phospho=self.search_config.is_phospho_search,
+                registry=self.search_config.modification_registry,
             )
             preparator.extract_and_save(target_pmsm_df, raw_path, tl_ms2_h5_path)
             logger.info(f"Transfer learning data prepared for {raw_path}")

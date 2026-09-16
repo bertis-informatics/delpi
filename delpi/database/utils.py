@@ -27,7 +27,11 @@ mod_name_array = np.asarray(mod_name_array, dtype=np.str_)
 
 
 def get_modified_sequence(
-    seq: str, mod_ids: str, mod_sites: str, use_unimod_id: bool = True
+    seq: str,
+    mod_ids: str,
+    mod_sites: str,
+    use_unimod_id: bool = True,
+    registry=None,
 ) -> str:
     """Create a peptide sequence string with modifications
 
@@ -36,6 +40,9 @@ def get_modified_sequence(
         mod_ids (str): modification param indexes separated by `;`
         mod_sites (str): modification sites separated by `;`
         use_unimod_id (bool, optional): a flag to apply UniMod ID. Defaults to True.
+        registry (ModificationRegistry, optional): search-specific registry
+            used to resolve custom (composition-defined) modifications, which
+            are always rendered as ``(mod_name)`` rather than ``(UniMod:id)``.
 
     Returns:
         str: modified sequence string
@@ -57,11 +64,12 @@ def get_modified_sequence(
         #     pos = 0
         # else:  # C-term
         #     pos = len(seq) - 1
-        seq[pos] += (
-            f"(UniMod:{unimod_id})"
-            if use_unimod_id
-            else f"({mod_name_array[unimod_id]})"
-        )
+        if registry is not None and registry.is_custom_id(unimod_id):
+            seq[pos] += f"({registry.get_display_name(unimod_id)})"
+        elif use_unimod_id:
+            seq[pos] += f"(UniMod:{unimod_id})"
+        else:
+            seq[pos] += f"({mod_name_array[unimod_id]})"
     return "".join(seq)
 
 
@@ -69,6 +77,7 @@ def create_peptidoform_df(
     peptide_df: pl.DataFrame,
     modification_df: pl.DataFrame,
     modified_sequence_format: str = "delpi",
+    registry=None,
 ):
 
     mod_df = modification_df
@@ -92,6 +101,7 @@ def create_peptidoform_df(
                     x["mod_ids"],
                     x["mod_sites"],
                     use_unimod_id=use_unimod_id,
+                    registry=registry,
                 ),
                 return_dtype=pl.String,
             )

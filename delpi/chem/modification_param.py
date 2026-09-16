@@ -62,15 +62,22 @@ class ModificationParam:
         residue: str,
         location: str | ModificationLocation,
         fixed: bool,
+        composition: str = None,
+        registry: "ModificationRegistry | None" = None,
     ):
 
         assert isinstance(residue, str) and len(residue) == 1
 
-        self.modification = (
-            mod_name
-            if isinstance(mod_name, Modification)
-            else Modification.get(mod_name)
-        )
+        # `composition` is accepted (and ignored here) so that raw config
+        # dicts for custom modifications (which include it) can be passed
+        # via `ModificationParam(**mod_dict)`; resolution of the name to a
+        # `Modification` (incl. its composition/mass) happens via `registry`.
+        if isinstance(mod_name, Modification):
+            self.modification = mod_name
+        elif registry is not None:
+            self.modification = registry.get(mod_name)
+        else:
+            self.modification = Modification.get(mod_name)
         self.location = (
             location
             if isinstance(location, ModificationLocation)
@@ -84,14 +91,19 @@ class ModificationParam:
         return self.modification.name
 
     @classmethod
-    def decode(cls, mod_param_id: int):
+    def decode(cls, mod_param_id: int, registry: "ModificationRegistry | None" = None):
         unimod_id = (mod_param_id >> 16) & 0xFFFF
         loc_index = (mod_param_id >> 13) & 0x7
         residue = chr((mod_param_id >> 6) & 0x7F)
         fixed = bool(mod_param_id & 0x1)
 
+        modification = (
+            registry.get_by_id(unimod_id)
+            if registry is not None
+            else Modification.get_by_unimod_id(unimod_id)
+        )
         return cls(
-            mod_name=Modification.get_by_unimod_id(unimod_id),
+            mod_name=modification,
             residue=residue,
             location=INDEX_TO_LOC[loc_index],
             fixed=fixed,
@@ -155,7 +167,7 @@ class ModificationParam:
             return [self.residue]
 
     def to_dict(self):
-        return {
+        d = {
             # 'mod_id': self.id,
             # 'unimod_id': self.unimod_id,
             "mod_name": self.modification.name,
@@ -163,6 +175,9 @@ class ModificationParam:
             "location": self.location.value,
             "fixed": self.fixed,
         }
+        if getattr(self.modification, "is_custom", False):
+            d["composition"] = self.modification.composition.to_plain_string()
+        return d
 
 
 def get_test_mod_param_set():

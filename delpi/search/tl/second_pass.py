@@ -14,6 +14,7 @@ import polars as pl
 
 from delpi.database.peptide_database import PeptideDatabase
 from delpi.chem.modification_param import ModificationParam
+from delpi.chem.modification_registry import ModificationRegistry
 from delpi.utils.yaml_file import load_yaml
 
 logger = logging.getLogger(__name__)
@@ -38,7 +39,8 @@ def get_var_mod_names(db_dir: Path) -> list[str]:
         return []
 
     mod_param_set = mod["mod_param_set"]
-    mod_params = [ModificationParam(**mods) for mods in mod_param_set]
+    registry = ModificationRegistry.from_mod_param_set(mod_param_set)
+    mod_params = [ModificationParam(**mods, registry=registry) for mods in mod_param_set]
     return [mod.mod_name for mod in mod_params if mod.fixed == False]
 
 

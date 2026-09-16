@@ -39,6 +39,7 @@ class TransferLearningDataPreparator:
         apply_phospho: bool = False,
         min_charge: int = 1,
         max_charge: int = 2,
+        registry=None,
     ):
         """
         Args:
@@ -49,6 +50,8 @@ class TransferLearningDataPreparator:
             apply_phospho: Whether to include the phospho neutral loss.
             min_charge: Minimum fragment charge.
             max_charge: Maximum fragment charge.
+            registry: Optional search-specific ModificationRegistry (UniMod +
+                custom modifications) used when computing prefix mass arrays.
         """
         self.nce = nce
         self.frag_method = frag_method
@@ -57,6 +60,7 @@ class TransferLearningDataPreparator:
         self.apply_phospho = apply_phospho
         self.min_charge = min_charge
         self.max_charge = max_charge
+        self.registry = registry
 
         # Initialize fragmentation and precursor generator
         self.precursor_gen = PrecursorGenerator()
@@ -279,6 +283,7 @@ class TransferLearningDataPreparator:
                 modification_df=sub_df.select(
                     pl.col("peptide_index", "mod_ids", "mod_sites")
                 ),
+                registry=self.registry,
             )
         )
         prefix_mass_container = PrefixMassArrayContainer(

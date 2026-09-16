@@ -861,7 +861,9 @@ class SearchManager:
         return pmsm_df, pg_quant_df
 
     @staticmethod
-    def _add_report_columns(pmsm_df: pl.DataFrame) -> pl.DataFrame:
+    def _add_report_columns(
+        pmsm_df: pl.DataFrame, registry=None
+    ) -> pl.DataFrame:
         """Add ``modified_sequence`` and ``posterior_error`` report columns."""
         return pmsm_df.with_columns(
             pl.col("peptide_index", "peptidoform_index"),
@@ -874,6 +876,7 @@ class SearchManager:
                         x["mod_ids"],
                         x["mod_sites"],
                         use_unimod_id=True,
+                        registry=registry,
                     ),
                     return_dtype=pl.String,
                 )
@@ -924,7 +927,9 @@ class SearchManager:
             )
 
         ## Add modified sequence column
-        pmsm_df = self._add_report_columns(pmsm_df)
+        pmsm_df = self._add_report_columns(
+            pmsm_df, registry=self.search_config.modification_registry
+        )
 
         if not output_decoy:
             pmsm_df = pmsm_df.filter(pl.col("is_decoy") == False)
