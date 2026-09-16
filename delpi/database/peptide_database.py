@@ -7,6 +7,7 @@ import torch
 from delpi.lcms.base_ion_type import BaseIonType
 from delpi.chem.amino_acid import AminoAcid
 from delpi.chem.modification_param import ModificationParam
+from delpi.chem.modification_registry import ModificationRegistry
 from delpi.database.fasta_parser import FastaParser
 from delpi.database.enzyme import Enzyme
 from delpi.database.decoy_generator import DecoyGenerator
@@ -32,6 +33,25 @@ class PeptideDatabase:
         self.speclib_df = None
 
         self.prefix_mass_container = None
+        self._modification_registry = None
+
+    @property
+    def modification_registry(self) -> ModificationRegistry:
+        """Search-specific registry (UniMod + custom modifications).
+
+        Built eagerly by :meth:`build`; when the instance was instead
+        obtained via :meth:`load`, it is lazily reconstructed from the
+        saved ``mod_param_set`` (custom modification definitions are
+        preserved in ``param.yaml``, so this is fully self-contained).
+        """
+        if self._modification_registry is None:
+            mod_param_set = self.params.get("modification", {}).get(
+                "mod_param_set", []
+            )
+            self._modification_registry = ModificationRegistry.from_mod_param_set(
+                mod_param_set
+            )
+        return self._modification_registry
 
     @staticmethod
     def extract_params(config_dict):
@@ -77,12 +97,17 @@ class PeptideDatabase:
         save_dir: Union[str, Path] = None,
         precursor_chunk_size: int = None,
         batch_size: int = 512,
+        registry: ModificationRegistry = None,
         *args,
         **kwargs,
     ) -> Self:
 
         if precursor_chunk_size is not None and save_dir is None:
             raise ValueError("save_dir is required when precursor_chunk_size is set")
+
+        if registry is None:
+            registry = ModificationRegistry.from_mod_param_set(mod_param_set)
+        self._modification_registry = registry
 
         # read and parse FASTA file
         parser = FastaParser(fasta_file)
@@ -111,7 +136,7 @@ class PeptideDatabase:
         # decoy generator can make variable-modification-aware mutation
         # position choices; `mod_handler.apply(...)` is still called below,
         # in its original place.
-        mod_handler = ModificationHandler(mod_param_set, max_mods=max_mods)
+        mod_handler = ModificationHandler(mod_param_set, max_mods=max_mods, registry=registry)
 
         # generate decoy peptides
         decoy_generator = DecoyGenerator(
@@ -134,7 +159,9 @@ class PeptideDatabase:
             max_mz=max_precursor_mz,
         )
         precursor_df, modification_df, prefix_mass_container = (
-            precursor_generator.generate_precursors(peptide_df, modification_df)
+            precursor_generator.generate_precursors(
+                peptide_df, modification_df, registry=registry
+            )
         )
         precursor_df = precursor_df.with_row_index("precursor_index")
 
@@ -208,6 +235,7 @@ class PeptideDatabase:
             self.peptide_df,
             self.modification_df,
             modified_sequence_format=modified_sequence_format,
+            registry=self.modification_registry,
         )
 
     @classmethod

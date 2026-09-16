@@ -3,6 +3,7 @@ from numba.typed import List
 
 from delpi.chem.composition import Composition
 from delpi.chem.modification_param import MOD_SEPARATOR
+from delpi.chem.modification_registry import ModificationRegistry
 from delpi.constants import PROTON_MASS
 from delpi.database.numba.prefix_mass_array import (
     PrefixMassArrayContainer,
@@ -33,10 +34,14 @@ class PrecursorGenerator:
             "max_mz": self.max_mz,
         }
 
-    def _generate_prefix_mass_array(self, peptide_df, modification_df):
+    def _generate_prefix_mass_array(
+        self, peptide_df, modification_df, registry: ModificationRegistry = None
+    ):
 
         peptide_df = peptide_df
         mod_df = modification_df
+        if registry is None:
+            registry = ModificationRegistry()
 
         # peptides = peptide_df["peptide"].to_numpy().astype(str)
         peptide_list = List(peptide_df["peptide"])
@@ -74,17 +79,20 @@ class PrecursorGenerator:
         )
 
         flatten_mass_array, stop_row_indices = generate_prefix_mass_arrays(
-            peptide_list, index_arr, mod_info_arr
+            peptide_list, index_arr, mod_info_arr, registry.build_mod_mass_array()
         )
 
         return flatten_mass_array, stop_row_indices
 
     def generate_precursors(
-        self, peptide_df: pl.DataFrame, modification_df: pl.DataFrame
+        self,
+        peptide_df: pl.DataFrame,
+        modification_df: pl.DataFrame,
+        registry: ModificationRegistry = None,
     ):
 
         flatten_mass_array, stop_row_indices = self._generate_prefix_mass_array(
-            peptide_df, modification_df
+            peptide_df, modification_df, registry=registry
         )
 
         precursor_mass = flatten_mass_array[stop_row_indices - 1] + Composition.H2O.mass

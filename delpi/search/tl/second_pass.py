@@ -14,6 +14,7 @@ import polars as pl
 
 from delpi.database.peptide_database import PeptideDatabase
 from delpi.chem.modification_param import ModificationParam
+from delpi.chem.modification_registry import ModificationRegistry
 from delpi.utils.yaml_file import load_yaml
 
 logger = logging.getLogger(__name__)

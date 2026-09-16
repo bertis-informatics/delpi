@@ -58,6 +58,7 @@ def build_database(
             decoy=search_config.config.get("decoy_method", "mutation"),
             mod_param_set=search_config["modification"]["mod_param_set"],
             max_mods=search_config["modification"]["max_mods"],
+            registry=search_config.modification_registry,
             min_precursor_charge=search_config["precursor"].get("min_charge", 2),
             max_precursor_charge=search_config["precursor"].get("max_charge", 4),
             min_precursor_mz=search_config["precursor"].get("min_mz", 300),

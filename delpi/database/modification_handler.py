@@ -14,6 +14,7 @@ from delpi.chem.modification_param import (
     ModificationParam,
     MOD_SEPARATOR,
 )
+from delpi.chem.modification_registry import ModificationRegistry
 
 
 class ModificationHandler:
@@ -26,16 +27,24 @@ class ModificationHandler:
             Sequence[Dict[str, Any]],
         ],
         max_mods: int = 1,
+        registry: ModificationRegistry = None,
     ):
 
         if mod_param_set is None:
             mod_param_set = []
 
+        if registry is None:
+            registry = ModificationRegistry.from_mod_param_set(mod_param_set)
+
         if len(mod_param_set) > 0:
             if isinstance(mod_param_set[0], Tuple):
-                mod_param_set = [ModificationParam(*p) for p in mod_param_set]
+                mod_param_set = [
+                    ModificationParam(*p, registry=registry) for p in mod_param_set
+                ]
             elif isinstance(mod_param_set[0], Dict):
-                mod_param_set = [ModificationParam(**p) for p in mod_param_set]
+                mod_param_set = [
+                    ModificationParam(**p, registry=registry) for p in mod_param_set
+                ]
             elif isinstance(mod_param_set[0], ModificationParam):
                 pass
             else:
@@ -43,6 +52,7 @@ class ModificationHandler:
 
         self.mod_param_set = mod_param_set
         self.max_mods = max_mods
+        self.registry = registry
 
     @property
     def param_dict(self):

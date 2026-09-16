@@ -14,13 +14,16 @@ class Modification:
     mass_to_mod_map = dict()
     accession_num_to_mod_map = dict()
 
-    def __init__(self, accession_num, composition, name, description=None) -> None:
+    def __init__(self, accession_num, composition, name, description=None, is_custom=False) -> None:
 
         assert isinstance(composition, Composition)
         self.accession_num = accession_num
         self.composition = composition
         self.name = name # psi-ms-name
         self.description = description
+        # True for search-specific, composition-defined modifications that are
+        # not part of the (global, immutable) UniMod database.
+        self.is_custom = is_custom
 
     def __hash__(self) -> int:
         return self.accession_num if self.accession_num > 0 else hash(self.name)

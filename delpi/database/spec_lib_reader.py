@@ -7,6 +7,7 @@ from delpi.model.rt_calibrator import RetentionTimeCalibrator
 from delpi.database.numba.spec_lib_container import SpectralLibContainer
 from delpi.database.utils import create_peptidoform_df
 from delpi.chem.averagine import get_precursor_lib_df
+from delpi.chem.modification_registry import ModificationRegistry
 from delpi.lcms.base_spectra import _readonly
 from delpi.utils.yaml_file import load_yaml
 from delpi.constants import MAX_FRAGMENTS
@@ -32,6 +33,10 @@ class SpectralLibReader:
             self.params = {}
         else:
             self.params = load_yaml(self.peptide_db_path / "param.yaml")
+
+        self.modification_registry = ModificationRegistry.from_mod_param_set(
+            self.params.get("modification", {}).get("mod_param_set", [])
+        )
 
         # load precursor_df and modification_df in memory
         self.all_precursor_df = (
@@ -292,6 +297,7 @@ class SpectralLibReader:
             peptide_df,
             modification_df,
             modified_sequence_format="delpi",
+            registry=self.modification_registry,
         )
 
         return self._peptidoform_df

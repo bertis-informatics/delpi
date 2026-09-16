@@ -4,21 +4,15 @@ import numba as nb
 import numpy as np
 
 from delpi.chem.amino_acid import AminoAcid
-from delpi.chem.modification import Modification
 
 
 aa_mass_array = np.zeros(128, dtype=np.float64)
 for aa in AminoAcid.standard_amino_acids:
     aa_mass_array[ord(aa.residue)] = aa.mass
 
-max_mod_id = Modification.get_max_accession_num()
-mod_mass_array = np.zeros(max_mod_id + 1, dtype=np.float64)
-for mod in Modification.name_to_mod_map.values():
-    mod_mass_array[mod.accession_num] = mod.mass
-
 
 @nb.njit(nogil=True, cache=True)
-def get_prefix_mass_array(seq, mod_ids, mod_sites):
+def get_prefix_mass_array(seq, mod_ids, mod_sites, mod_mass_array):
     mass_arr = np.zeros(len(seq) - 2, dtype=np.float32)
     for i, aa in enumerate(seq[1:-1]):
         mass_arr[i] = aa_mass_array[ord(aa)]
@@ -34,7 +28,7 @@ def get_prefix_mass_array(seq, mod_ids, mod_sites):
 
 
 @nb.njit(parallel=True, cache=True)
-def generate_prefix_mass_arrays(peptide_list, index_arr, mod_info_arr):
+def generate_prefix_mass_arrays(peptide_list, index_arr, mod_info_arr, mod_mass_array):
     n = index_arr.shape[0]
 
     # stop_indexes = np.cumsum(
@@ -56,7 +50,7 @@ def generate_prefix_mass_arrays(peptide_list, index_arr, mod_info_arr):
         mod_ids = mod_info_arr[mod_start:mod_stop, 0]
         mod_sites = mod_info_arr[mod_start:mod_stop, 1]
 
-        prefix_mass_arr = get_prefix_mass_array(str(seq), mod_ids, mod_sites)
+        prefix_mass_arr = get_prefix_mass_array(str(seq), mod_ids, mod_sites, mod_mass_array)
         mass_arr_start = 0 if i == 0 else stop_indexes[i - 1]
         mass_arr_stop = stop_indexes[i]
         flat_mass_arr[mass_arr_start:mass_arr_stop] = prefix_mass_arr
