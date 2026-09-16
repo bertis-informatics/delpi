@@ -383,7 +383,7 @@ def _bin_staggered(
 
     # Map frames to bins through window IDs
     return (
-        bin_df.explode("win_ids")
+        bin_df.explode("win_ids", empty_as_null=True)
         .join(
             ms2_with_ids.select("win_id", "frame_num"),
             left_on="win_ids",

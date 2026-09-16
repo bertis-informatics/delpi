@@ -136,4 +136,4 @@ dev/
 # visual studio workspace settings
 *.code-workspace
 .vscode/
-
+tests/

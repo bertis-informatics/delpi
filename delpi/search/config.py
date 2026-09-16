@@ -1,11 +1,13 @@
 from typing import Union, List
 from pathlib import Path
 
+
 from pymsio import MassSpecFileReader
 from delpi.chem.modification_param import ModificationParam
 from delpi.search.result_manager import ResultManager
 from delpi.database.decoy_generator import DecoyGenerator
-from delpi.utils.yaml_file import load_yaml, save_yaml
+from delpi.utils.yaml_file import load_yaml, save_yaml, resolve_input_files
+from delpi.constants import DEFAULT_Q_VALUE_CUTOFF
 
 SUPPORTED_FILE_TYPES = (".raw", ".mzml", ".mzml.gz", "h5")
 
@@ -19,31 +21,25 @@ class SearchConfig:
 
     def _get_input_files(self):
 
-        input_files = []
-        if "input_dir" in self.config:
-            input_dir = Path(self.config["input_dir"])
-            for ext in SUPPORTED_FILE_TYPES:
-                input_files.extend(input_dir.glob(f"*{ext}", case_sensitive=False))
-            if len(input_files) < 1:
-                raise ValueError(f"Cannot find any input files from {input_dir}")
-            # Make sure the input files are ordered consistently
-            input_files = sorted(input_files)
-        elif "input_files" in self.config:
-            for input_file in self.config["input_files"]:
-                if input_file.lower().endswith(SUPPORTED_FILE_TYPES):
-                    input_files.append(Path(input_file))
-                else:
-                    raise ValueError(f"Unsupported file type for {input_file}")
-        else:
-            raise ValueError("Missing 'input_files' or 'input_dir' in configuration")
+        if "input_files" not in self.config:
+            raise ValueError("Missing 'input_files' in configuration")
 
-        return input_files
+        return resolve_input_files(self.config["input_files"], SUPPORTED_FILE_TYPES)
 
     def __getitem__(self, key):
         return self.config[key]
 
     def save(self, yaml_path: Union[Path, str]):
         save_yaml(yaml_path, self.config)
+
+    @property
+    def q_value_cutoff(self):
+        return self.config.get("q_value_cutoff", DEFAULT_Q_VALUE_CUTOFF)
+
+    @property
+    def acquisition_method(self) -> str:
+        """Acquisition method for this search: 'DDA' or 'DIA' (default 'DIA')."""
+        return self.config.get("acquisition_method", "DIA").upper()
 
     @property
     def db_dir(self):
@@ -98,9 +94,9 @@ class SearchConfig:
         Raises:
             ValueError: If required parameters are missing or invalid
         """
-        if "input_files" not in self.config and "input_dir" not in self.config:
+        if "input_files" not in self.config:
             raise ValueError(
-                "Missing required parameter 'input_files' or 'input_dir' in configuration"
+                "Missing required parameter 'input_files' in configuration"
             )
 
         # Check required parameters
@@ -163,21 +159,23 @@ class SearchConfig:
         return db_params
 
     @property
-    def enable_transfer_learning(self) -> bool:
-        """Whether to run the 2-stage search with transfer learning.
+    def enable_mbr(self) -> bool:
+        """Whether to run the 2-pass, Match-Between-Runs-guided search.
 
-        When the ``enable_transfer_learning`` option is not specified in the
-        configuration, a single-stage search is performed. Also always
-        disabled when there is only a single input run, since the two-pass
+        When the ``enable_mbr`` option is not specified in the
+        configuration, the default depends on the acquisition method: DIA
+        defaults to enabled, DDA defaults to disabled. Also always disabled
+        when there is only a single input run, since the two-pass
         MBR/propagation design requires cross-run global scoring.
         """
         if len(self.input_files) <= 1:
             return False
-        return bool(self.config.get("enable_transfer_learning", True))
+        default = self.acquisition_method == "DIA"
+        return bool(self.config.get("enable_mbr", default))
 
     @property
     def is_phospho_search(self) -> bool:
-        mod_params = self.config.get("modification", {}).get("mod_param_set", [])
+        mod_params = self.config.get("modification", {}).get("mod_param_set", []) or []
         for mod in mod_params:
             if mod.get("mod_name", "").lower() == "phospho":
                 return True
@@ -194,6 +192,10 @@ class SearchConfig:
         Returns:
             bool: True if parameters are identical, False otherwise
         """
+        # yaml `null` (e.g. mod_param_set: null) loads as None, not []
+        mod_params1 = mod_params1 or []
+        mod_params2 = mod_params2 or []
+
         if len(mod_params1) != len(mod_params2):
             return False
 

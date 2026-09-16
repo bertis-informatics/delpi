@@ -36,7 +36,6 @@ import numba as nb
 import numpy as np
 import polars as pl
 
-
 # ---------------------------------------------------------------------------
 # Public result containers
 # ---------------------------------------------------------------------------
@@ -96,7 +95,9 @@ class ProteinGroupingResult:
 def _build_csr(
     peptide_index_arr: np.ndarray,
     protein_index_arr: np.ndarray,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, int]:
+) -> Tuple[
+    np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, int
+]:
     """Build CSR adjacency lists for the bipartite protein <-> peptide graph.
 
     All protein and peptide identifiers are remapped to dense local indices
@@ -175,7 +176,9 @@ def _build_equivalence_classes(
     protein_to_repr: Dict[int, int] = {}
 
     for p in range(num_proteins):
-        pep_set = frozenset(int(x) for x in prot_peptides[prot_offsets[p]: prot_offsets[p + 1]])
+        pep_set = frozenset(
+            int(x) for x in prot_peptides[prot_offsets[p] : prot_offsets[p + 1]]
+        )
         if pep_set not in sig_to_repr:
             sig_to_repr[pep_set] = p
             repr_to_members[p] = frozenset({p})
@@ -291,9 +294,11 @@ def _greedy_parsimony(
                 continue
             prio = priority_score[i]
             rank = tie_break_rank[i]
-            if (c > best_count
-                    or (c == best_count and prio > best_prio)
-                    or (c == best_count and prio == best_prio and rank < best_rank)):
+            if (
+                c > best_count
+                or (c == best_count and prio > best_prio)
+                or (c == best_count and prio == best_prio and rank < best_rank)
+            ):
                 best_count = c
                 best_prio = prio
                 best_rank = rank
@@ -448,7 +453,9 @@ def infer_protein_groups(
     peptide_index_arr: np.ndarray,
     protein_index_arr: np.ndarray,
     fasta_ids: np.ndarray,
-    grouping_type: Literal["lead_only", "parsimonious_grouping"] = "parsimonious_grouping",
+    grouping_type: Literal[
+        "lead_only", "parsimonious_grouping"
+    ] = "parsimonious_grouping",
     priority_score: Optional[np.ndarray] = None,
 ) -> "ProteinGroupingResult":
     """Run full peptide-level greedy parsimony protein inference.
@@ -558,10 +565,7 @@ def infer_protein_groups(
 
     # Initial uncovered counts per representative
     uncovered_counts = np.array(
-        [
-            int(prot_offsets[int(r) + 1] - prot_offsets[int(r)])
-            for r in repr_arr
-        ],
+        [int(prot_offsets[int(r) + 1] - prot_offsets[int(r)]) for r in repr_arr],
         dtype=np.int64,
     )
 
@@ -604,7 +608,9 @@ def infer_protein_groups(
 def protein_group_mapping(
     pmsm_df: pl.DataFrame,
     fasta_id_df: pl.DataFrame,
-    grouping_type: Literal["lead_only", "parsimonious_grouping"] = "parsimonious_grouping",
+    grouping_type: Literal[
+        "lead_only", "parsimonious_grouping"
+    ] = "parsimonious_grouping",
 ) -> pl.DataFrame:
     """Map confident peptide identifications to protein groups.
 
@@ -657,7 +663,7 @@ def protein_group_mapping(
     for (is_decoy,), sub_df in pmsm_df.select(
         pl.col("is_decoy", "peptide_index", "protein_index")
     ).group_by("is_decoy"):
-        pair_df = sub_df.explode("protein_index").unique(
+        pair_df = sub_df.explode("protein_index", empty_as_null=True).unique(
             subset=["peptide_index", "protein_index"]
         )
 

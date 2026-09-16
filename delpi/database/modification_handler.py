@@ -221,7 +221,7 @@ class ModificationHandler:
         var_mod_df = (
             pl.from_pandas(pd.DataFrame(mod_peptide_list, columns=list(schema)))
             .with_columns(m_peptide_df["peptide_index"])
-            .explode(list(schema))
+            .explode(list(schema), empty_as_null=True)
         )
 
         return var_mod_df

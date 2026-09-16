@@ -5,8 +5,8 @@ import pickle
 
 import numpy as np
 import polars as pl
-from sklearn.preprocessing import PolynomialFeatures
-from sklearn.linear_model import LinearRegression
+from sklearn.preprocessing import PolynomialFeatures, StandardScaler
+from sklearn.linear_model import LinearRegression, HuberRegressor
 from sklearn.exceptions import NotFittedError
 from sklearn.pipeline import make_pipeline
 
@@ -97,7 +97,7 @@ class RetentionTimeCalibrator(LinearProjectionCalibrator):
     ):
 
         super().__init__(min_rt_in_seconds, max_rt_in_seconds)
-        assert max_rt_tolerance > min_rt_tolerance
+        assert max_rt_tolerance >= min_rt_tolerance
 
         self.min_rt_tol_in_seconds = self.lc_grad_len * min_rt_tolerance
         self.max_rt_tol_in_seconds = self.lc_grad_len * max_rt_tolerance
@@ -125,13 +125,6 @@ class RetentionTimeCalibrator(LinearProjectionCalibrator):
         # estimate residuals
         y_pred = estimator.predict(x_train)
         residuals = y_train - y_pred
-
-        # mask = np.abs(y_train - 5000) < 300
-        # np.mean( residuals[mask & (residuals > 0)])
-        # np.mean( residuals[mask & (residuals < 0)])
-        # residuals[mask]
-        # np.mean( residuals[mask] )
-        # np.mean( residuals[~mask] )
 
         #### Residual Modeling with Heteroscedasticity-Aware Error Modeling
         mask = residuals > 0
@@ -227,8 +220,8 @@ class RetentionTimeCalibrator(LinearProjectionCalibrator):
         max_rt_in_seconds: float,
         ref_rt: np.ndarray,
         obs_rt: np.ndarray,
-        min_rt_tolerance: float = 0.15,
-        max_rt_tolerance: float = 0.25,
+        min_rt_tolerance: float = 0.1,
+        max_rt_tolerance: float = 0.15,
         figure_path: Path = None,
         degree: int = 5,
     ) -> Self:
@@ -296,7 +289,6 @@ class RetentionTimeCalibrator(LinearProjectionCalibrator):
 
             group = f[group_name]
 
-            # 기본 파라미터들로 객체 생성
             min_rt_tolerance = group.attrs["min_rt_tol_in_seconds"] / (
                 group.attrs["max_rt_in_seconds"] - group.attrs["min_rt_in_seconds"]
             )
@@ -344,6 +336,122 @@ class RetentionTimeCalibrator(LinearProjectionCalibrator):
         )
 
         return estimator
+
+
+class BootstrapRTCalibrator(LinearProjectionCalibrator):
+    """Huber-robust, degree-<=`max_degree` RT calibrator used only by the
+    DIA bootstrap calibration pipeline (:mod:`delpi.search.dia.rt_bootstrap`).
+    Not persisted via HDF; used only transiently before the first full DIA
+    search.
+
+    Uses a scikit-learn
+    ``Pipeline(PolynomialFeatures, StandardScaler, HuberRegressor)``, always
+    fitting at a fixed `max_degree` (no monotonicity-driven degree
+    downgrade). Outlier rejection relies on `HuberRegressor`'s own
+    `outliers_` mask instead of iterative MAD clipping, and the RT
+    half-width is derived from the residual distribution rather than a
+    separately-fit residual model.
+    """
+
+    def __init__(
+        self,
+        min_rt_in_seconds: float,
+        max_rt_in_seconds: float,
+        max_degree: int = 3,
+        min_rt_tolerance: float = 0.10,
+        max_rt_tolerance: float = 0.15,
+    ):
+        super().__init__(min_rt_in_seconds, max_rt_in_seconds)
+        assert max_rt_tolerance >= min_rt_tolerance
+
+        self.max_degree = max_degree
+        self.min_rt_tol_in_seconds = self.lc_grad_len * min_rt_tolerance
+        self.max_rt_tol_in_seconds = self.lc_grad_len * max_rt_tolerance
+        self.degree = None
+        self.estimator = None
+        self.half_width_in_seconds = None
+
+    def fit(
+        self,
+        ref_rt: Union[np.ndarray, List, pl.Series],
+        obs_rt: Union[np.ndarray, List, pl.Series],
+    ) -> tuple:
+        """Fit a bootstrap RT mapping. Returns ``(self_or_None, diagnostics)``;
+        ``diagnostics`` always has a ``reason`` key and, on success, an
+        ``inlier_mask`` aligned with the input ``ref_rt``/``obs_rt`` order.
+        """
+        x_train = self._to_array(ref_rt).astype(np.float64).reshape(-1, 1)
+        y_train = self._to_array(obs_rt).astype(np.float64)
+        n = x_train.shape[0]
+        if (
+            n < 3
+            or not np.all(np.isfinite(x_train))
+            or not np.all(np.isfinite(y_train))
+        ):
+            return None, {"reason": "too_few_or_nonfinite_anchors", "n": n}
+        if not np.isfinite(self.lc_grad_len) or self.lc_grad_len <= 0:
+            return None, {"reason": "degenerate_run_rt_bounds"}
+
+        used_degree = min(self.max_degree, n - 1)
+        estimator = make_pipeline(
+            PolynomialFeatures(degree=used_degree, include_bias=False),
+            StandardScaler(),
+            HuberRegressor(),
+        ).fit(x_train, y_train)
+        inlier_mask = ~estimator[-1].outliers_
+
+        residual = y_train - estimator.predict(x_train)
+        center = float(np.median(residual[inlier_mask]))
+        required_half_width = float(np.quantile(np.abs(residual - center), 0.95))
+        # min_rt_tol_in_seconds/max_rt_tol_in_seconds act as a hard lower/
+        # upper bound on the search half-width, regardless of how wide the
+        # observed residual spread is.
+        half_width = np.clip(
+            required_half_width, self.min_rt_tol_in_seconds, self.max_rt_tol_in_seconds
+        )
+
+        diagnostics = {
+            "reason": "ok",
+            "degree": used_degree,
+            "n_anchors": n,
+            "n_inliers": int(np.sum(inlier_mask)),
+            "required_half_width": required_half_width,
+            "half_width": half_width,
+            "max_half_width": self.max_rt_tol_in_seconds,
+            "inlier_mask": inlier_mask,
+        }
+
+        self.estimator = estimator
+        self.degree = used_degree
+        self.half_width_in_seconds = half_width
+        return self, diagnostics
+
+    def predict(self, ref_rt: Union[np.ndarray, List, pl.Series]) -> pl.DataFrame:
+        if self.estimator is None:
+            raise NotFittedError()
+
+        x = self._to_array(ref_rt).astype(np.float64).reshape(-1, 1)
+        x_flat = x.reshape(-1)
+        finite_mask = np.isfinite(x_flat)
+
+        # sklearn's PolynomialFeatures rejects non-finite input outright, so
+        # non-finite ref_rt is mapped directly to the RT bounds instead of
+        # being extrapolated through the fitted model.
+        predicted = np.empty(x_flat.shape[0], dtype=np.float64)
+        if np.any(finite_mask):
+            predicted[finite_mask] = self.estimator.predict(x[finite_mask])
+        predicted[np.isnan(x_flat)] = self.min_rt_in_seconds
+        predicted[x_flat == np.inf] = self.max_rt_in_seconds
+        predicted[x_flat == -np.inf] = self.min_rt_in_seconds
+
+        df = pl.DataFrame(
+            {"predicted_rt": predicted.astype(np.float32)},
+            schema={"predicted_rt": pl.Float32},
+        ).with_columns(
+            lower=pl.lit(self.half_width_in_seconds, dtype=pl.Float32),
+            upper=pl.lit(self.half_width_in_seconds, dtype=pl.Float32),
+        )
+        return self._set_lower_upper_bounds(df)
 
 
 def test():

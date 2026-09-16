@@ -7,6 +7,7 @@ from delpi.model.rt_calibrator import RetentionTimeCalibrator
 from delpi.database.numba.spec_lib_container import SpectralLibContainer
 from delpi.database.utils import create_peptidoform_df
 from delpi.chem.averagine import get_precursor_lib_df
+from delpi.lcms.base_spectra import _readonly
 from delpi.utils.yaml_file import load_yaml
 from delpi.constants import MAX_FRAGMENTS
 
@@ -118,35 +119,47 @@ class SpectralLibReader:
             max_precursor_isotopes=self.max_precursor_isotopes,
             max_fragment_isotopes=self.max_fragment_isotopes,
             ## peptide data
-            peptide_is_decoy_arr=self.peptide_df["is_decoy"].to_numpy(),
-            peptide_seq_len_arr=self.peptide_df["sequence_length"].to_numpy(),
+            # Read-only (no copy) keeps the numpy array type stable for numba;
+            # otherwise polars' readonly zero-copy views vs. copies are seen
+            # as distinct types, forcing repeated njit recompilation. None of
+            # the njit code writes to these fields, so no copy is needed.
+            peptide_is_decoy_arr=_readonly(self.peptide_df["is_decoy"].to_numpy()),
+            peptide_seq_len_arr=_readonly(
+                self.peptide_df["sequence_length"].to_numpy()
+            ),
             ## modification data
-            mod_peptide_index_arr=self.modification_df["peptide_index"].to_numpy(),
-            mod_ref_rt_arr=self.modification_df["ref_rt"].to_numpy(),
+            mod_peptide_index_arr=_readonly(
+                self.modification_df["peptide_index"].to_numpy()
+            ),
+            mod_ref_rt_arr=_readonly(self.modification_df["ref_rt"].to_numpy()),
             mod_predicted_rt_arr=self.predicted_rt_arr,
             mod_rt_lb_arr=self.rt_lb_arr,
             mod_rt_ub_arr=self.rt_ub_arr,
             ## precursor data
-            precursor_peptidoform_index_arr=precursor_df[
-                "peptidoform_index"
-            ].to_numpy(),
-            precursor_mz_arr=precursor_df["precursor_mz"].to_numpy(),
-            precursor_charge_arr=precursor_df["precursor_charge"].to_numpy(),
+            precursor_peptidoform_index_arr=_readonly(
+                precursor_df["peptidoform_index"].to_numpy()
+            ),
+            precursor_mz_arr=_readonly(precursor_df["precursor_mz"].to_numpy()),
+            precursor_charge_arr=_readonly(precursor_df["precursor_charge"].to_numpy()),
             ## speclib data
-            speclib_cleavage_index_arr=speclib_df["cleavage_index"].to_numpy(),
-            speclib_is_prefix_arr=speclib_df["is_prefix"].to_numpy(),
-            speclib_charge_arr=speclib_df["charge"].to_numpy(),
-            speclib_mz_arr=speclib_df["mz"].to_numpy(),
-            speclib_predicted_intensity_arr=speclib_df[
-                "predicted_intensity"
-            ].to_numpy(),
+            speclib_cleavage_index_arr=_readonly(
+                speclib_df["cleavage_index"].to_numpy()
+            ),
+            speclib_is_prefix_arr=_readonly(speclib_df["is_prefix"].to_numpy()),
+            speclib_charge_arr=_readonly(speclib_df["charge"].to_numpy()),
+            speclib_mz_arr=_readonly(speclib_df["mz"].to_numpy()),
+            speclib_predicted_intensity_arr=_readonly(
+                speclib_df["predicted_intensity"].to_numpy()
+            ),
             ## averagine data
             averagine_min_nominal_mass=self.averagine_df.item(0, "nominal_mass"),
             averagine_max_nominal_mass=self.averagine_df.item(-1, "nominal_mass"),
-            averagine_predicted_intensity=self.averagine_df[
-                "predicted_intensity"
-            ].to_numpy(),
-            averagine_isotope_index_arr=self.averagine_df["isotope_index"].to_numpy(),
+            averagine_predicted_intensity=_readonly(
+                self.averagine_df["predicted_intensity"].to_numpy()
+            ),
+            averagine_isotope_index_arr=_readonly(
+                self.averagine_df["isotope_index"].to_numpy()
+            ),
         )
 
         return speclib_container

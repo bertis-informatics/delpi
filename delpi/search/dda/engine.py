@@ -24,16 +24,16 @@ from delpi.search.config import SearchConfig
 from delpi.search.result_manager import ResultManager
 from delpi.search.search_state import SearchState
 from delpi.search.base_engine import BaseSearchEngine
+from delpi.search.progress.tracker import ProgressTracker
+from delpi.search.progress.dummy_tracker import DummyProgressTracker
 from delpi.search.dda.peak_group import find_peak_groups
 from delpi.search.dda.batch_generator import count_total_batches, generate_batches
 from delpi.search.clustering import cluster_matches
-from delpi.search.dia.lfq_utils import get_ms1_area_dda
+from delpi.search.dia.lfq_utils import get_ms1_area_dda, get_pmsm_median_intensity
 from delpi.utils.device_ctx import make_inference_contexts
 from delpi.utils.prefetch import Prefetcher, pin_numpy_tuple
 from delpi.constants import ISOLATION_LOWER_TOL, ISOLATION_UPPER_TOL
 from delpi.model.input import THEORETICAL_PEAK, EXPERIMENTAL_PEAK
-from delpi.search.progress.tracker import ProgressTracker
-from delpi.search.progress.dummy_tracker import DummyProgressTracker
 
 logger = logging.getLogger(__name__)
 
@@ -144,7 +144,9 @@ class DDASearchEngine(BaseSearchEngine):
             x_theo_t = tensors[2]
             x_exp_t = tensors[3]
             x_ind_t = tensors[4]
-            ms1_scale_t = tensors[5]
+            x_rank_t = tensors[5]
+            ms1_scale_t = tensors[6]
+            ms2_scale_t = tensors[7]
 
             n = x_theo_t.shape[0]
             X_theo = X_theo_tensor[:n]
@@ -175,9 +177,18 @@ class DDASearchEngine(BaseSearchEngine):
                 results["features"].append(x_feature)
                 results["peak_indices"].append(x_ind)
                 results["observed_rt"].append(observed_rt)
+
+                x_exp = x_exp_t.numpy()[mask]
+                x_rank = x_rank_t.numpy()[mask]
+                ms1_scale_arr = ms1_scale_t.numpy()[mask]
+                ms2_scale_arr = ms2_scale_t.numpy()[mask]
+
+                # cheap scalar per PmSM -- always saved, regardless of save_quant
+                results["median_intensity"].append(
+                    get_pmsm_median_intensity(x_exp, x_rank, ms2_scale_arr)
+                )
+
                 if save_quant:
-                    x_exp = x_exp_t.numpy()[mask]
-                    ms1_scale_arr = ms1_scale_t.numpy()[mask]
                     results["ms1_area"].append(get_ms1_area_dda(x_exp, ms1_scale_arr))
 
             batch_progress.advance(1)
@@ -386,13 +397,6 @@ class DDASearchEngine(BaseSearchEngine):
         logger.info("RT calibration fitted")
 
         if self.state == SearchState.FIRST_SEARCH:
-            # result_manager.write_df(
-            #     df=run.meta_df.select(pl.exclude("peak_start", "peak_stop")),
-            #     key="meta_df",
-            # )
-            # run.meta_df.select(pl.exclude("peak_start", "peak_stop")).write_parquet(
-            #     result_manager.output_dir / f"{result_manager.run_name}.meta_df.parquet"
-            # )
             result_manager.write_attr("lc_peak_width", self.lc_peak_width)
             result_manager.write_attr(
                 "gradient_length_in_seconds", run.gradient_length_in_seconds

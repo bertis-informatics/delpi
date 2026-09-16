@@ -161,18 +161,52 @@ def _select_intense_fragments(
 
     intensity_arr = intensity_arr.flatten()
     mz_arr = mz_arr.flatten()
+    is_prefix_flat_arr = ion_type_container.is_prefix_arr[ion_type_index_arr]
     # cleavage_index_arr.flatten()
 
-    undetectable_mask = (
-        (mz_arr < detectable_min_mz)
-        | (mz_arr > detectable_max_mz)
-        | (intensity_arr < 1e-4)
-    )
-    intensity_arr[undetectable_mask] = 0
-    zero_mask = intensity_arr == 0
-    intensity_arr[zero_mask] = 1e-4 * np.random.rand(zero_mask.sum())
-    sorted_ii = intensity_arr.argsort()[-max_fragments:]
-    intensity_arr /= intensity_arr[sorted_ii[-1]]
+    in_range_mask = (mz_arr >= detectable_min_mz) & (mz_arr <= detectable_max_mz)
+
+    # 1) top max_fragments by intensity, restricted to in-range,
+    # positive-intensity fragments. argsort() alone doesn't break intensity
+    # ties reproducibly, so use two stable sorts (numba has no np.lexsort)
+    # with is_prefix as the tie-break key.
+    intense_candidate_idx = np.flatnonzero(in_range_mask & (intensity_arr >= 1e-4))
+    n_intense = min(max_fragments, intense_candidate_idx.shape[0])
+    if n_intense > 0:
+        cand_intensity = intensity_arr[intense_candidate_idx]
+        cand_is_prefix = is_prefix_flat_arr[intense_candidate_idx]
+        secondary_order = cand_is_prefix.argsort(kind="mergesort")
+        primary_order = cand_intensity[secondary_order].argsort(kind="mergesort")
+        selected_intense_idx = intense_candidate_idx[secondary_order][primary_order][
+            -n_intense:
+        ]
+    else:
+        selected_intense_idx = np.empty(0, dtype=np.int64)
+
+    # 2) fill the remaining max_fragments - n_intense slots by random choice
+    # among not-yet-selected fragments, restricted to the in-range ones...
+    n_fill = max_fragments - n_intense
+    used_mask = np.zeros(intensity_arr.shape[0], dtype=np.bool_)
+    used_mask[selected_intense_idx] = True
+    if n_fill > 0:
+        fill_candidate_idx = np.flatnonzero(in_range_mask & (~used_mask))
+        if fill_candidate_idx.shape[0] < n_fill:
+            # 3) ...unless that pool is too small, in which case the m/z
+            # restriction is dropped entirely to reach max_fragments.
+            fill_candidate_idx = np.flatnonzero(~used_mask)
+        n_fill = min(n_fill, fill_candidate_idx.shape[0])
+        fill_idx = np.random.choice(fill_candidate_idx, n_fill, replace=False)
+    else:
+        fill_idx = np.empty(0, dtype=np.int64)
+
+    # random fill first (worst rank) then intense fragments ascending by
+    # intensity last (best/highest-intensity gets the best rank downstream).
+    sorted_ii = np.concatenate((fill_idx, selected_intense_idx))
+
+    selected_intensity_arr = intensity_arr[sorted_ii]
+    max_selected_intensity = selected_intensity_arr.max()
+    if max_selected_intensity > 0:
+        selected_intensity_arr = selected_intensity_arr / max_selected_intensity
     ion_type_arr = ion_type_index_arr[sorted_ii]
 
     return (
@@ -180,7 +214,7 @@ def _select_intense_fragments(
         ion_type_container.is_prefix_arr[ion_type_arr],
         ion_type_container.charge_arr[ion_type_arr],
         mz_arr[sorted_ii],
-        intensity_arr[sorted_ii],
+        selected_intensity_arr,
     )
 
 
@@ -244,3 +278,138 @@ def update_speclib_arr(
         out_pred_intensity_arr[st:ed] = pred_intensity_arr
         for k in range(max_fragments):
             out_rank_arr[st + k] = max_fragments - k
+
+
+@nb.njit(parallel=True, cache=True)
+def update_speclib_chunk_arr(
+    out_precursor_index_arr: np.ndarray,
+    out_clevage_index_arr: np.ndarray,
+    out_is_prefix_arr: np.ndarray,
+    out_charge_arr: np.ndarray,
+    out_mz_arr: np.ndarray,
+    out_pred_intensity_arr: np.ndarray,
+    out_rank_arr: np.ndarray,
+    prefix_mass_container: PrefixMassArrayContainer,
+    ion_type_container: IonTypeContainer,
+    peptidoform_index_arr: np.ndarray,
+    batch_precursor_index_arr: np.ndarray,
+    batch_intensity_arr: np.ndarray,
+    chunk_start_precursor_index: int,
+    max_fragments: int = 16,
+    detectable_min_mz: float = 200.0,
+    detectable_max_mz: float = 2000.0,
+):
+    # Same as update_speclib_arr(), except output rows are written to a
+    # chunk-local position while global IDs are still used for lookups.
+
+    ion_count = ion_type_container.charge_arr.shape[0]
+    batch_intensity_arr = batch_intensity_arr[..., :ion_count]
+    batch_count, cleavage_count, _ = batch_intensity_arr.shape
+    prefix_mass_stop_idx_arr = prefix_mass_container.mass_array_stop_index
+
+    for i in nb.prange(batch_count):
+        intensity_arr = batch_intensity_arr[i, ...]
+        precursor_index = batch_precursor_index_arr[i]  # global ID
+        peptidoform_index = peptidoform_index_arr[precursor_index]
+        st = (
+            0
+            if peptidoform_index == 0
+            else prefix_mass_stop_idx_arr[peptidoform_index - 1]
+        )
+        prefix_mass_arr = prefix_mass_container.prefix_mass_array[
+            st : st + cleavage_count + 1
+        ]
+
+        cleavage_index_arr, is_prefix_arr, charge_arr, mz_arr, pred_intensity_arr = (
+            _select_intense_fragments(
+                ion_type_container,
+                prefix_mass_arr,
+                precursor_index,  # global ID: random seed must not use local index
+                intensity_arr,
+                max_fragments,
+                detectable_min_mz,
+                detectable_max_mz,
+            )
+        )
+
+        # output position is chunk-local, but the stored ID stays global
+        local_index = np.int64(precursor_index) - np.int64(chunk_start_precursor_index)
+        st = local_index * max_fragments
+        ed = st + max_fragments
+        out_precursor_index_arr[st:ed] = precursor_index
+        out_clevage_index_arr[st:ed] = cleavage_index_arr
+        out_is_prefix_arr[st:ed] = is_prefix_arr
+        out_charge_arr[st:ed] = charge_arr
+        out_mz_arr[st:ed] = mz_arr
+        out_pred_intensity_arr[st:ed] = pred_intensity_arr
+        for k in range(max_fragments):
+            out_rank_arr[st + k] = max_fragments - k
+
+
+@nb.njit(nogil=True, cache=True)
+def _select_intense_fragments_legacy(
+    ion_type_container: IonTypeContainer,
+    prefix_mass_arr: np.ndarray,
+    precursor_index: int,
+    intensity_arr: np.ndarray,
+    max_fragments: int = 16,
+    detectable_min_mz: float = 200.0,
+    detectable_max_mz: float = 2000.0,
+):
+    set_seed_compat(precursor_index)
+
+    ion_count = ion_type_container.charge_arr.shape[0]
+    cleavage_count = intensity_arr.shape[0]
+    # ion_type_index_arr = np.tile(np.arange(ion_count, dtype=np.uint8), cleavage_count)
+    # cleavage_index_arr = np.tile(np.arange(cleavage_count, dtype=np.uint8).reshape(-1, 1), (1, ion_count))
+    ion_type_index_arr = np.array(
+        [j for _ in range(cleavage_count) for j in range(ion_count)], dtype=np.uint8
+    )
+    cleavage_index_arr = np.array(
+        [j for j in range(cleavage_count) for _ in range(ion_count)], dtype=np.uint8
+    )
+
+    mz_arr = np.empty(intensity_arr.shape, dtype=np.float32)
+    for ion_type_idx in range(ion_type_container.charge_arr.shape[0]):
+        is_prefix = ion_type_container.is_prefix_arr[ion_type_idx]
+        charge = ion_type_container.charge_arr[ion_type_idx]
+        offset_mass = ion_type_container.offset_mass_arr[ion_type_idx]
+        frag_mass = (
+            prefix_mass_arr[:-1]
+            if is_prefix
+            else prefix_mass_arr[-1] - prefix_mass_arr[0:-1]
+        )
+        frag_mz = ((frag_mass + offset_mass) / charge) + PROTON_MASS
+        mz_arr[:, ion_type_idx] = frag_mz
+
+    intensity_arr = intensity_arr.flatten()
+    mz_arr = mz_arr.flatten()
+    is_prefix_flat_arr = ion_type_container.is_prefix_arr[ion_type_index_arr]
+    # cleavage_index_arr.flatten()
+
+    undetectable_mask = (
+        (mz_arr < detectable_min_mz)
+        | (mz_arr > detectable_max_mz)
+        | (intensity_arr < 1e-4)
+    )
+    intensity_arr[undetectable_mask] = 0
+    zero_mask = intensity_arr == 0
+    intensity_arr[zero_mask] = 1e-4 * np.random.rand(zero_mask.sum())
+
+    # argsort() alone doesn't break intensity ties reproducibly, so use two
+    # stable sorts (numba has no np.lexsort) to sort by intensity with
+    # is_prefix as the tie-break key.
+    secondary_order = is_prefix_flat_arr.argsort(kind="mergesort")
+    primary_order = intensity_arr[secondary_order].argsort(kind="mergesort")
+    sorted_ii = secondary_order[primary_order][-max_fragments:]
+
+    intensity_arr /= intensity_arr[sorted_ii[-1]]
+    ion_type_arr = ion_type_index_arr[sorted_ii]
+
+    return (
+        cleavage_index_arr[sorted_ii],
+        ion_type_container.is_prefix_arr[ion_type_arr],
+        ion_type_container.charge_arr[ion_type_arr],
+        mz_arr[sorted_ii],
+        intensity_arr[sorted_ii],
+    )

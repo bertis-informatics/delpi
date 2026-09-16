@@ -4,7 +4,7 @@ import numpy as np
 import polars as pl
 from scipy.interpolate import interp1d
 
-from delpi.lcms.base_spectra import BaseSpectra
+from delpi.lcms.base_spectra import BaseSpectra, _readonly
 from delpi.lcms.data_container import DIAWindowFrameNumMap
 
 
@@ -64,10 +64,12 @@ class DIAWindow(BaseSpectra):
     #     )
 
     def get_frame_num_map(self):
+        # read-only (no copy) keeps the numba array type stable; see
+        # BaseSpectra.get_peak_container for why.
         return DIAWindowFrameNumMap(
-            self.ms1_meta_df["frame_num"].to_numpy(),
-            self.meta_df["frame_num"].to_numpy(),
-            self.ms1_meta_df["time_in_seconds"].to_numpy(),
-            self.meta_df["time_in_seconds"].to_numpy(),
+            _readonly(self.ms1_meta_df["frame_num"].to_numpy()),
+            _readonly(self.meta_df["frame_num"].to_numpy()),
+            _readonly(self.ms1_meta_df["time_in_seconds"].to_numpy()),
+            _readonly(self.meta_df["time_in_seconds"].to_numpy()),
             self.frame_num_to_index,
         )

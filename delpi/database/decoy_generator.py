@@ -232,7 +232,8 @@ class DecoyGenerator:
 
         # re-group decoys by peptide and collect protein indices for each decoy
         decoy_peptide_df = (
-            decoy_peptide_df.explode("protein_index")
+            # protein_index is never an empty list, so empty_as_null is a no-op here
+            decoy_peptide_df.explode("protein_index", empty_as_null=True)
             .group_by("peptide", maintain_order=True)
             .agg(
                 pl.col("protein_index").unique().sort(),

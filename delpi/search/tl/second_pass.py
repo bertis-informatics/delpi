@@ -183,7 +183,7 @@ def _select_paired_decoys_by_sequence(
         .select(
             pl.col("peptide_index").alias("decoy_peptide_index"), "target_peptide_index"
         )
-        .explode("target_peptide_index")
+        .explode("target_peptide_index", empty_as_null=True)
         .join(
             target_peptides,
             left_on="target_peptide_index",
@@ -321,4 +321,3 @@ def _select_paired_decoys_by_nearest_mz(
     )
 
     return target_df.join(paired_df, on="precursor_index", how="left")
-

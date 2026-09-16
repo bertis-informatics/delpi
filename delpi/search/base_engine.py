@@ -20,9 +20,11 @@ from delpi.model.classifier import DelPiModel
 from delpi.search.config import SearchConfig
 from delpi.search.result_manager import ResultManager
 from delpi.database.peptide_database import PeptideDatabase
-from delpi.search.tda.tda_processor import TDAProcessor
 from delpi.model.pmsm_scale import PeptideMultiSpectraMatchScaler
-from delpi.model.rt_calibrator import RetentionTimeCalibrator
+from delpi.model.rt_calibrator import (
+    RetentionTimeCalibrator,
+    LinearProjectionCalibrator,
+)
 from delpi.search.tl.data_prep import TransferLearningDataPreparator
 from delpi.search.search_state import SearchState
 from delpi.search.progress.tracker import ProgressTracker
@@ -30,7 +32,6 @@ from delpi.search.progress.tqdm_tracker import TqdmProgressTracker
 from delpi.search.progress.callback_tracker import CallbackProgressTracker
 from delpi.utils.fdr import calculate_q_value
 from delpi.utils.log_config import configure_logging
-from delpi.constants import DEFAULT_Q_VALUE_CUTOFF
 from delpi import MODEL_DIR
 
 logger = logging.getLogger(__name__)
@@ -86,13 +87,12 @@ class BaseSearchEngine(ABC):
 
     def get_save_quant(self) -> bool:
         return (
-            self.state >= SearchState.SECOND_SEARCH
-            or not self.search_config.enable_transfer_learning
+            self.state >= SearchState.SECOND_SEARCH or not self.search_config.enable_mbr
         )
 
-    def get_logit_cutoff(self, base_cutoff: float, loose_delta: float = -3.0) -> float:
+    def get_logit_cutoff(self, base_cutoff: float) -> float:
         return (
-            base_cutoff + loose_delta
+            base_cutoff - 4.0
             if self.state >= SearchState.SECOND_SEARCH
             else base_cutoff
         )
@@ -101,7 +101,7 @@ class BaseSearchEngine(ABC):
         self.state = SearchState(self.state + 1)
 
     def get_db_dir(self):
-        if not self.search_config.enable_transfer_learning:
+        if not self.search_config.enable_mbr:
             return self.search_config.db_dir
         return (
             self.search_config.db_dir
@@ -110,7 +110,7 @@ class BaseSearchEngine(ABC):
         )
 
     def get_results_group_key(self):
-        if not self.search_config.enable_transfer_learning:
+        if not self.search_config.enable_mbr:
             return "first_results"
         return (
             "first_results"
@@ -121,6 +121,17 @@ class BaseSearchEngine(ABC):
     @abstractmethod
     def perform_quick_search(self, run: Union[DIARun, DDARun]) -> pl.DataFrame:
         pass
+
+    def perform_rt_bootstrap(
+        self, run: Union[DIARun, DDARun], figure_path: Path = None
+    ):
+        """Optional hook for the RT-stratified, checkpointed initial DIA
+        bootstrap calibration (delpi.search.dia.rt_bootstrap). Engines that
+        don't support it (e.g. DDA) return None, and `_perform_rt_calibration`
+        falls back to the legacy `perform_quick_search()` + ordinary
+        RetentionTimeCalibrator.train() path.
+        """
+        return None
 
     @abstractmethod
     def perform_search(
@@ -283,40 +294,6 @@ class BaseSearchEngine(ABC):
             if progress_queue is not None:
                 progress_queue.put(None)  # sentinel — tells parent we're done
 
-    def perform_tda(self, result_manager: ResultManager) -> pl.DataFrame:
-        """Run-specific TDA using TensorDataset for fast training/inference."""
-        logger.info("Target-decoy analysis started")
-
-        q_value_cutoff = self.search_config.config.get(
-            "q_value_cutoff", DEFAULT_Q_VALUE_CUTOFF
-        )
-        use_protein_picker = self.search_config.config.get("use_protein_picker", True)
-        grouping_type = self.search_config.config.get(
-            "grouping_type", "parsimonious_grouping"
-        )
-        group_key = self.get_results_group_key()
-        search_batch_size = self.search_config.config.get("batch_size", 512)
-        processor = TDAProcessor(
-            db_dir=self.get_db_dir(),
-            output_dir=self.search_config.output_dir,
-            device=self.device,
-            q_value_cutoff=q_value_cutoff,
-            use_protein_picker=use_protein_picker,
-            grouping_type=grouping_type,
-            batch_size=search_batch_size * 4,
-        )
-        pmsm_df = processor.run_single(result_manager, group_key)
-
-        counts = ResultManager.compute_id_statistics(pmsm_df, q_value_cutoff)
-        logger.info(
-            "FDR estimated: "
-            f"#Precursors: {counts['precursors']}, "
-            f"#Peptides: {counts['peptides']}, "
-            f"#Protein Groups: {counts['protein_groups']} "
-            f"at {q_value_cutoff:.2f} FDR"
-        )
-        return pmsm_df.filter(pl.col("precursor_q_value") <= q_value_cutoff)
-
     def _perform_rt_calibration(
         self, run: Union[DIARun, DDARun], before_full_search: bool
     ):
@@ -343,9 +320,20 @@ class BaseSearchEngine(ABC):
             db_dir = self.get_db_dir()
 
         if self.state == SearchState.FIRST_SEARCH and before_full_search:
-            q_value_cutoff = 0.05
-            pmsm_df = self.perform_quick_search(run)
-            target_df = pmsm_df.filter(pl.col("is_decoy") == False)
+            bootstrap_result = self.perform_rt_bootstrap(run, figure_path=fig_path)
+            if not bootstrap_result.success:
+                logger.warning(
+                    f"DIA RT bootstrap calibration fell back to "
+                    f"broad bounds (reason={bootstrap_result.fallback_reason}, "
+                    f"rounds={bootstrap_result.n_rounds}, "
+                    f"evaluated={bootstrap_result.n_evaluated}, "
+                    f"anchors={bootstrap_result.n_unique_anchors})"
+                )
+            return bootstrap_result.calibrator
+            # Legacy path: engines without RT-bootstrap support (e.g. DDA).
+            # q_value_cutoff = 0.05
+            # pmsm_df = self.perform_quick_search(run)
+            # target_df = pmsm_df.filter(pl.col("is_decoy") == False)
         else:
             q_value_cutoff = 0.01
             if after_full_search:
@@ -371,12 +359,10 @@ class BaseSearchEngine(ABC):
                         "observed_rt",
                         "predicted_rt",
                         "score",
-                        "precursor_q_value",
                     ],
                 )
                 pmsm_df = (
                     pl.DataFrame(results_dict)
-                    .filter(pl.col("precursor_q_value").is_not_null())
                     .group_by("precursor_index")
                     .agg(pl.all().sort_by("score").last())
                 )
@@ -387,11 +373,10 @@ class BaseSearchEngine(ABC):
                     .select(pl.col("g_precursor_index", "precursor_index"))
                     .collect()
                 )
-
                 pmsm_df = pmsm_df.rename({"precursor_index": "g_precursor_index"}).join(
                     precursor_df.select(pl.col("g_precursor_index", "precursor_index")),
                     on="g_precursor_index",
-                    how="left",
+                    how="inner",  # consider only library-filtered precursors
                 )
 
                 pmsm_df = PeptideDatabase.join(
@@ -401,21 +386,29 @@ class BaseSearchEngine(ABC):
                     modification_columns=["ref_rt"],
                     peptide_columns=["is_decoy"],
                 )
+                pmsm_df = calculate_q_value(pmsm_df, out_column="precursor_q_value")
 
             target_df = pmsm_df.filter(
                 (pl.col("precursor_q_value") <= q_value_cutoff)
                 & (pl.col("is_decoy") == False)
             )
 
-        rt_calibrator = RetentionTimeCalibrator.train(
-            min_rt_in_seconds=meta_df.item(0, "time_in_seconds"),
-            max_rt_in_seconds=meta_df.item(-1, "time_in_seconds"),
-            ref_rt=target_df["ref_rt"].to_numpy(),
-            obs_rt=target_df["observed_rt"].to_numpy(),
-            degree=5 if self.state < SearchState.SECOND_SEARCH else 2,
-            min_rt_tolerance=0.1,
-            max_rt_tolerance=0.15,
-        )
+        if target_df.height < 150:
+            rt_calibrator = LinearProjectionCalibrator(
+                min_rt_in_seconds=meta_df.item(0, "time_in_seconds"),
+                max_rt_in_seconds=meta_df.item(-1, "time_in_seconds"),
+                rt_tolerance=0.25,
+            )
+        else:
+            rt_calibrator = RetentionTimeCalibrator.train(
+                min_rt_in_seconds=meta_df.item(0, "time_in_seconds"),
+                max_rt_in_seconds=meta_df.item(-1, "time_in_seconds"),
+                ref_rt=target_df["ref_rt"].to_numpy(),
+                obs_rt=target_df["observed_rt"].to_numpy(),
+                degree=2,
+                min_rt_tolerance=0.1,
+                max_rt_tolerance=0.11,
+            )
 
         if after_full_search:
             # save RT predictions for the full search results

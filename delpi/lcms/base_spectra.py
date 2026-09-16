@@ -12,6 +12,12 @@ def get_frame_num_to_index_arr(frame_nums: List[int]):
     return num_to_idx
 
 
+def _readonly(arr: np.ndarray) -> np.ndarray:
+    """Mark an array read-only in place (no copy) for a stable numba type."""
+    arr.flags.writeable = False
+    return arr
+
+
 class BaseSpectra:
     """
     Base class for handling mass spectrometry spectra groups.
@@ -48,22 +54,27 @@ class BaseSpectra:
         return self.meta_df.shape[0]
 
     def get_peak_container(self) -> PeakContainer:
+        # None of the njit code writes to these arrays, so force them
+        # read-only (no copy) instead of writable (forces a copy) -- this
+        # still gives numba a stable, single array type to compile against,
+        # since polars to_numpy() otherwise flips between a readonly
+        # zero-copy view and a writable copy depending on chunking.
         return PeakContainer(
-            frame_num_arr=self.peak_df["frame_num"].to_numpy(),
-            mz_arr=self.peak_df["mz"].to_numpy(),
-            ab_arr=self.peak_df["ab"].to_numpy(),
-            z_score_arr=self.peak_df["z_score"].to_numpy(),
+            frame_num_arr=_readonly(self.peak_df["frame_num"].to_numpy()),
+            mz_arr=_readonly(self.peak_df["mz"].to_numpy()),
+            ab_arr=_readonly(self.peak_df["ab"].to_numpy()),
+            z_score_arr=_readonly(self.peak_df["z_score"].to_numpy()),
         )
 
     def get_meta_container(self) -> MetaContainer:
         meta_df = self.meta_df
         return MetaContainer(
-            frame_num_arr=meta_df["frame_num"].to_numpy(),
+            frame_num_arr=_readonly(meta_df["frame_num"].to_numpy()),
             frame_num_to_index_arr=self.frame_num_to_index,
             ms_level=meta_df.item(0, "ms_level"),
-            rt_arr=meta_df["time_in_seconds"].to_numpy(),
-            isolation_min_mz_arr=meta_df["isolation_min_mz"].to_numpy(),
-            isolation_max_mz_arr=meta_df["isolation_max_mz"].to_numpy(),
+            rt_arr=_readonly(meta_df["time_in_seconds"].to_numpy()),
+            isolation_min_mz_arr=_readonly(meta_df["isolation_min_mz"].to_numpy()),
+            isolation_max_mz_arr=_readonly(meta_df["isolation_max_mz"].to_numpy()),
         )
 
     def get_xic(self, mz: float, tolerance_in_ppm: float = 10) -> pl.DataFrame:

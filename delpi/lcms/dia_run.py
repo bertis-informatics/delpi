@@ -27,7 +27,7 @@ class DIARun:
 
         meta_df = meta_df.join(
             dia_scheme_df.select(pl.col("isolation_win_idx", "frame_num")).explode(
-                "frame_num"
+                "frame_num", empty_as_null=True
             ),
             on="frame_num",
             how="left",

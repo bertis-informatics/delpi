@@ -28,14 +28,17 @@ from delpi.search.result_manager import ResultManager
 from delpi.search.tl.rt_trainer import TransferLearningTrainerForRT
 from delpi.search.tl.trainer import TransferLearningTrainer
 from delpi.search.tl.spec_lib_generator import RefinedSpectralLibGenerator
+from delpi.database.peptide_database import PeptideDatabase
+from delpi.search.tda.tda_processor import TDAProcessor
+from delpi.search.tda.fdr_analyzer import FDRAnalyzer
+from delpi.search.search_state import SearchState
+from delpi.search.progress import CallbackProgressTracker
 from delpi.search.tl.second_pass import (
     select_tl_training_pmsms,
     select_second_pass_targets,
     select_paired_decoys,
 )
-from delpi.search.tda.tda_processor import TDAProcessor
-from delpi.search.search_state import SearchState
-from delpi.search.progress import CallbackProgressTracker
+from delpi.search.pmsm_assignment import assign_pmsms_across_runs
 from delpi.search.dia.max_lfq import maxlfq
 from delpi.utils.mp import get_multiprocessing_context
 from delpi.database.utils import get_modified_sequence
@@ -106,7 +109,7 @@ class SearchManager:
         return self.search_config.input_files
 
     def get_db_dir(self):
-        if not self.search_config.enable_transfer_learning:
+        if not self.search_config.enable_mbr:
             return self.search_config.db_dir
         return (
             self.search_config.db_dir
@@ -115,7 +118,7 @@ class SearchManager:
         )
 
     def get_results_group_key(self):
-        if not self.search_config.enable_transfer_learning:
+        if not self.search_config.enable_mbr:
             return "first_results"
         return (
             "first_results"
@@ -135,12 +138,11 @@ class SearchManager:
         Returns:
             BaseSearchEngine subclass instance
         """
-        # Determine acquisition method from config
-        acq_method = self.search_config.config.get("acquisition_method", "DIA")
+        acq_method = self.search_config.acquisition_method
 
-        if acq_method.upper() == "DDA":
+        if acq_method == "DDA":
             return DDASearchEngine(self.search_config, self.device, self.state)
-        elif acq_method.upper() == "DIA":
+        elif acq_method == "DIA":
             return DIASearchEngine(self.search_config, self.device, self.state)
         else:
             raise ValueError(
@@ -157,7 +159,13 @@ class SearchManager:
 
             from delpi.search.database import build_database_in_subprocess
 
-            build_database_in_subprocess(self.search_config, self.device)
+            batch_size = self.search_config.config.get("batch_size", 512)
+            build_database_in_subprocess(
+                self.search_config,
+                self.device,
+                batch_size=batch_size,
+                progress=self._progress,
+            )
         else:
             logger.info(f"Use existing peptide database: {self.search_config.db_dir}")
 
@@ -223,36 +231,49 @@ class SearchManager:
         self._resolve_batch_size()
 
     def _resolve_batch_size(self) -> None:
-        """Resolve ``batch_size`` in search config from 'auto' or an explicit value.
-
-        Rule of thumb: 1024 for 24 GB GPU, scaling linearly and rounding
-        down to the nearest power of 2.  Clamped to [256, 2048].
+        """Resolve ``batch_size`` from 'auto' or an explicit value.
+        Auto batch size is determined from nominal GPU VRAM:
+                <  8 GB : 256
+                8-15 GB : 512
+                16-31 GB: 1024
+                >= 32 GB: 2048
+        CUDA-reported total memory is rounded to the nearest GB to account
+        for the small difference between nominal and reported VRAM.
         """
         raw = self.search_config.config.get("batch_size", "auto")
+
         if isinstance(raw, int) or (isinstance(raw, str) and raw.isdigit()):
             self.search_config.config["batch_size"] = int(raw)
             return
 
-        # auto – determine from GPU memory
         device = self._validated_device
-        if device is not None and device.type == "cuda":
-            mem_gb = torch.cuda.get_device_properties(device).total_memory / (1024**3)
-        else:
-            mem_gb = 12  # conservative fallback
 
-        raw_bs = mem_gb / 24 * 1024
-        # round to nearest power of 2
-        log2 = (
-            raw_bs.bit_length() - 1
-            if isinstance(raw_bs, int)
-            else int(raw_bs).bit_length() - 1
-        )
-        lower = 1 << log2
-        upper = 1 << (log2 + 1)
-        bs = lower if (raw_bs - lower) < (upper - raw_bs) else upper
-        bs = max(256, min(bs, 2048))
+        if device is not None and device.type == "cuda":
+            total_memory = torch.cuda.get_device_properties(device).total_memory
+            reported_mem_gb = total_memory / (1024**3)
+
+            # e.g. 15.8 GiB reported by CUDA -> nominal 16 GB GPU
+            nominal_mem_gb = int(reported_mem_gb + 0.5)
+
+            if nominal_mem_gb >= 32:
+                bs = 2048
+            elif nominal_mem_gb >= 16:
+                bs = 1024
+            elif nominal_mem_gb >= 8:
+                bs = 512
+            else:
+                bs = 256
+
+            logger.info(
+                f"Auto-resolved batch size: {bs} "
+                f"(GPU memory: {reported_mem_gb:.1f} GiB, "
+                f"nominal: ~{nominal_mem_gb} GB)"
+            )
+        else:
+            bs = 512
+            logger.info(f"Auto-resolved batch size: {bs} " "(CUDA GPU not available)")
+
         self.search_config.config["batch_size"] = bs
-        logger.info(f"Auto-resolved batch size: {bs}")
 
     def execute_batch(self) -> None:
         """Execute workflow for all input files using separate processes.
@@ -270,7 +291,7 @@ class SearchManager:
             self.state = SearchState.FIRST_SEARCH
         else:
             self.state = SearchState.SECOND_SEARCH
-            logger.info(f"Second search after transfer learning")
+            logger.info("MBR-guided second-pass search")
 
         logger.info(f"Total runs to process: {len(input_files)}")
 
@@ -483,6 +504,95 @@ class SearchManager:
 
         self.save_library_confidence(target_df, spec_generator)
 
+    def build_refined_library_from_original(
+        self,
+        first_pmsm_df: pl.DataFrame,
+    ) -> None:
+        """Build the second-pass refined library by copying entries
+        straight from the first-pass (original) spectral library --
+        no transfer learning / re-prediction involved.
+
+        Target/decoy selection and ``library_confidence.parquet``
+        persistence are identical to :meth:`build_refined_library`; only
+        how the refined library's precursor/fragment rows are populated
+        differs -- they are copied verbatim from ``search_config.db_dir``
+        (including the original ``ref_rt``) instead of being predicted
+        with fine-tuned RT/MS2 models.
+        """
+
+        self.state = SearchState.REFINED_DB_PREP
+
+        search_config = self.search_config
+        q_value_cutoff = search_config.config.get(
+            "q_value_cutoff", DEFAULT_Q_VALUE_CUTOFF
+        )
+
+        logger.info("Selecting second-pass target precursors")
+        target_df = select_second_pass_targets(
+            first_pmsm_df, q_value_cutoff=q_value_cutoff
+        )
+
+        logger.info(f"Selecting paired decoys for {target_df.shape[0]:,} targets")
+        target_df = select_paired_decoys(search_config.db_dir, target_df)
+        target_df = target_df.filter(pl.col("decoy_precursor_index").is_not_null())
+
+        combined_precursor_index_arr = np.unique(
+            np.concatenate(
+                [
+                    target_df["precursor_index"].to_numpy(),
+                    target_df["decoy_precursor_index"].to_numpy(),
+                ]
+            )
+        ).astype(np.uint32)
+
+        logger.info(
+            f"Copying refined library entries from the original library "
+            f"({target_df.shape[0]:,} targets + paired decoys)"
+        )
+
+        # No predictors needed here -- only `_build_database` (the
+        # peptide/modification/precursor construction shared with the TL
+        # path) is used below, so `ref_rt` stays the original library's value.
+        spec_generator = RefinedSpectralLibGenerator(
+            rt_predictor=None,
+            ms2_predictor=None,
+            apply_phospho=self.search_config.is_phospho_search,
+            min_precursor_charge=search_config["precursor"].get("min_charge", 2),
+            max_precursor_charge=search_config["precursor"].get("max_charge", 4),
+            min_precursor_mz=search_config["precursor"].get("min_mz", 300),
+            max_precursor_mz=search_config["precursor"].get("max_mz", 1800),
+            min_fragment_charge=search_config["fragment"].get("min_charge", 1),
+            max_fragment_charge=search_config["fragment"].get("max_charge", 2),
+            min_fragment_mz=search_config["fragment"].get("min_mz", 200),
+            max_fragment_mz=search_config["fragment"].get("max_mz", 1800),
+        )
+        spec_generator._build_database(
+            search_config.db_dir, combined_precursor_index_arr
+        )
+        ## Update the reference retention times in the modification dataframe
+        spec_generator._update_ref_rt(target_df)
+
+        # Copy fragment rows verbatim, remapped from the original library's
+        # g_precursor_index onto the refined library's local precursor_index.
+        spec_generator.speclib_df = (
+            pl.scan_parquet(search_config.db_dir / "speclib_df.parquet")
+            .filter(pl.col("precursor_index").is_in(combined_precursor_index_arr))
+            .rename({"precursor_index": "g_precursor_index"})
+            .join(
+                spec_generator.precursor_df.lazy().select(
+                    pl.col("g_precursor_index", "precursor_index")
+                ),
+                on="g_precursor_index",
+                how="inner",
+            )
+            .sort("precursor_index")
+            .select(list(spec_generator.speclib_df_schema.keys()))
+            .collect()
+        )
+
+        spec_generator.save(search_config.refined_db_dir)
+        self.save_library_confidence(target_df, spec_generator)
+
     def save_library_confidence(
         self,
         target_df: pl.DataFrame,
@@ -549,6 +659,31 @@ class SearchManager:
             refined_db_dir / "library_confidence.parquet"
         )
 
+    def _apply_fdr(
+        self,
+        pmsm_df: pl.DataFrame,
+        result_aggregator: ResultsAggregator,
+        q_value_cutoff: float,
+        use_protein_picker: bool,
+        grouping_type: str,
+        run_protein_grouping: bool,
+        library_confidence_df: pl.DataFrame,
+    ) -> pl.DataFrame:
+        """Run FDR control -- a separate concern from scoring/assignment (TDAProcessor)."""
+        fdr = FDRAnalyzer(
+            q_value_cutoff=q_value_cutoff,
+            db_dir=self.get_db_dir(),
+            use_protein_picker=use_protein_picker,
+            grouping_type=grouping_type,
+        )
+        pmsm_df = fdr.perform_global_analysis(
+            pmsm_df,
+            protein_inference=run_protein_grouping,
+            library_confidence_df=library_confidence_df,
+        )
+        pmsm_df = fdr.batch_run_specific_analysis(pmsm_df)
+        return pmsm_df.join(result_aggregator.get_run_df(), on="run_index", how="left")
+
     def perform_global_tda(
         self,
         state: SearchState,
@@ -575,9 +710,7 @@ class SearchManager:
 
         search_config = self.search_config
         group_key = self.get_results_group_key()
-        q_value_cutoff = search_config.config.get(
-            "q_value_cutoff", DEFAULT_Q_VALUE_CUTOFF
-        )
+        q_value_cutoff = search_config.q_value_cutoff
         use_protein_picker = search_config.config.get("use_protein_picker", True)
         grouping_type = search_config.config.get(
             "grouping_type", "parsimonious_grouping"
@@ -607,7 +740,9 @@ class SearchManager:
             batch_size=search_batch_size * 4,
             split_level="peptide",
         )
-        pmsm_df = processor.run_global(
+
+        # 1) score every PmSM
+        scored_df = processor.run_global(
             result_aggregator,
             group_key,
             training_params={
@@ -616,25 +751,33 @@ class SearchManager:
                 "train_split": 0.8,
                 "early_stopping_patience": 5,
             },
-            run_protein_grouping=run_protein_grouping,
-            library_confidence_df=library_confidence_df,
             pass_label="first" if state < SearchState.SECOND_SEARCH else "second",
         )
+        result_aggregator.write_back_scores(group_key, scored_df)
 
-        if state == SearchState.FIRST_TDA:
-            # Persist score/precursor_q_value back into each run's own
-            # "first_results" HDF group so that the RT calibration bootstrap
-            # ahead of the second full search (see
-            # BaseSearchEngine._perform_rt_calibration) can reuse them
-            # without a redundant run-specific TDA pass.
-            processor.write_back_scores(pmsm_df, result_aggregator, group_key)
+        # 2) Filter out low-scoring PmSMs before assignment
+        max_score = pl.col("score").max().over(["precursor_index", "run_index"])
+        cutoff = pl.min_horizontal(max_score - 1.0, max_score * 0.5)
+        scored_df = scored_df.filter(pl.col("score") > cutoff)
 
-        # Second pass: report/aggregate using the first-pass-derived library
-        # q-values instead of this pass's own (diagnostic-only) global
-        # q-value, since only library-confirmed precursors are reportable.
-        # (protein_group/master_protein and library_*_q_value columns are
-        # already joined onto pmsm_df above, inside run_global ->
-        # FDRAnalyzer.perform_global_analysis.)
+        # 3) assign one PmSM per run/precursor (score + median intensity + alignment-group DP)
+        intensity_weight = self.search_config.config.get("intensity_weight", 4.0)
+        pmsm_df = assign_pmsms_across_runs(scored_df, intensity_weight=intensity_weight)
+        pmsm_df = PeptideDatabase.join_with_protein_annotations(
+            result_aggregator.db_dir, pmsm_df
+        )
+
+        # 3) FDR control
+        pmsm_df = self._apply_fdr(
+            pmsm_df,
+            result_aggregator,
+            q_value_cutoff,
+            use_protein_picker,
+            grouping_type,
+            run_protein_grouping,
+            library_confidence_df,
+        )
+
         self.log_id_statistics_table(
             pmsm_df,
             q_value_cutoff,
@@ -650,43 +793,43 @@ class SearchManager:
 
         logger.info("Performing cross-run quantification")
         self.state = SearchState.QUANTIFICATION
-        q_value_cutoff = self.search_config.config.get(
-            "q_value_cutoff", DEFAULT_Q_VALUE_CUTOFF
-        )
+        q_value_cutoff = self.search_config.q_value_cutoff
 
         result_aggregator = ResultsAggregator(
             db_dir=self.get_db_dir(), search_config=self.search_config
         )
 
-        lfq = LabelFreeQuantifier(
-            result_aggregator,
-            q_value_cutoff=q_value_cutoff,
-            group_key=self.get_results_group_key(),
-            acq_method=self.search_config.config.get("acquisition_method", "DDA"),
-            library_q_value_column=library_q_value_column,
+        # FDR filtering is this caller's responsibility, not LabelFreeQuantifier's
+        # (it only quantifies whatever it's given): only PmSMs passing both the
+        # run-specific and library-level cutoffs are handed to LFQ.
+        target_pmsm_df = pmsm_df.filter(
+            (pl.col("is_decoy") == False)
+            & (pl.col(library_q_value_column) <= q_value_cutoff)
+            & (pl.col("precursor_q_value") <= q_value_cutoff)
         )
 
-        quant_df = lfq.perform_quantification(pmsm_df)
-        ## [TODO] DIA quantification
-        ## For DDA, MS1 area is estimated for each PmSM
-        ## For DIA, MS1 area is estimated for each precursor (across all PmSMs)
-        if lfq.acq_method == "DIA":
-            pmsm_df = (
-                pmsm_df.select(pl.exclude("ms1_area", "ms2_area"))
-                .group_by(["run_index", "precursor_index"])
-                .agg(pl.all().sort_by("score").last())
-                .join(quant_df, on=["run_index", "precursor_index"], how="left")
-            )
-        else:
-            pmsm_df = (
-                pmsm_df.select(pl.exclude("ms1_area", "ms2_area"))
-                .group_by(["run_index", "precursor_index"])
-                .agg(pl.all().sort_by("score").last())
-                .join(quant_df, on=["run_index", "pmsm_index"], how="left")
-            )
+        lfq = LabelFreeQuantifier(
+            result_aggregator,
+            group_key=self.get_results_group_key(),
+            acq_method=self.search_config.acquisition_method,
+        )
+
+        # LabelFreeQuantifier returns a minimal DataFrame keyed by
+        # (run_index, precursor_index) with just the new quant columns; only
+        # rows passing the FDR filter above were quantified, so this must be
+        # joined back onto the full pmsm_df (per-run assignment upstream
+        # already guarantees at most one PmSM per (run_index, precursor_index),
+        # so a plain left join is all that's needed -- no re-selection).
+        quant_df = lfq.perform_quantification(target_pmsm_df)
+        value_columns = [
+            c for c in quant_df.columns if c not in ("run_index", "precursor_index")
+        ]
+        pmsm_df = pmsm_df.select(pl.exclude(value_columns)).join(
+            quant_df, on=["run_index", "precursor_index"], how="left"
+        )
 
         ## run MaxLFQ
-        if self.search_config.config.get("acquisition_method", "DDA").upper() == "DIA":
+        if self.search_config.acquisition_method == "DIA":
             logger.info("Performing protein quantification with MaxLFQ ")
             protein_group_q_value_column = (
                 "library_protein_group_q_value"
@@ -696,13 +839,18 @@ class SearchManager:
             df = (
                 pmsm_df.filter(pl.col("is_decoy") == False)
                 .filter(pl.col(protein_group_q_value_column) <= q_value_cutoff)
-                .filter(pl.col("ms2_area").is_not_null() & (pl.col("ms2_area") > 0))
+                .filter(
+                    pl.col("ms2_quantity_normalized").is_not_null()
+                    & (pl.col("ms2_quantity_normalized") > 0)
+                )
             )
+            # protein-group abundance is computed from run/RT-normalized
+            # precursor quantities, not the raw ms2_quantity.
             pg_quant_df = maxlfq(
                 df,
                 min_peptides_per_protein=1,
                 peptide_col="precursor_index",
-                intensity_col="ms2_area",
+                intensity_col="ms2_quantity_normalized",
             )
             pg_quant_df = pg_quant_df.join(
                 result_aggregator.get_run_df(), on="run_index", how="left"
@@ -754,12 +902,10 @@ class SearchManager:
             "output_format", DEFAULT_REPORT_FORMAT
         ).lower()
         output_decoy = self.search_config.config.get("output_decoy", True)
-        q_value_cutoff = self.search_config.config.get(
-            "q_value_cutoff", DEFAULT_Q_VALUE_CUTOFF
-        )
+        q_value_cutoff = self.search_config.q_value_cutoff
 
-        # Final MBR identification: for the two-pass (transfer learning)
-        # search, a precursor-run ID is only accepted when it passes *both*
+        # Final MBR identification: for the two-pass (MBR-guided) search, a
+        # precursor-run ID is only accepted when it passes *both*
         # the library-level cutoff (first-pass global q-value, carried via
         # library_confidence.parquet) and the second-pass run-specific
         # cutoff. The second pass's own global_precursor_q_value is
@@ -832,11 +978,11 @@ class SearchManager:
 
         self.check_result_files()
 
-        enable_tl = self.search_config.enable_transfer_learning
-        if enable_tl:
-            logger.info("Two-stage search (transfer learning enabled)")
+        enable_mbr = self.search_config.enable_mbr
+        if enable_mbr:
+            logger.info("Two-pass search (MBR-guided second-pass search enabled)")
         else:
-            logger.info("Single-stage search (transfer learning disabled)")
+            logger.info("Single-pass search (MBR disabled)")
 
         self.prepare_database()
 
@@ -850,21 +996,24 @@ class SearchManager:
             SearchState.FIRST_TDA, run_protein_grouping=True
         )
 
-        if enable_tl:
+        if enable_mbr:
             self.save_pmsm_df(first_pmsm_df, filename_stem="pmsm_results.first")
 
-            # Transfer learning: dual-FDR + top-k target selection for
-            # predictor fine-tuning, refined target-decoy library
-            # construction (paired decoys) and library confidence.
-            rt_predictor, ms2_predictor = self.perform_transfer_learning(first_pmsm_df)
+            # -- Transfer learning path (disabled) -- fine-tunes RT/MS2
+            # predictors and builds the refined library from their
+            # predictions. Left in place for reference / possible re-enable.
+            # rt_predictor, ms2_predictor = self.perform_transfer_learning(first_pmsm_df)
+            # self.build_refined_library(first_pmsm_df, rt_predictor, ms2_predictor)
 
-            self.build_refined_library(first_pmsm_df, rt_predictor, ms2_predictor)
+            # MBR-guided second-pass search: refined library copied verbatim
+            # from the first-pass library entries -- no TL / re-prediction.
+            self.build_refined_library_from_original(first_pmsm_df)
 
-            # Second pass: re-search every run against the refined library
+            # MBR-guided second-pass search: re-search every run against the refined library
             self.execute_batch()
 
-            # Second pass: global re-scoring against the refined library.
-            # Target protein-group membership + library q-values are reused
+            # MBR-guided second-pass search: global re-scoring against the refined
+            # library. Target protein-group membership + library q-values are reused
             # from the first pass and decoys are freshly grouped (see
             # FDRAnalyzer.perform_global_analysis); the resulting global
             # q-value here is diagnostic only, so results are reported/
@@ -887,7 +1036,7 @@ class SearchManager:
             pmsm_df,
             pg_quant_df,
             library_q_value_column=library_q_value_column,
-            two_pass_mode=enable_tl,
+            two_pass_mode=enable_mbr,
         )
         self.state = SearchState.DONE
 

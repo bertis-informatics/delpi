@@ -268,7 +268,7 @@ class FDRAnalyzer:
             confident_pmsm_df.select(
                 pl.col(inference_column, "protein_index", "is_decoy", "score")
             )
-            .explode("protein_index")
+            .explode("protein_index", empty_as_null=True)
             .drop_nulls("protein_index")
         )
 

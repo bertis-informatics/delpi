@@ -37,19 +37,24 @@ class ResultsAggregator:
         return [rm.hdf_file_path for rm in self._results_dict.values()]
 
     def get_xic_peak_interval(self) -> float:
-        xic_peak_intervals = []
+        return self._get_mean_attr("xic_peak_interval")
+
+    def get_gradient_length_in_seconds(self) -> float:
+        return self._get_mean_attr("gradient_length_in_seconds")
+
+    def _get_mean_attr(self, attr_name: str) -> float:
+        values = []
         for result_manager in self._results_dict.values():
             try:
-                xic_peak_interval = result_manager.read_attr("xic_peak_interval")
-                xic_peak_intervals.append(xic_peak_interval)
+                value = result_manager.read_attr(attr_name)
+                values.append(value)
             except KeyError:
                 pass
 
-        if len(xic_peak_intervals) == 0:
-            return 2.0
+        if len(values) == 0:
+            return 0.0
 
-        # Return the average xic_peak_interval across all runs
-        return float(np.mean(xic_peak_intervals))
+        return float(np.mean(values))
 
     def get_tl_label_df(self, tl_ms2_h5_path: Path) -> pl.DataFrame:
         """Build the transfer-learning label DataFrame from the shared
@@ -76,7 +81,9 @@ class ResultsAggregator:
                         {
                             "seq_len": np.full(n_samples, int(n), dtype=np.uint16),
                             "index": np.arange(n_samples, dtype=np.uint32),
-                            "precursor_index": precursor_index.astype(np.uint32, copy=False),
+                            "precursor_index": precursor_index.astype(
+                                np.uint32, copy=False
+                            ),
                         }
                     )
                 )
@@ -124,6 +131,7 @@ class ResultsAggregator:
             "predicted_rt",
             "observed_rt",
             "logit",
+            "median_intensity",
         ],
     ) -> pl.DataFrame:
 
@@ -263,3 +271,25 @@ class ResultsAggregator:
                 xic_arrays[jj] = xic_arr[ii]
 
         return xic_arrays, ms1_area_arr
+
+    def write_back_scores(
+        self,
+        group_key: str,
+        pmsm_df: pl.DataFrame,
+    ) -> None:
+
+        for run_index, result_manager in self._results_dict.items():
+            sub_df = pmsm_df.filter(pl.col("run_index") == run_index)
+            if sub_df.shape[0] == 0:
+                continue
+
+            num_raw = result_manager.read_dict(
+                group_key, data_keys=["precursor_index"]
+            )["precursor_index"].shape[0]
+            score_arr = np.full(num_raw, np.nan, dtype=np.float32)
+            # q_value_arr = np.full(num_raw, np.nan, dtype=np.float32)
+            idx = sub_df["pmsm_index"].to_numpy()
+            score_arr[idx] = sub_df["score"].to_numpy()
+            # q_value_arr[idx] = sub_df["precursor_q_value"].to_numpy()
+
+            result_manager.write_dict(group_key, {"score": score_arr})

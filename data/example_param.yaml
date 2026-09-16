@@ -1,84 +1,127 @@
-# acquisition_method can be either "DDA" or "DIA"
+# Acquisition method used to collect your data: "DDA" or "DIA".
 acquisition_method: DIA
 
-# input_files is a list of raw files to be searched.
-# input_dir can be specified instead of input_files, and all raw files in the directory will be searched.
+# Files to analyze. Replace these example paths with your own.
+# List individual files, or use *.mzML / *.raw to select all files
+# of that type in a folder.
 input_files:
-  - /data1/MassSpecData/DIA-QE/DIA/collinsb_X1803_171-A.mzML
-  - /data1/MassSpecData/DIA-QE/DIA/collinsb_X1803_172-B.mzML
-  - /data1/MassSpecData/DIA-QE/DIA/collinsb_X1803_173-A.mzML
-  - /data1/MassSpecData/DIA-QE/DIA/collinsb_X1803_174-B.mzML
-  - /data1/MassSpecData/DIA-QE/DIA/collinsb_X1803_175-A.mzML
-  - /data1/MassSpecData/DIA-QE/DIA/collinsb_X1803_176-B.mzML
+  - /data1/MassSpecData/test/collinsb_X1803_171-A.mzML  # This file only
+  - /data1/MassSpecData/mzml/*.mzML                     # All mzML files in this folder
+  - /data1/MassSpecData/raw/*.raw                       # All RAW files in this folder
 
+
+# --- Output ---
+
+# Folder where search results will be saved.
 output_directory: /data1/MassSpecData/DIA-QE/DIA/delpi
-output_format: parquet # output_format can be either "tsv" or "parquet"
-output_decoy: true # output_decoy can be either true or false, default is false
 
-# search parameters
+# Result file format:
+# "tsv": tab-separated text, which can be opened in Excel.
+# "parquet": a binary table format for analysis with tools such as Python or R.
+output_format: parquet
+
+# Include decoy matches in the result files.
+# true = include; false = exclude. Default: false.
+output_decoy: true
+
+
+# --- Search settings ---
+
+# Allowed mass error for precursor (MS1) and fragment (MS2) matching, in ppm.
 ms1_mass_tol_in_ppm: 10
 ms2_mass_tol_in_ppm: 10
+
+# Keep identifications with q-values at or below this threshold.
+# 0.01 corresponds to an estimated false discovery rate (FDR) of 1%.
 q_value_cutoff: 0.01
-# protein grouping mode: "lead_only" or "parsimonious_grouping" (default)
+
+# Method for grouping proteins based on the identified peptides.
+# Options: "parsimonious_grouping" (default) or "lead_only".
 grouping_type: parsimonious_grouping
-# enable_transfer_learning enables the 2-stage search that fine-tunes the models
-# (transfer learning) between a first and second search. When omitted or false,
-# a single-stage search is performed.
-# This is unnecessary for typical global or phospho proteomics searches, but is
-# beneficial for searches involving rare or unseen PTMs.
-enable_transfer_learning: false
-# decoy_method can be either "mutation", or "pseudo_shuffle", or "pseudo_reverse", 
-# default is "mutation", which is recommended for better FDR estimation
+
+# Use peptides identified across runs to guide a second search,
+# helping recover signals missed in individual runs (Match Between Runs, MBR).
+# true = two search passes; false = one search pass.
+enable_mbr: true
+
+# Method for generating decoy sequences used to estimate false discoveries.
+# Options: "mutation" (default, recommended), "pseudo_shuffle", or "pseudo_reverse".
 decoy_method: mutation
 
+
+# --- Protein database and digestion ---
+
+# Folder where the peptide database is stored.
 database_directory: /data1/MassSpecData/DIA-QE/DIA/delpi/speclib
 
-# fasta_file is required for building the peptide database if it doesn't exist.
+# FASTA file containing the protein sequences to search.
+# Required when the peptide database has not been built yet.
 fasta_file: /data1/MassSpecData/DIA-QE/DIA/target_protein_sequences.fasta
+
 digest:
   enzyme: trypsin
-  min_len: 7
-  max_len: 30
-  max_missed_cleavages: 1
+  min_len: 7               # Minimum peptide length, in amino acids
+  max_len: 30              # Maximum peptide length, in amino acids
+  max_missed_cleavages: 1  # Maximum number of uncleaved enzyme sites per peptide
+
+  # Allow removal of methionine at the start of a protein.
   n_term_methionine_excision: true
 
-modification:
-  max_mods: 2     # max number of variable modifications per peptide
-  mod_param_set:
-    # mod_name can be either a UniMod accession (e.g., "UniMod:4") or a common name (e.g., "Carbamidomethyl")
-    # residue is the amino acid residue that can be modified (e.g., "C" for cysteine, "*" for any residue)
-    # location can be "anywhere", "protein_n_term", "protein_c_term", or "peptide_n_term", "peptide_c_term"
-  - mod_name: UniMod:4  # Carbamidomethyl
-    residue: C
-    location: anywhere
-    fixed: true
-  - mod_name: UniMod:35 # Oxidation
-    residue: M
-    location: anywhere
-    fixed: false
-  - mod_name: UniMod:1 # Acetyl
-    residue: "*"
-    location: protein_n_term
-    fixed: false
-  # - mod_name: UniMod:2 # Phospho
-  #   residue: S
-  #   location: anywhere
-  #   fixed: False
-  # - mod_name: UniMod:2 # Phospho
-  #   residue: T
-  #   location: anywhere
-  #   fixed: False
-  # - mod_name: UniMod:2 # Phospho
-  #   residue: Y
-  #   location: anywhere
-  #   fixed: False            
 
+# --- Peptide modifications ---
+
+modification:
+  max_mods: 2  # Maximum number of variable modifications per peptide
+
+  # Each entry describes one modification:
+  # mod_name: modification name or UniMod ID.
+  # residue: one-letter amino acid code; "*" means any amino acid.
+  # location: "anywhere", "protein_n_term", "protein_c_term",
+  #           "peptide_n_term", or "peptide_c_term".
+  # fixed: true = always present at the specified sites;
+  #        false = consider both modified and unmodified forms.
+  mod_param_set:
+    - mod_name: UniMod:4  # Carbamidomethylation of cysteine
+      residue: C
+      location: anywhere
+      fixed: true
+
+    - mod_name: UniMod:35  # Oxidation of methionine
+      residue: M
+      location: anywhere
+      fixed: false
+
+    - mod_name: UniMod:1  # Acetylation at the protein N-terminus
+      residue: "*"
+      location: protein_n_term
+      fixed: false
+
+    # Optional: phosphorylation of S, T, and Y.
+    # Remove the leading "# " from the entries below to include them.
+    # - mod_name: UniMod:21  # Phosphorylation of serine
+    #   residue: S
+    #   location: anywhere
+    #   fixed: false
+    # - mod_name: UniMod:21  # Phosphorylation of threonine
+    #   residue: T
+    #   location: anywhere
+    #   fixed: false
+    # - mod_name: UniMod:21  # Phosphorylation of tyrosine
+    #   residue: Y
+    #   location: anywhere
+    #   fixed: false
+
+
+# --- Precursor and fragment ions ---
+
+# Precursor charge states and m/z range to include in the search.
 precursor:
   min_charge: 1
   max_charge: 4
   min_mz: 300
   max_mz: 1800
 
+# Fragment charge states and m/z range to use for matching.
 fragment:
   min_charge: 1
   max_charge: 2

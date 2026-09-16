@@ -14,6 +14,7 @@ from delpi.database.modification_handler import ModificationHandler
 from delpi.database.precursor_generator import PrecursorGenerator
 from delpi.database.spec_lib_generator import SpectralLibGenerator
 from delpi.database.utils import create_peptidoform_df
+from delpi.search.progress import ProgressTracker
 from delpi.utils.yaml_file import load_yaml, save_yaml
 
 PEPTIDE_SEQ_REGEX = rf"^[{AminoAcid.peptide_n_term}{AminoAcid.protein_n_term}]?[{AminoAcid.standard_amino_acid_chars}]+[{AminoAcid.peptide_c_term}{AminoAcid.protein_c_term}]?$"
@@ -72,9 +73,16 @@ class PeptideDatabase:
         max_fragments=16,
         device: Union[str, torch.device] = "cuda:0",
         use_multiprocessing: bool = False,
+        progress: ProgressTracker = None,
+        save_dir: Union[str, Path] = None,
+        precursor_chunk_size: int = None,
+        batch_size: int = 512,
         *args,
         **kwargs,
     ) -> Self:
+
+        if precursor_chunk_size is not None and save_dir is None:
+            raise ValueError("save_dir is required when precursor_chunk_size is set")
 
         # read and parse FASTA file
         parser = FastaParser(fasta_file)
@@ -147,6 +155,10 @@ class PeptideDatabase:
             prefix_mass_container,
             min_fragment_mz=min_fragment_mz,
             max_fragment_mz=max_fragment_mz,
+            progress=progress,
+            precursor_chunk_size=precursor_chunk_size,
+            save_dir=save_dir,
+            batch_size=batch_size,
         )
 
         self.params.update(
@@ -163,7 +175,7 @@ class PeptideDatabase:
         self.peptide_df = peptide_df
         self.modification_df = modification_df
         self.precursor_df = precursor_df
-        self.speclib_df = speclib_df
+        self.speclib_df = speclib_df if precursor_chunk_size is None else None
         self.prefix_mass_container = prefix_mass_container
 
         return self
@@ -215,11 +227,6 @@ class PeptideDatabase:
                 if fpath.exists():
                     param_val = pl.read_parquet(fpath)
                     setattr(new_instance, param_key, param_val)
-
-        # if hdf_file_path.exists():
-        #     with h5py.File(hdf_file_path, 'r') as hf:
-        #         for param_key, param_val in hf.items():
-        #             setattr(new_instance, param_key, np.array(param_val))
 
         return new_instance
 
@@ -320,3 +327,59 @@ class PeptideDatabase:
         ).collect()
 
         return label_df
+
+    @classmethod
+    def join_with_protein_annotations(
+        cls,
+        db_dir: Path,
+        pmsm_df: pl.DataFrame,
+    ) -> pl.DataFrame:
+        """Attach precursor/modification/peptide/fasta_id columns from the database.
+
+        Like :meth:`join`, but also attaches a semicolon-joined ``fasta_id``
+        column per precursor, derived from the protein sequence database.
+        """
+        # Columns added by the join — drop them first if already present to
+        # avoid polars creating duplicate (_right) columns.
+        _join_added = {
+            "peptidoform_index",
+            "peptide_index",
+            "precursor_charge",
+            "mod_ids",
+            "mod_sites",
+            "peptide",
+            "sequence_length",
+            "is_decoy",
+            "protein_index",
+            "fasta_id",
+        }
+        cols_to_drop = [c for c in pmsm_df.columns if c in _join_added]
+        pmsm_df = cls.join(
+            db_dir,
+            pmsm_df.drop(cols_to_drop),
+            precursor_columns=["precursor_charge"],
+            modification_columns=["mod_ids", "mod_sites"],
+            peptide_columns=[
+                "peptide",
+                "sequence_length",
+                "is_decoy",
+                "protein_index",
+            ],
+        )
+
+        fasta_id_df = (
+            pl.scan_parquet(db_dir / "sequence_df.parquet")
+            .select(pl.col("protein_index", "fasta_id"))
+            .collect()
+        )
+        fasta_lookup_df = (
+            pmsm_df.select(pl.col("precursor_index", "protein_index"))
+            .unique(subset="precursor_index", keep="first")
+            .explode("protein_index", empty_as_null=True)
+            .join(fasta_id_df, on="protein_index", how="left")
+            .group_by("precursor_index")
+            .agg(pl.col("fasta_id"))
+            .with_columns(pl.col("fasta_id").list.sort().list.join(";"))
+        )
+
+        return pmsm_df.join(fasta_lookup_df, on="precursor_index", how="left")
