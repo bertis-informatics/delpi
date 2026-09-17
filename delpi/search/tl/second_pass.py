@@ -39,7 +39,8 @@ def get_var_mod_names(db_dir: Path) -> list[str]:
 
     mod_param_set = mod["mod_param_set"]
     mod_params = [ModificationParam(**mods) for mods in mod_param_set]
-    return [mod.mod_name for mod in mod_params if mod.fixed == False]
+    # dedupe: multiple residues (e.g. Phospho on S/T/Y) can share one mod_name
+    return list(dict.fromkeys(mod.mod_name for mod in mod_params if mod.fixed == False))
 
 
 def select_tl_training_pmsms(
