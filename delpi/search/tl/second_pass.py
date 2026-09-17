@@ -39,7 +39,10 @@ def get_var_mod_names(db_dir: Path) -> list[str]:
         return []
 
     mod_param_set = mod["mod_param_set"]
-    mod_params = [ModificationParam(**mods) for mods in mod_param_set]
+    registry = ModificationRegistry.from_mod_param_set(mod_param_set)
+    mod_params = [
+        ModificationParam(**mods, registry=registry) for mods in mod_param_set
+    ]
     # dedupe: multiple residues (e.g. Phospho on S/T/Y) can share one mod_name
     return list(dict.fromkeys(mod.mod_name for mod in mod_params if mod.fixed == False))
 
