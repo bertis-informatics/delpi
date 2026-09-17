@@ -901,33 +901,19 @@ class SearchManager:
         format = self.search_config.config.get(
             "output_format", DEFAULT_REPORT_FORMAT
         ).lower()
-        output_decoy = self.search_config.config.get("output_decoy", True)
+        output_decoy = self.search_config.config.get("output_decoy", False)
         q_value_cutoff = self.search_config.q_value_cutoff
-
-        # Final MBR identification: for the two-pass (MBR-guided) search, a
-        # precursor-run ID is only accepted when it passes *both*
-        # the library-level cutoff (first-pass global q-value, carried via
-        # library_confidence.parquet) and the second-pass run-specific
-        # cutoff. The second pass's own global_precursor_q_value is
-        # diagnostic only and is not used here.
-        # For a single-pass search (or the first-pass-only snapshot) the
-        # existing (looser) OR logic is kept.
-        if two_pass_mode:
-            pmsm_df = pmsm_df.filter(
-                (pl.col(library_q_value_column) <= q_value_cutoff)
-                & (pl.col("precursor_q_value") <= q_value_cutoff)
-            )
-        else:
-            pmsm_df = pmsm_df.filter(
-                (pl.col("precursor_q_value") <= q_value_cutoff)
-                | (pl.col(library_q_value_column) <= q_value_cutoff)
-            )
-
-        ## Add modified sequence column
-        pmsm_df = self._add_report_columns(pmsm_df)
 
         if not output_decoy:
             pmsm_df = pmsm_df.filter(pl.col("is_decoy") == False)
+
+        pmsm_df = pmsm_df.filter(
+            (pl.col("precursor_q_value") <= q_value_cutoff)
+            | (pl.col(library_q_value_column) <= q_value_cutoff)
+        )
+
+        ## Add modified sequence column
+        pmsm_df = self._add_report_columns(pmsm_df)
 
         if format == "parquet":
             pmsm_df.write_parquet(
