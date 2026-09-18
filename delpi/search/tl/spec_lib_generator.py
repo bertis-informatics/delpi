@@ -45,6 +45,8 @@ class RefinedSpectralLibGenerator(SpectralLibGenerator):
             prefix_ion_type=prefix_ion_type,
             suffix_ion_type=suffix_ion_type,
             max_fragments=max_fragments,
+            min_fragment_mz=min_fragment_mz,
+            max_fragment_mz=max_fragment_mz,
             apply_phospho=apply_phospho,
             device=device,
             *args,
@@ -61,8 +63,6 @@ class RefinedSpectralLibGenerator(SpectralLibGenerator):
         self.max_precursor_charge = max_precursor_charge
         self.min_precursor_mz = min_precursor_mz
         self.max_precursor_mz = max_precursor_mz
-        self.min_fragment_mz = min_fragment_mz
-        self.max_fragment_mz = max_fragment_mz
 
     def _build_database(self, db_dir: Path, precursor_index_arr: np.ndarray):
 

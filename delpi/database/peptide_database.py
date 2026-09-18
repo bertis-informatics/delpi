@@ -145,6 +145,8 @@ class PeptideDatabase:
             prefix_ion_type=prefix_ion_type,
             suffix_ion_type=suffix_ion_type,
             max_fragments=max_fragments,
+            min_fragment_mz=min_fragment_mz,
+            max_fragment_mz=max_fragment_mz,
             apply_phospho=mod_handler.has_phospho,
             device=device,
         )
@@ -153,8 +155,6 @@ class PeptideDatabase:
             modification_df,
             precursor_df,
             prefix_mass_container,
-            min_fragment_mz=min_fragment_mz,
-            max_fragment_mz=max_fragment_mz,
             progress=progress,
             precursor_chunk_size=precursor_chunk_size,
             save_dir=save_dir,

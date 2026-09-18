@@ -46,12 +46,16 @@ class SpectralLibGenerator:
         prefix_ion_type=BaseIonType.B,
         suffix_ion_type=BaseIonType.Y,
         max_fragments: int = 16,
+        min_fragment_mz: float = 200,
+        max_fragment_mz: float = 1800,
         apply_phospho=False,
         device: Union[str, torch.device] = "cuda:0",
         ms2_predictor: Ms2SpectrumPredictor = None,
         rt_predictor: RetentionTimePredictor = None,
     ):
         self.max_fragments = max_fragments
+        self.min_fragment_mz = min_fragment_mz
+        self.max_fragment_mz = max_fragment_mz
         neutral_losses = [NeutralLoss.NO_LOSS]
         if apply_phospho:
             neutral_losses.append(NeutralLoss.H3O4P)
@@ -93,6 +97,8 @@ class SpectralLibGenerator:
             "prefix_ion_type": self.fragmentation.base_ion_types[0].symbol,
             "suffix_ion_type": self.fragmentation.base_ion_types[1].symbol,
             "max_fragments": self.max_fragments,
+            "min_mz": self.min_fragment_mz,
+            "max_mz": self.max_fragment_mz,
         }
 
     def predict_ms2_spectra(
@@ -601,8 +607,6 @@ class SpectralLibGenerator:
         modification_df: pl.DataFrame,
         precursor_df: pl.DataFrame,
         prefix_mass_container: PrefixMassArrayContainer,
-        min_fragment_mz: float = 200,
-        max_fragment_mz: float = 1800,
         progress: ProgressTracker = None,
         save_dir: Union[str, Path] = None,
         precursor_chunk_size: int = None,
@@ -643,8 +647,8 @@ class SpectralLibGenerator:
                     precursor_df=precursor_df,
                     prefix_mass_container=prefix_mass_container,
                     batch_size=batch_size,
-                    detectable_min_mz=min_fragment_mz,
-                    detectable_max_mz=max_fragment_mz,
+                    detectable_min_mz=self.min_fragment_mz,
+                    detectable_max_mz=self.max_fragment_mz,
                     progress=ms2_progress,
                 )
             else:
@@ -656,8 +660,8 @@ class SpectralLibGenerator:
                     save_dir=save_dir,
                     batch_size=batch_size,
                     chunk_size=precursor_chunk_size,
-                    detectable_min_mz=min_fragment_mz,
-                    detectable_max_mz=max_fragment_mz,
+                    detectable_min_mz=self.min_fragment_mz,
+                    detectable_max_mz=self.max_fragment_mz,
                     progress=ms2_progress,
                 )
             ms2_progress.complete()
