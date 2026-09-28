@@ -7,6 +7,8 @@ import numpy as np
 from delpi.utils.fdr import calculate_q_value
 from delpi.search.protein_group_mapping import protein_group_mapping
 
+PROTEIN_SCORE_TOP_N = 2
+
 
 class FDRAnalyzer:
     def __init__(
@@ -139,9 +141,8 @@ class FDRAnalyzer:
                     .drop("_decoy_protein_group", "_decoy_master_protein")
                 )
 
-            g_pmsm_df = self._update_q_values(
+            g_pmsm_df = self._update_protein_group_q_values(
                 g_pmsm_df,
-                group_keys=["protein_group", "is_decoy"],
                 out_column="global_protein_group_q_value",
                 target_to_decoy_size_ratio=1.0,
             )
@@ -182,9 +183,8 @@ class FDRAnalyzer:
                 pl.exclude("protein_group", "master_protein")
             ).join(pg_df_dedup, on="peptide_index", how="left")
 
-            g_pmsm_df = self._update_q_values(
+            g_pmsm_df = self._update_protein_group_q_values(
                 g_pmsm_df,
-                group_keys=["protein_group", "is_decoy"],
                 out_column="global_protein_group_q_value",
                 target_to_decoy_size_ratio=1.0,
             )
@@ -250,9 +250,8 @@ class FDRAnalyzer:
 
         if "protein_group" in pmsm_df.columns:
             # Calculate protein group-level Q-values
-            pmsm_df = self._update_q_values(
+            pmsm_df = self._update_protein_group_q_values(
                 pmsm_df,
-                group_keys=["protein_group", "is_decoy"],
                 out_column="protein_group_q_value",
                 target_to_decoy_size_ratio=1.0,
             )
@@ -275,8 +274,17 @@ class FDRAnalyzer:
         if pair_df.is_empty():
             return confident_pmsm_df
 
-        protein_score_df = pair_df.group_by(["protein_index", "is_decoy"]).agg(
-            pl.col("score").max().alias("protein_score")
+        protein_score_df = (
+            pair_df.group_by(["protein_index", "is_decoy", inference_column])
+            .agg(pl.col("score").max())
+            .group_by(["protein_index", "is_decoy"])
+            .agg(
+                pl.col("score")
+                .sort(descending=True)
+                .head(PROTEIN_SCORE_TOP_N)
+                .sum()
+                .alias("protein_score")
+            )
         )
 
         competition_df = (
@@ -344,6 +352,49 @@ class FDRAnalyzer:
         pmsm_df = pl.concat(dfs, how="vertical")
 
         return pmsm_df
+
+    @staticmethod
+    def _get_protein_group_score_df(pmsm_df: pl.DataFrame) -> pl.DataFrame:
+        peptide_score_df = (
+            pmsm_df.select(
+                pl.col("protein_group", "is_decoy", "peptide_index", "score")
+            )
+            .filter(
+                pl.col("protein_group").is_not_null()
+                & pl.col("peptide_index").is_not_null()
+            )
+            .group_by(["protein_group", "is_decoy", "peptide_index"])
+            .agg(pl.col("score").max())
+        )
+
+        return peptide_score_df.group_by(["protein_group", "is_decoy"]).agg(
+            pl.col("score")
+            .sort(descending=True)
+            .head(PROTEIN_SCORE_TOP_N)
+            .sum()
+            .alias("score")
+        )
+
+    def _update_protein_group_q_values(
+        self,
+        pmsm_df: pl.DataFrame,
+        out_column: str,
+        target_to_decoy_size_ratio: float,
+    ) -> pl.DataFrame:
+        protein_group_score_df = self._get_protein_group_score_df(pmsm_df)
+        protein_group_score_df = calculate_q_value(
+            protein_group_score_df,
+            target_to_decoy_size_ratio=target_to_decoy_size_ratio,
+            out_column=out_column,
+        )
+
+        return pmsm_df.join(
+            protein_group_score_df.select(
+                pl.col("protein_group", "is_decoy", out_column)
+            ),
+            on=["protein_group", "is_decoy"],
+            how="left",
+        )
 
     def _update_q_values(
         self,
