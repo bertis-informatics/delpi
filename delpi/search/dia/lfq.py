@@ -100,9 +100,9 @@ class LabelFreeQuantifier:
     def _quantify_dia(
         self,
         pmsm_df: pl.DataFrame,
-        target_fragments: int = 9,
+        target_fragments: int = 3,
         min_quant_fragments: int = 3,
-        max_fragments: int = 12,
+        max_fragments: int = 3,
         corr_thresh: float = 0.8,
         min_interference_runs: int = 3,
         interference_min_log2_fold: float = 3.0,

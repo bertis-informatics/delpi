@@ -54,8 +54,8 @@ _PLOT_N_BINS = 10
 @dataclass
 class RTBootstrapConfig:
     seed: int = 1226
-    hard_limit: int = 1_000_000
-    min_window_frac: float = 0.1
+    hard_limit: int = 10_000_000
+    min_window_frac: float = 0.25
     q_value_cutoff: float = 0.05
     min_unique_anchors: int = 300
     min_anchors_best_effort: int = 150
@@ -335,7 +335,7 @@ class DIARTBootstrapCalibrator:
             )
 
         win_indices = np.random.RandomState(self.cfg.seed).permutation(num_wins)
-        min_windows = max(int(self.cfg.min_window_frac * num_wins), 2)
+        min_windows = max(int(self.cfg.min_window_frac * num_wins), 3)
 
         cumulative_rounds: list[pl.DataFrame] = []
         n_windows, n_evaluated = 0, 0
@@ -421,9 +421,19 @@ class DIARTBootstrapCalibrator:
                 )
                 return result
 
-        reason = last_diag.get(
-            "reason", "budget_or_windows_exhausted_without_valid_fit"
-        )
+        if n_windows == 0:
+            reason = "no_windows_processed"
+            last_diag = {"reason": reason}
+        elif not cumulative_rounds:
+            reason = "no_matches_found"
+            last_diag = {"reason": reason}
+        elif n_unique_anchors < self.cfg.min_anchors_best_effort:
+            reason = "insufficient_qualified_anchors"
+            last_diag = {"reason": reason}
+        else:
+            reason = last_diag.get(
+                "reason", "budget_or_windows_exhausted_without_valid_fit"
+            )
         return self._fallback_result(
             broad_calibrator,
             reason,
