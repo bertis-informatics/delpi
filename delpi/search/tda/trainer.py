@@ -1,5 +1,4 @@
 from pathlib import Path
-from typing import Tuple
 
 import numpy as np
 import torch
@@ -8,7 +7,7 @@ from lightning.pytorch.callbacks.early_stopping import EarlyStopping
 from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.trainer import Trainer
 from lightning.pytorch.loggers import CSVLogger
-from torch.utils.data import DataLoader, TensorDataset, random_split
+from torch.utils.data import DataLoader, TensorDataset
 
 from delpi.search.tda.classfier import TargetDecoyClassifier
 from delpi.utils.down_sampler import DownsampleSampler
@@ -49,6 +48,7 @@ class TargetDecoyTrainer:
         self,
         model_version: str,
         train_dataset: TensorDataset,
+        val_dataset: TensorDataset,
         output_dir: Path,
         device: torch.device,
     ) -> np.ndarray:
@@ -57,7 +57,8 @@ class TargetDecoyTrainer:
 
         Args:
             train_dataset: Training dataset
-            model_log_dir: Directory to save model logs
+            val_dataset: Group-disjoint validation dataset
+            output_dir: Directory to save model logs
             device: PyTorch device for training
 
         Returns:
@@ -69,24 +70,22 @@ class TargetDecoyTrainer:
             else 4
         )
 
-        # Split training data
-        train_ds, val_ds = self._split_training_data(train_dataset)
         sampler = DownsampleSampler(
-            train_ds,
+            train_dataset,
             n=self.training_params["max_train_samples_per_epoch"],
             seed=self.training_params["random_seed"],
         )
 
         # Create data loaders
         train_loader = DataLoader(
-            train_ds,
+            train_dataset,
             batch_size=self.training_params["batch_size"],
             sampler=sampler,
             num_workers=num_workers,
             persistent_workers=(num_workers > 0),
         )
         val_loader = DataLoader(
-            val_ds,
+            val_dataset,
             shuffle=False,
             batch_size=self.training_params["batch_size"],
             num_workers=num_workers,
@@ -123,26 +122,6 @@ class TargetDecoyTrainer:
         return TargetDecoyClassifier.load_from_checkpoint(
             self.best_model_path,
         ).eval()
-
-    def _split_training_data(
-        self, train_dataset: TensorDataset
-    ) -> Tuple[TensorDataset, TensorDataset]:
-        """Split training dataset into train and validation sets."""
-
-        train_split = self.training_params["train_split"]
-        n_trains = len(train_dataset)
-        if n_trains * (1 - train_split) > self.training_params["max_val_samples"]:
-            split_lens = [
-                n_trains - self.training_params["max_val_samples"],
-                self.training_params["max_val_samples"],
-            ]
-        else:
-            split_lens = [train_split, 1 - train_split]
-
-        generator = torch.Generator()
-        if self.training_params["random_seed"] is not None:
-            generator = generator.manual_seed(self.training_params["random_seed"])
-        return random_split(train_dataset, split_lens, generator=generator)
 
     def _create_model(self) -> TargetDecoyClassifier:
         """Create a target-decoy classifier model."""

@@ -23,7 +23,7 @@ from torch.utils.data import TensorDataset
 from delpi.database.peptide_database import PeptideDatabase
 from delpi.search.result_aggregator import ResultsAggregator
 from delpi.search.result_manager import ResultManager
-from delpi.search.tda.trainer import TargetDecoyTrainer
+from delpi.search.tda.trainer import DEFAULT_TRAINING_PARAMS, TargetDecoyTrainer
 from delpi.constants import (
     DEFAULT_Q_VALUE_CUTOFF,
     TDA_MAX_TRAIN_SIZE,
@@ -76,6 +76,7 @@ class TDAProcessor:
         group_key: str,
         training_params: dict = None,
         pass_label: str = "first",
+        model_params: dict = None,
     ) -> pl.DataFrame:
         """Cross-run TDA across multiple LC-MS runs (2-fold CV).
 
@@ -113,6 +114,7 @@ class TDAProcessor:
             feature_fn,
             fold_label="f0",
             training_params=training_params,
+            model_params=model_params,
             model_version_prefix=model_version_prefix,
         )
         # Fold B trains → score Fold A
@@ -122,6 +124,7 @@ class TDAProcessor:
             feature_fn,
             fold_label="f1",
             training_params=training_params,
+            model_params=model_params,
             model_version_prefix=model_version_prefix,
         )
 
@@ -156,20 +159,33 @@ class TDAProcessor:
         fold_label: str,
         training_params: dict = None,
         model_version_prefix: str = "global_tda",
+        model_params: dict = None,
     ) -> np.ndarray:
         """Train on *train_fold*, score *test_fold*.
 
         When ``n_ensemble > 1``, bootstraps K models from *train_fold*
         (after subsampling) and averages their logits.
         """
-        train_df = self._subsample_train(train_fold)
+        train_df = self._subsample_train(train_fold, level=self.split_level)
 
         if self.n_ensemble <= 1:
-            train_dataset = self._build_tensor_dataset(train_df, feature_fn)
+            fit_df, val_df = self._split_train_val(
+                train_df,
+                level=self.split_level,
+                train_frac=self._training_param(training_params, "train_split"),
+                max_val_samples=self._training_param(
+                    training_params, "max_val_samples"
+                ),
+                seed=self._training_param(training_params, "random_seed"),
+            )
+            train_dataset = self._build_tensor_dataset(fit_df, feature_fn)
+            val_dataset = self._build_tensor_dataset(val_df, feature_fn)
             model = self._train_model(
-                train_dataset,
+                train_dataset=train_dataset,
+                val_dataset=val_dataset,
                 model_version=f"{model_version_prefix}_{fold_label}",
                 training_params=training_params,
+                model_params=model_params,
             )
             return self._score(test_fold, model, feature_fn)
 
@@ -179,6 +195,7 @@ class TDAProcessor:
             feature_fn,
             fold_label=fold_label,
             training_params=training_params,
+            model_params=model_params,
             model_version_prefix=model_version_prefix,
         )
 
@@ -227,6 +244,25 @@ class TDAProcessor:
     # ==================================================================
 
     @staticmethod
+    def _training_param(training_params: dict | None, name: str):
+        if training_params and name in training_params:
+            return training_params[name]
+        return DEFAULT_TRAINING_PARAMS[name]
+
+    @staticmethod
+    def _split_group_column(level: SplitLevel) -> str | None:
+        if level == "pmsm":
+            return None
+        if level == "precursor":
+            return "precursor_index"
+        if level == "peptide":
+            return "peptide_index"
+        raise ValueError(
+            f"Unknown split level: {level!r}. "
+            "Expected one of 'pmsm', 'precursor', 'peptide'."
+        )
+
+    @staticmethod
     def _split_pmsm_df(
         pmsm_df: pl.DataFrame,
         level: SplitLevel = "pmsm",
@@ -248,22 +284,13 @@ class TDAProcessor:
         seed
             RNG seed for the shuffle.
         """
-        if level == "pmsm":
+        group_col = TDAProcessor._split_group_column(level)
+        if group_col is None:
             shuffled = pmsm_df.sample(
                 fraction=1.0, with_replacement=False, shuffle=True, seed=seed
             )
             mid = shuffled.shape[0] // 2
             return shuffled.head(mid), shuffled.slice(mid)
-
-        if level == "precursor":
-            group_col = "precursor_index"
-        elif level == "peptide":
-            group_col = "peptide_index"
-        else:
-            raise ValueError(
-                f"Unknown split level: {level!r}. "
-                "Expected one of 'pmsm', 'precursor', 'peptide'."
-            )
 
         # Sort before shuffle: unique() returns rows in a non-deterministic
         # order, so we canonicalise first to make the seeded shuffle reproducible.
@@ -287,12 +314,90 @@ class TDAProcessor:
         return fold_a_df, fold_b_df
 
     @staticmethod
-    def _subsample_train(train_df: pl.DataFrame) -> pl.DataFrame:
-        """Subsample high-scoring PmSMs per precursor when dataset is too large."""
-        if train_df.shape[0] > TDA_MAX_TRAIN_SIZE:
-            train_df = train_df.sample(
-                n=TDA_MAX_TRAIN_SIZE, with_replacement=False, shuffle=True, seed=1221
+    def _split_train_val(
+        train_df: pl.DataFrame,
+        level: SplitLevel,
+        train_frac: float = 0.8,
+        max_val_samples: int | None = None,
+        seed: int | None = 928,
+    ) -> Tuple[pl.DataFrame, pl.DataFrame]:
+        """Split training rows while keeping the requested groups disjoint."""
+        if not 0 < train_frac < 1:
+            raise ValueError(f"train_frac must be between 0 and 1, got {train_frac}")
+        if len(train_df) < 2:
+            raise ValueError(
+                "At least two rows are required for train/validation split"
             )
+
+        target_val_rows = max(1, round(len(train_df) * (1 - train_frac)))
+        if max_val_samples is not None:
+            target_val_rows = min(target_val_rows, max_val_samples)
+        target_val_rows = min(target_val_rows, len(train_df) - 1)
+
+        group_col = TDAProcessor._split_group_column(level)
+        if group_col is None:
+            shuffled = train_df.sample(
+                fraction=1.0,
+                with_replacement=False,
+                shuffle=True,
+                seed=seed,
+            )
+            return shuffled.slice(target_val_rows), shuffled.head(target_val_rows)
+
+        groups = (
+            train_df.group_by(group_col)
+            .len(name="_group_size")
+            .sort(group_col)
+            .sample(
+                fraction=1.0,
+                with_replacement=False,
+                shuffle=True,
+                seed=seed,
+            )
+        )
+        if len(groups) < 2:
+            raise ValueError(
+                f"At least two {group_col} groups are required for a disjoint "
+                "train/validation split"
+            )
+
+        cumulative_rows = groups["_group_size"].to_numpy().cumsum()[:-1]
+        n_val_groups = int(np.abs(cumulative_rows - target_val_rows).argmin()) + 1
+        val_group_ids = groups.head(n_val_groups).select(group_col)
+        val_df = train_df.join(
+            val_group_ids, on=group_col, how="inner", maintain_order="left"
+        )
+        fit_df = train_df.join(
+            val_group_ids, on=group_col, how="anti", maintain_order="left"
+        )
+        return fit_df, val_df
+
+    @staticmethod
+    def _subsample_train(
+        train_df: pl.DataFrame,
+        level: SplitLevel = "pmsm",
+        seed: int = 1221,
+    ) -> pl.DataFrame:
+        """Subsample rows with inverse group-frequency weights."""
+        if train_df.shape[0] > TDA_MAX_TRAIN_SIZE:
+            group_col = TDAProcessor._split_group_column(level)
+            if group_col is None:
+                train_df = train_df.sample(
+                    n=TDA_MAX_TRAIN_SIZE,
+                    with_replacement=False,
+                    shuffle=True,
+                    seed=seed,
+                )
+            else:
+                group_counts = train_df.select(
+                    pl.len().over(group_col).alias("_group_count")
+                )["_group_count"].to_numpy()
+                rng = np.random.default_rng(seed)
+                priorities = rng.exponential(scale=group_counts)
+                selected = np.argpartition(priorities, TDA_MAX_TRAIN_SIZE - 1)[
+                    :TDA_MAX_TRAIN_SIZE
+                ]
+                train_df = train_df[selected.tolist()]
         return train_df.sort(["run_index", "pmsm_index"])
 
     @staticmethod
@@ -309,6 +414,7 @@ class TDAProcessor:
     def _train_model(
         self,
         train_dataset: TensorDataset,
+        val_dataset: TensorDataset,
         model_version: str,
         training_params: dict = None,
         model_params: dict = None,
@@ -326,9 +432,15 @@ class TDAProcessor:
         trainer = TargetDecoyTrainer(
             model_params=model_params, training_params=training_params
         )
+        if val_dataset is None:
+            raise ValueError(
+                "val_dataset is required; split the source DataFrame with "
+                "_split_train_val before building tensor datasets"
+            )
         trainer.train(
             model_version=model_version,
             train_dataset=train_dataset,
+            val_dataset=val_dataset,
             output_dir=self.output_dir,
             device=self.device,
         )
@@ -352,6 +464,7 @@ class TDAProcessor:
         fold_label: str = "",
         training_params: dict = None,
         model_version_prefix: str = "global_tda",
+        model_params: dict = None,
     ) -> np.ndarray:
         """Train K models via bootstrap from *train_df* and average logits."""
         test_feature_arr = feature_fn(test_df)
@@ -365,12 +478,24 @@ class TDAProcessor:
                 n_train, size=subset_size, replace=False
             )
             subset_df = train_df[indices.tolist()]
-            train_dataset = self._build_tensor_dataset(subset_df, feature_fn)
+            fit_df, val_df = self._split_train_val(
+                subset_df,
+                level=self.split_level,
+                train_frac=self._training_param(training_params, "train_split"),
+                max_val_samples=self._training_param(
+                    training_params, "max_val_samples"
+                ),
+                seed=seed,
+            )
+            train_dataset = self._build_tensor_dataset(fit_df, feature_fn)
+            val_dataset = self._build_tensor_dataset(val_df, feature_fn)
 
             model = self._train_model(
-                train_dataset,
+                train_dataset=train_dataset,
+                val_dataset=val_dataset,
                 model_version=f"{model_version_prefix}_{fold_label}_e{k}",
                 training_params=training_params,
+                model_params=model_params,
                 seed=seed,
             )
             scores = self._batched_inference(model, test_feature_arr, self.batch_size)
