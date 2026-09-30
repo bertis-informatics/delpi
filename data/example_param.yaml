@@ -67,6 +67,13 @@ digest:
   # Allow removal of methionine at the start of a protein.
   n_term_methionine_excision: true
 
+  # Instead of "enzyme" above, you may specify custom cleavage rules.
+  # "enzyme" and these custom rules are mutually exclusive.
+  # cut_after: [K, R]        # Cleave after these residues (K| and R|)
+  # cut_before: []           # Cleave before these residues (|D, etc.)
+  # exclude_before: [P]      # Suppress cleavage when followed by these residues
+
+
 
 # --- Peptide modifications ---
 

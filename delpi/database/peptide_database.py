@@ -48,7 +48,10 @@ class PeptideDatabase:
     def build(
         self,
         fasta_file: str,
-        enzyme: str = "trypsin",
+        enzyme: str = None,
+        cut_after: Sequence[str] = None,
+        cut_before: Sequence[str] = None,
+        exclude_before: Sequence[str] = None,
         min_len: int = 7,
         max_len: int = 30,
         max_missed_cleavages: int = 1,
@@ -88,9 +91,13 @@ class PeptideDatabase:
         parser = FastaParser(fasta_file)
         sequence_df = parser.parse().with_row_index("protein_index")
 
-        # digest FASTA sequences
+        # digest FASTA sequences: either a predefined 'enzyme' preset, or
+        # custom cut_after/cut_before/exclude_before rules (see Enzyme)
         enzyme_ = Enzyme(
             name=enzyme,
+            cut_after=cut_after,
+            cut_before=cut_before,
+            exclude_before=exclude_before,
             min_len=min_len,
             max_len=max_len,
             n_term_methionine_excision=n_term_methionine_excision,

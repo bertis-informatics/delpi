@@ -48,7 +48,10 @@ def build_database(
     try:
         db = PeptideDatabase().build(
             fasta_file=search_config["fasta_file"],
-            enzyme=search_config["digest"]["enzyme"],
+            enzyme=search_config["digest"].get("enzyme"),
+            cut_after=search_config["digest"].get("cut_after"),
+            cut_before=search_config["digest"].get("cut_before"),
+            exclude_before=search_config["digest"].get("exclude_before"),
             min_len=search_config["digest"]["min_len"],
             max_len=search_config["digest"]["max_len"],
             max_missed_cleavages=search_config["digest"]["max_missed_cleavages"],

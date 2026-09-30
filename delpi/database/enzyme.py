@@ -1,4 +1,3 @@
-import re
 import multiprocessing as mp
 
 import polars as pl
@@ -12,7 +11,25 @@ PEPTIDE_C_TERM = AminoAcid.peptide_c_term.residue
 
 
 class Enzyme:
+    """Protein digestion rules.
 
+    Cleavage sites are computed directly from three residue sets rather than
+    a combined regex pattern:
+
+    - ``cut_after``: cleave immediately after any of these residues.
+    - ``cut_before``: cleave immediately before any of these residues.
+    - ``exclude_before``: suppress a cleavage site when the residue right
+      after the site is one of these (e.g. the trypsin/proline exception:
+      ``cut_after=[K, R], exclude_before=[P]``).
+
+    A predefined enzyme ``name`` (see ``name_to_rule``) is just a preset
+    that is expanded into the same three sets; ``name`` and custom rules are
+    mutually exclusive.
+    """
+
+    # Legacy combined regex patterns. Kept only for
+    # FastaParser.generate_decoy_sequence_df (pseudo-reverse decoy
+    # generation), which is independent of the cleavage-rule digestion below.
     name_to_pattern = {
         "trypsin": r"([KR])",
         "chymotrypsin": r"([FLY](?=[^P]))|(W(?=[^MP]))|(M(?=[^PY]))|(H(?=[^DMPW]))",
@@ -21,33 +38,96 @@ class Enzyme:
         "asp-n": r"\w(?=D)",
     }
 
+    # Predefined enzymes expressed as (cut_after, cut_before, exclude_before).
+    name_to_rule = {
+        "trypsin": (("K", "R"), (), ()),
+        "lys-c": (("K",), (), ()),
+        "glu-c": (("E",), (), ()),
+        "asp-n": ((), ("D",), ()),
+    }
+
     def __init__(
         self,
-        name="trypsin",
+        name=None,
+        cut_after=None,
+        cut_before=None,
+        exclude_before=None,
         min_len=7,
         max_len=30,
         n_term_methionine_excision=True,
         max_missed_cleavages=1,
     ):
 
-        assert name in self.name_to_pattern
+        has_custom_rule = any(
+            arg is not None for arg in (cut_after, cut_before, exclude_before)
+        )
+        if name is not None and has_custom_rule:
+            raise ValueError(
+                "Specify either a predefined enzyme 'name' or custom cleavage "
+                "rules (cut_after/cut_before/exclude_before), not both."
+            )
 
-        self.name = name
+        if has_custom_rule:
+            self.name = None
+        else:
+            name = name or "trypsin"
+            if name not in self.name_to_rule:
+                raise ValueError(
+                    f"Unknown enzyme '{name}'. Supported presets: "
+                    f"{sorted(self.name_to_rule)}. Alternatively, specify "
+                    "custom cut_after/cut_before/exclude_before rules."
+                )
+            cut_after, cut_before, exclude_before = self.name_to_rule[name]
+            self.name = name
+
+        self.cut_after = self._validate_residues(cut_after, "cut_after")
+        self.cut_before = self._validate_residues(cut_before, "cut_before")
+        self.exclude_before = self._validate_residues(exclude_before, "exclude_before")
+
+        if not self.cut_after and not self.cut_before:
+            raise ValueError(
+                "At least one of 'cut_after' or 'cut_before' must be non-empty."
+            )
+
         self.min_len = min_len
         self.max_len = max_len
         self.n_term_methionine_excision = n_term_methionine_excision
-        self.cleavage_pattern = re.compile(self.name_to_pattern[name])
         self.max_missed_cleavages = max_missed_cleavages
+
+    @staticmethod
+    def _validate_residues(residues, field_name):
+        if not residues:
+            return frozenset()
+        invalid = [
+            r
+            for r in residues
+            if not (
+                isinstance(r, str) and len(r) == 1 and AminoAcid.is_standard_residue(r)
+            )
+        ]
+        if invalid:
+            raise ValueError(
+                f"Invalid residue(s) in '{field_name}': {invalid}. Must be "
+                f"single-letter standard amino acid codes: "
+                f"{AminoAcid.standard_amino_acid_chars}"
+            )
+        return frozenset(residues)
 
     @property
     def param_dict(self):
-        return {
-            "enzyme": self.name,
+        param_dict = {
             "min_len": self.min_len,
             "max_len": self.max_len,
             "max_missed_cleavages": self.max_missed_cleavages,
             "n_term_methionine_excision": self.n_term_methionine_excision,
         }
+        if self.name is not None:
+            param_dict["enzyme"] = self.name
+        else:
+            param_dict["cut_after"] = sorted(self.cut_after)
+            param_dict["cut_before"] = sorted(self.cut_before)
+            param_dict["exclude_before"] = sorted(self.exclude_before)
+        return param_dict
 
     @staticmethod
     def pad_peptide_terminals(seq):
@@ -59,21 +139,39 @@ class Enzyme:
             return PEPTIDE_N_TERM + seq
         return PEPTIDE_N_TERM + seq + PEPTIDE_C_TERM
 
+    def cleavage_positions(self, protein_sequence):
+        """Sorted, de-duplicated indices right before which a cleavage occurs.
+
+        A position ``p`` splits the sequence as ``seq[:p] | seq[p:]``. Only
+        internal positions (``0 < p < len(seq)``) are considered.
+        """
+
+        seq_len = len(protein_sequence)
+        positions = set()
+
+        if self.cut_after:
+            positions.update(
+                i + 1
+                for i in range(seq_len - 1)
+                if protein_sequence[i] in self.cut_after
+            )
+        if self.cut_before:
+            positions.update(
+                i for i in range(1, seq_len) if protein_sequence[i] in self.cut_before
+            )
+        if self.exclude_before:
+            positions = {
+                p for p in positions if protein_sequence[p] not in self.exclude_before
+            }
+
+        return sorted(positions)
+
     def digest_protein(self, protein_sequence):
 
-        pattern = self.cleavage_pattern
         max_missed_cleavages = self.max_missed_cleavages
         seq_len = len(protein_sequence)
 
-        # Search with endpos. because there could be a zero-length peptide, when sequence ends with 'K' or 'R'
-        cutpos = (
-            [0]
-            + [
-                m.start() + 1
-                for m in pattern.finditer(protein_sequence, endpos=seq_len - 1)
-            ]
-            + [seq_len]
-        )
+        cutpos = [0] + self.cleavage_positions(protein_sequence) + [seq_len]
         peptides = [
             protein_sequence[cutpos[i] : cutpos[i + 1]] for i in range(len(cutpos) - 1)
         ]
@@ -119,11 +217,10 @@ class Enzyme:
         n_proc = mp.cpu_count() // 2
         if use_multiprocessing and n_proc > 1 and sequence_df.shape[0] > 10000:
             from delpi.utils.mp import get_multiprocessing_context
+
             # Use 'spawn' context to avoid deadlocks with multi-threaded environments
             with get_multiprocessing_context().Pool(processes=n_proc) as pool:
-                digest_results = pool.map(
-                    self.digest_protein, sequence_df["sequence"]
-                )
+                digest_results = pool.map(self.digest_protein, sequence_df["sequence"])
         else:
             digest_results = [self.digest_protein(s) for s in sequence_df["sequence"]]
 
