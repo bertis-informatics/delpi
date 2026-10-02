@@ -402,7 +402,7 @@ class BootstrapRTCalibrator(LinearProjectionCalibrator):
 
         residual = y_train - estimator.predict(x_train)
         center = float(np.median(residual[inlier_mask]))
-        required_half_width = float(np.quantile(np.abs(residual - center), 0.95))
+        required_half_width = float(np.quantile(np.abs(residual - center), 0.99))
         # min_rt_tol_in_seconds/max_rt_tol_in_seconds act as a hard lower/
         # upper bound on the search half-width, regardless of how wide the
         # observed residual spread is.
