@@ -139,16 +139,36 @@ class Enzyme:
             pl.Series(values=seq_indices, name="protein_index", dtype=pl.UInt32)
         )
 
+        # Peptide-terminal PTMs also match protein-terminal markers. Collapse
+        # by the amino-acid sequence, preferring protein eligibility at each end.
         peptide_df = (
             peptide_df.sort(pl.col("peptide", "protein_index"))
-            .group_by(["peptide"], maintain_order=True)
-            .agg(pl.col("protein_index"))
-            .with_columns(
-                # (pl.col('peptide').str.head(1) == PROT_N_TERM_AA).alias('protein_n_term'),
-                # (pl.col('peptide').str.tail(1) == PROT_C_TERM_AA).alias('protein_c_term'),
-                (pl.col("peptide").str.len_chars() - 2)
+            .group_by(
+                pl.col("peptide")
+                .str.slice(1, pl.col("peptide").str.len_chars() - 2)
+                .alias("_sequence"),
+                maintain_order=True,
+            )
+            .agg(
+                pl.col("protein_index").unique().sort(),
+                pl.when(pl.col("peptide").str.starts_with(PROTEIN_N_TERM).any())
+                .then(pl.lit(PROTEIN_N_TERM))
+                .otherwise(pl.lit(PEPTIDE_N_TERM))
+                .alias("_n_term"),
+                pl.when(pl.col("peptide").str.ends_with(PROTEIN_C_TERM).any())
+                .then(pl.lit(PROTEIN_C_TERM))
+                .otherwise(pl.lit(PEPTIDE_C_TERM))
+                .alias("_c_term"),
+            )
+            .select(
+                (pl.col("_n_term") + pl.col("_sequence") + pl.col("_c_term")).alias(
+                    "peptide"
+                ),
+                pl.col("protein_index"),
+                pl.col("_sequence")
+                .str.len_chars()
                 .cast(pl.UInt16)
-                .alias("sequence_length")
+                .alias("sequence_length"),
             )
         )
 
