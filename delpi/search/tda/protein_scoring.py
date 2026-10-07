@@ -180,18 +180,13 @@ def score_proteins(
     # Keep sklearn out of the default heuristic scoring path.
     from sklearn.linear_model import LogisticRegression
     from sklearn.model_selection import StratifiedKFold
-    from sklearn.pipeline import make_pipeline
-    from sklearn.preprocessing import StandardScaler
 
     X = feature_df.select(PROTEIN_FEATURE_COLUMNS).to_numpy().astype(np.float64)
     X = np.nan_to_num(X, nan=-10.0, posinf=-10.0, neginf=-10.0)
     scores = np.empty(len(feature_df), dtype=np.float64)
     splitter = StratifiedKFold(n_splits=2, shuffle=True, random_state=random_state)
     for train_idx, score_idx in splitter.split(X, y):
-        model = make_pipeline(
-            StandardScaler(),
-            LogisticRegression(max_iter=1000, random_state=random_state),
-        )
+        model = LogisticRegression(random_state=random_state)
         model.fit(X[train_idx], y[train_idx])
         # y=0 is target: equivalent to 1 - P(decoy), without cancellation.
         scores[score_idx] = model.predict_proba(X[score_idx])[:, 0]
