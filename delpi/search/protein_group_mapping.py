@@ -601,7 +601,7 @@ def infer_protein_groups(
 
 
 # ---------------------------------------------------------------------------
-# Public compatibility wrapper  (used by FDRAnalyzer)
+# Public peptide-to-group mapping wrapper
 # ---------------------------------------------------------------------------
 
 
@@ -614,7 +614,7 @@ def protein_group_mapping(
 ) -> pl.DataFrame:
     """Map confident peptide identifications to protein groups.
 
-    This is the public API consumed by :class:`FDRAnalyzer`.  It processes
+    This is the public API consumed by the protein grouping stage. It processes
     target and decoy peptides independently (preserving the existing
     target/decoy split behaviour) and returns a flat DataFrame with one row
     per **(peptide_index, group_id)** edge so that shared peptides correctly

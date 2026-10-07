@@ -199,6 +199,27 @@ Create a YAML configuration file based on the [example template](data/example_pa
 
 **Optional fields:**
 
+`protein_scoring` selects the score used by the protein picker and by global
+and run-specific protein-group FDR:
+
+| Value | Scoring method |
+|-------|----------------|
+| `best_peptide_per_protein` | Highest peptide score for each protein or group. |
+| `top_two_combined` (default) | Sum of the best two distinct stripped-peptide scores; a singleton keeps its one score. |
+| `discriminative_rescoring` | Two-fold out-of-fold logistic regression using run, precursor and peptide counts plus PmSM score statistics. |
+
+For example, set `protein_scoring: discriminative_rescoring` to try ML scoring.
+The ML method fits feature scaling on each training fold and returns target
+probabilities. It uses all run-level observations for global scoring and fits
+separately for each run's FDR. If fewer than two targets or two decoys are
+available, it logs a warning and falls back to `top_two_combined`.
+
+The search workflow calculates global precursor confidence, assigns protein
+groups, and attaches `global_protein_group_score` and per-run
+`protein_group_score` before FDR analysis. `FDRAnalyzer` only calculates
+q-values from the supplied data; its analysis methods accept `score_column`
+for precursor/peptide FDR and `protein_group_score_column` for group FDR.
+
 Digestion and modification parameters can be adjusted for your experimental setup. Modifications can be specified either by their [PSI-MS controlled vocabulary names](https://www.unimod.org/fields.html) (e.g., `Oxidation`, `Carbamidomethyl`) or by their UniMod accession numbers in the `UniMod:XX` format (e.g., `UniMod:35`, `UniMod:4`).
 
 
@@ -272,4 +293,3 @@ DelPi is freely available under the [MIT License](LICENSE.txt).
 ## Contact
 
 For questions, bug reports, or feature requests, please contact **Jungkap Park, Ph.D.** at jungkap.park@bertis.com
-

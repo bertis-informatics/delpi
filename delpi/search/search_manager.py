@@ -42,6 +42,8 @@ from delpi.search.pmsm_assignment import assign_pmsms_across_runs
 from delpi.search.dia.max_lfq import maxlfq
 from delpi.utils.mp import get_multiprocessing_context
 from delpi.database.utils import get_modified_sequence
+from delpi.search.tda.protein_grouping import assign_protein_groups
+from delpi.search.tda.protein_scoring import score_protein_groups
 from delpi.constants import (
     DEFAULT_Q_VALUE_CUTOFF,
     DEFAULT_REPORT_FORMAT,
@@ -450,7 +452,7 @@ class SearchManager:
         predictors. Also persists ``library_confidence.parquet`` so the
         second pass can reuse the first pass's protein grouping and identify
         precursor-run pairs by library + run-specific FDR (see
-        :meth:`perform_global_tda` / :meth:`FDRAnalyzer.perform_global_analysis`).
+        :meth:`_infer_proteins_and_analyze_fdr`).
         """
 
         self.state = SearchState.REFINED_DB_PREP
@@ -659,7 +661,7 @@ class SearchManager:
             refined_db_dir / "library_confidence.parquet"
         )
 
-    def _apply_fdr(
+    def _infer_proteins_and_analyze_fdr(
         self,
         pmsm_df: pl.DataFrame,
         result_aggregator: ResultsAggregator,
@@ -667,21 +669,53 @@ class SearchManager:
         use_protein_picker: bool,
         grouping_type: str,
         run_protein_grouping: bool,
-        library_confidence_df: pl.DataFrame,
+        library_confidence_df: pl.DataFrame | None,
     ) -> pl.DataFrame:
-        """Run FDR control -- a separate concern from scoring/assignment (TDAProcessor)."""
-        fdr = FDRAnalyzer(
-            q_value_cutoff=q_value_cutoff,
-            db_dir=self.get_db_dir(),
-            use_protein_picker=use_protein_picker,
-            grouping_type=grouping_type,
+        """Filter evidence, infer proteins, score groups, then estimate FDR."""
+        fdr = FDRAnalyzer()
+
+        # 1) Global precursor confidence selects evidence for inference.
+        pmsm_df = fdr.calculate_q_value(
+            pmsm_df,
+            group_keys=["precursor_index"],
+            score_column="score",
+            out_column="global_precursor_q_value",
+            target_to_decoy_size_ratio=1.0,
         )
+
+        # 2) Assign groups, or reuse the first pass's target library groups.
+        if run_protein_grouping or library_confidence_df is not None:
+            fasta_id_df = pl.read_parquet(
+                self.get_db_dir() / "sequence_df.parquet",
+                columns=["protein_index", "fasta_id"],
+            )
+            pmsm_df = assign_protein_groups(
+                pmsm_df,
+                fasta_id_df,
+                q_value_cutoff=q_value_cutoff,
+                use_protein_picker=use_protein_picker,
+                grouping_type=grouping_type,
+                protein_scoring=self.search_config.protein_scoring,
+                library_confidence_df=library_confidence_df,
+            )
+
+        # 3) Materialize global and per-run group scores for inspection/FDR.
+        if "protein_group" in pmsm_df.columns:
+            pmsm_df = score_protein_groups(
+                pmsm_df, method=self.search_config.protein_scoring
+            )
+
+        # 4) Estimate confidence using only the supplied score columns.
         pmsm_df = fdr.perform_global_analysis(
             pmsm_df,
-            protein_inference=run_protein_grouping,
-            library_confidence_df=library_confidence_df,
+            score_column="score",
+            protein_group_score_column="global_protein_group_score",
         )
-        pmsm_df = fdr.batch_run_specific_analysis(pmsm_df)
+        pmsm_df = fdr.perform_run_specific_analysis(
+            pmsm_df,
+            score_column="score",
+            protein_group_score_column="protein_group_score",
+        )
         return pmsm_df.join(result_aggregator.get_run_df(), on="run_index", how="left")
 
     def perform_global_tda(
@@ -703,7 +737,7 @@ class SearchManager:
             Only used for the first pass; the second pass instead reuses
             the first pass's target protein grouping (and freshly groups
             decoys) via ``library_confidence.parquet`` — see
-            :meth:`FDRAnalyzer.perform_global_analysis`.
+            :meth:`_infer_proteins_and_analyze_fdr`.
         """
         self.state = state
         logger.info("Performing global target-decoy analysis")
@@ -722,7 +756,7 @@ class SearchManager:
 
         # Second pass: reuse the first pass's target protein grouping
         # (and freshly group decoys) instead of running protein inference
-        # from scratch — see FDRAnalyzer.perform_global_analysis.
+        # from scratch — see _infer_proteins_and_analyze_fdr.
         library_confidence_df = None
         if state == SearchState.SECOND_TDA:
             library_confidence_df = pl.read_parquet(
@@ -767,8 +801,8 @@ class SearchManager:
             result_aggregator.db_dir, pmsm_df
         )
 
-        # 3) FDR control
-        pmsm_df = self._apply_fdr(
+        # 4) Protein inference, group scoring and FDR control
+        pmsm_df = self._infer_proteins_and_analyze_fdr(
             pmsm_df,
             result_aggregator,
             q_value_cutoff,
@@ -1001,7 +1035,7 @@ class SearchManager:
             # MBR-guided second-pass search: global re-scoring against the refined
             # library. Target protein-group membership + library q-values are reused
             # from the first pass and decoys are freshly grouped (see
-            # FDRAnalyzer.perform_global_analysis); the resulting global
+            # _infer_proteins_and_analyze_fdr); the resulting global
             # q-value here is diagnostic only, so results are reported/
             # filtered using the first-pass-derived library q-value instead.
             pmsm_df = self.perform_global_tda(

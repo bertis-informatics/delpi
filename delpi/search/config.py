@@ -8,6 +8,11 @@ from delpi.search.result_manager import ResultManager
 from delpi.database.decoy_generator import DecoyGenerator
 from delpi.utils.yaml_file import load_yaml, save_yaml, resolve_input_files
 from delpi.constants import DEFAULT_Q_VALUE_CUTOFF
+from delpi.search.tda.protein_scoring import (
+    DEFAULT_PROTEIN_SCORING,
+    ProteinScoringMethod,
+    validate_protein_scoring,
+)
 
 SUPPORTED_FILE_TYPES = (".raw", ".mzml", ".mzml.gz", "h5")
 
@@ -35,6 +40,11 @@ class SearchConfig:
     @property
     def q_value_cutoff(self):
         return self.config.get("q_value_cutoff", DEFAULT_Q_VALUE_CUTOFF)
+
+    @property
+    def protein_scoring(self) -> ProteinScoringMethod:
+        """Scoring method shared by the protein picker and protein-group FDR."""
+        return self.config.get("protein_scoring", DEFAULT_PROTEIN_SCORING)
 
     @property
     def acquisition_method(self) -> str:
@@ -106,6 +116,8 @@ class SearchConfig:
                 raise ValueError(
                     f"Missing required parameter '{field}' in configuration"
                 )
+
+        validate_protein_scoring(self.protein_scoring)
 
         # Create output directory
         self.output_dir.mkdir(parents=True, exist_ok=True)

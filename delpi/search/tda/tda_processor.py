@@ -4,7 +4,8 @@ Unified Target-Decoy Analysis Processor
 Cross-run (2-fold CV) PmSM scoring. PmSM assignment and FDR control are
 separate concerns handled by the caller -- see
 :func:`~delpi.search.pmsm_assignment.assign_pmsms_across_runs` and
-:class:`~delpi.search.tda.fdr_analyzer.FDRAnalyzer`, both run on the
+:meth:`~delpi.search.search_manager.SearchManager._infer_proteins_and_analyze_fdr`,
+which orchestrates protein inference, group scoring and FDR on the
 DataFrame returned by :meth:`TDAProcessor.run_global`.
 """
 
@@ -97,7 +98,8 @@ class TDAProcessor:
         `observed_rt`/`is_decoy`/etc.) -- **not yet** assigned or
         FDR-annotated; the caller is expected to run
         :func:`~delpi.search.pmsm_assignment.assign_pmsms_across_runs` and
-        then :class:`~delpi.search.tda.fdr_analyzer.FDRAnalyzer` on the result.
+        then infer/score proteins and estimate FDR via
+        :meth:`~delpi.search.search_manager.SearchManager._infer_proteins_and_analyze_fdr`.
         """
         pmsm_df = self._load_multi_run(result_aggregator, group_key)
         feature_fn = self._make_aggregator_feature_fn(result_aggregator, group_key)
