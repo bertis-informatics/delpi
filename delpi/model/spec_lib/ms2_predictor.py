@@ -1,4 +1,4 @@
-from typing import Dict, List, Self
+from typing import Dict, Self, Sequence
 from pathlib import Path
 
 import numpy as np
@@ -9,6 +9,8 @@ from lightning.pytorch import LightningModule
 import torchmetrics
 from torch.utils.data import DataLoader, Dataset
 
+from delpi.constants import COMMON_NEUTRAL_LOSS_INDEX
+from delpi.lcms.neutral_loss import NeutralLoss
 from delpi.model.spec_lib.block import ResNet1D, BiLSTM, Transformer, Permute
 from delpi.model.pos_encoder import PositionalEncoding
 from delpi.utils.metric import SpectralAngle
@@ -17,19 +19,14 @@ from delpi.utils.scheduler import get_cosine_schedule_with_warmup
 from delpi.model.spec_lib.aa_encoder import MOD_FEATURE_MAP
 
 EPS = 1e-9
-FRAG_TYPE_LIST = [
-    "b_z1",
-    "b_z2",
-    "y_z1",
-    "y_z2",
-    "b_modloss_z1",
-    "b_modloss_z2",
-    "y_modloss_z1",
-    "y_modloss_z2",
-]
 
 
 class Ms2SpectrumPredictor(LightningModule):
+    """Predict four b/y charge channels per neutral loss, in the supplied order.
+
+    The default preserves legacy 8-channel checkpoints and search callers.
+    Pass COMMON_NEUTRAL_LOSSES when training the 16-channel Prospect model.
+    """
 
     def __init__(
         self,
@@ -50,11 +47,34 @@ class Ms2SpectrumPredictor(LightningModule):
         transformer_qkv_bias: bool = True,
         transformer_drop_path_rate: float = 0.0,
         layer_decay: float = 1.0,
+        neutral_losses: Sequence[str] = (
+            NeutralLoss.NO_LOSS.symbol,
+            NeutralLoss.H3O4P.symbol,
+        ),
         *args,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
 
+        neutral_losses = tuple(neutral_losses)
+        if (
+            not neutral_losses
+            or neutral_losses[0] != NeutralLoss.NO_LOSS.symbol
+            or len(set(neutral_losses)) != len(neutral_losses)
+            or any(loss not in COMMON_NEUTRAL_LOSS_INDEX for loss in neutral_losses)
+        ):
+            raise ValueError(
+                "neutral_losses must contain unique DelPi neutral-loss symbols "
+                f"with {NeutralLoss.NO_LOSS.symbol!r} first."
+            )
+        self.neutral_losses = neutral_losses
+        self.num_fragment_channels = 4 * len(neutral_losses)
+        self.fragment_types = [
+            f"{ion_type}{NeutralLoss.get(loss).name}_z{charge}"
+            for loss in neutral_losses
+            for ion_type in ("b", "y")
+            for charge in (1, 2)
+        ]
         self.encoder_type = encoder_type
 
         # Embedding layer
@@ -106,12 +126,13 @@ class Ms2SpectrumPredictor(LightningModule):
             )
 
         # Output layer for fragment intensities
-        # Input: (B, L-2, encoder_output_dim) -> Output: (B, L-2, 8)
+        # Four channels [b_z1, b_z2, y_z1, y_z2] per neutral loss.
+        # Input: (B, L-1, encoder_output_dim) -> (B, L-1, num_fragment_channels)
         self.fragment_predictor = nn.Sequential(
             nn.Linear(encoder_output_dim, 64),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(64, 8),
+            nn.Linear(64, self.num_fragment_channels),
             nn.ReLU(),  # Ensure non-negative intensities
         )
 
@@ -156,10 +177,12 @@ class Ms2SpectrumPredictor(LightningModule):
 
         Args:
             x_aa: Amino acid sequence tensor (B, L+2) where L is peptide length
-            x_mod: Modification tensor (B, max_mod_count, 2) with modification tuples
+            x_mod: Encoded modification features (B, L+2, number of elements)
+            x_meta: Precursor charge, NCE, fragmentation, mass analyzer (B, 4)
 
         Returns:
-            Fragment intensities tensor (B, L-2, 8)
+            Fragment intensities (B, L-1, 4 * len(neutral_losses)), with
+            [b_z1, b_z2, y_z1, y_z2] in each neutral-loss block.
         """
         # Pass through AA and Mod embedding layers
         x_aa_emb = self.aa_embedding(x_aa.to(torch.int32))
@@ -172,8 +195,7 @@ class Ms2SpectrumPredictor(LightningModule):
         # Pass through encoder (both CNN+RNN and Transformer are now Sequential)
         x_emb = self.encoder(x_emb)
 
-        # Remove terminal residues: [B, L+2, D] -> [B, L-2, D]
-        # This assumes the first and last positions are terminal residues
+        # Select one position per cleavage: [B, L+2, D] -> [B, L-1, D].
         x_emb = x_emb[:, 2:-1, :]
 
         # Predict fragment intensities
@@ -181,64 +203,25 @@ class Ms2SpectrumPredictor(LightningModule):
 
         return y_pred
 
-    # def predict_batch(self, batch: Dict[str, torch.Tensor]) -> np.ndarray:
-    #     """_summary_
+    @torch.inference_mode()
+    def predict_batch(self, batch: Dict[str, torch.Tensor]) -> pl.DataFrame:
+        """Return normalized intensities for each precursor and cleavage.
 
-    #     Returns:
-    #         pl.DataFrame: _description_
-    #         ┌──────────┬──────────┬──────────┬──────────┬─────────────────┬────────────────┐
-    #         │ b_z1     ┆ y_z1     ┆ b_z2     ┆ y_z2     ┆ precursor_index ┆ cleavage_index │
-    #         │ ---      ┆ ---      ┆ ---      ┆ ---      ┆ ---             ┆ ---            │
-    #         │ f32      ┆ f32      ┆ f32      ┆ f32      ┆ i64             ┆ u8             │
-    #         ╞══════════╪══════════╪══════════╪══════════╪═════════════════╪════════════════╡
-    #         │ 0.0      ┆ 0.0      ┆ 0.0      ┆ 0.0      ┆ 7               ┆ 0              │
-    #         │ 0.331823 ┆ 0.0      ┆ 0.0      ┆ 0.024395 ┆ 7               ┆ 1              │
-    #         │ …        ┆ …        ┆ …        ┆ …        ┆ …               ┆ …              │
-    #         │ 0.016013 ┆ 0.0      ┆ 0.0      ┆ 0.0      ┆ 1761            ┆ 10             │
-    #         └──────────┴──────────┴──────────┴──────────┴─────────────────┴────────────────┘
-    #     """
-    #     precursor_index_arr = batch["precursor_index"].to(torch.uint32).numpy()
-    #     x_aa = batch["x_aa"].to(device=self.device, non_blocking=True)
-    #     x_mod = batch["x_mod"].to(device=self.device, non_blocking=True)
-    #     x_meta = batch["x_meta"].to(device=self.device, non_blocking=True)
-    #     y_pred = self(x_aa, x_mod, x_meta)
-
-    #     y_pred = y_pred.detach().cpu().numpy()
-
-    #     return precursor_index_arr, y_pred
-
-    def predict_batch(
-        self, batch: Dict[str, torch.Tensor], include_modloss: bool = False
-    ) -> pl.DataFrame:
-        """_summary_
-
-        Returns:
-            pl.DataFrame: _description_
-            ┌──────────┬──────────┬──────────┬──────────┬─────────────────┬────────────────┐
-            │ b_z1     ┆ y_z1     ┆ b_z2     ┆ y_z2     ┆ precursor_index ┆ cleavage_index │
-            │ ---      ┆ ---      ┆ ---      ┆ ---      ┆ ---             ┆ ---            │
-            │ f32      ┆ f32      ┆ f32      ┆ f32      ┆ i64             ┆ u8             │
-            ╞══════════╪══════════╪══════════╪══════════╪═════════════════╪════════════════╡
-            │ 0.0      ┆ 0.0      ┆ 0.0      ┆ 0.0      ┆ 7               ┆ 0              │
-            │ 0.331823 ┆ 0.0      ┆ 0.0      ┆ 0.024395 ┆ 7               ┆ 1              │
-            │ …        ┆ …        ┆ …        ┆ …        ┆ …               ┆ …              │
-            │ 0.016013 ┆ 0.0      ┆ 0.0      ┆ 0.0      ┆ 1761            ┆ 10             │
-            └──────────┴──────────┴──────────┴──────────┴─────────────────┴────────────────┘
+        Columns follow the configured neutral-loss order and are named
+        "{ion_type}{neutral_loss.name}_z{charge}", e.g. "b_z1", "y-H2O_z1",
+        or "y-H3O4P_z2". All configured losses are returned.
+        Each spectrum is normalized by the maximum of its returned channels.
         """
 
-        precursor_index_arr = batch["precursor_index"].to(torch.uint32).numpy()
+        precursor_index_arr = batch["precursor_index"].to(
+            device="cpu", dtype=torch.uint32
+        ).numpy()
         x_aa = batch["x_aa"].to(device=self.device)
         x_mod = batch["x_mod"].to(device=self.device)
         x_meta = batch["x_meta"].to(device=self.device)
         cleavage_count = x_aa.shape[-1] - 3
 
         y_pred = self(x_aa, x_mod, x_meta)
-        if include_modloss:
-            ion_type_count = 8
-        else:
-            ion_type_count = 4
-            y_pred = y_pred[..., :ion_type_count]
-
         scale = torch.amax(y_pred, dim=(1, 2), keepdim=True)
         y_pred = y_pred / (scale + EPS)
         y_pred = y_pred.detach().cpu().numpy()
@@ -246,7 +229,7 @@ class Ms2SpectrumPredictor(LightningModule):
 
         batch_ms2_df = pl.from_numpy(
             y_pred.reshape(-1, ion_type_count),
-            schema=FRAG_TYPE_LIST[:ion_type_count],
+            schema=self.fragment_types,
             orient="row",
         ).select(
             pl.Series(
@@ -261,7 +244,7 @@ class Ms2SpectrumPredictor(LightningModule):
                 ),
                 dtype=pl.UInt8,
             ),
-            pl.col(*FRAG_TYPE_LIST[:ion_type_count]),
+            pl.col(*self.fragment_types),
         )
 
         return batch_ms2_df
@@ -273,20 +256,26 @@ class Ms2SpectrumPredictor(LightningModule):
         Args:
             x_aa: Amino acid sequence tensor
             x_mod: Modification tensor
-            y_true: True fragment intensities (B, L-2, 8)
+            y_true: True fragment intensities (B, L-1, num_fragment_channels)
 
         Returns:
             loss, y_true, y_pred
         """
         y_pred = self(x_aa, x_mod, x_meta)
-        # if y_true.size(-1) < y_pred.size(-1):
-        #     y_true = F.pad(
-        #         y_true, (0, y_pred.size(-1) - y_true.size(-1)), "constant", 0
-        #     )
-        y_pred = y_pred[..., : y_true.size(-1)]
+        # Legacy search fine-tuning can supply only the four no-loss channels.
+        if self.neutral_losses == (
+            NeutralLoss.NO_LOSS.symbol,
+            NeutralLoss.H3O4P.symbol,
+        ) and y_true.size(-1) == 4:
+            y_pred = y_pred[..., :4]
+        if y_pred.shape != y_true.shape:
+            raise ValueError(
+                f"MS2 target shape {tuple(y_true.shape)} does not match model "
+                f"output {tuple(y_pred.shape)} for neutral_losses={self.neutral_losses}. "
+                "Use targets with the same neutral-loss channel order as the model."
+            )
 
-        # Use L1 loss for intensity prediction (matches Carafe / AlphaPeptDeep
-        # fine-tuning recipe; more robust than MSE for sparse non-negative targets)
+        # Supervise every fragment channel, including all configured neutral losses.
         loss = nn.functional.mse_loss(y_pred, y_true)
 
         return loss, y_true, y_pred
@@ -358,7 +347,20 @@ class Ms2SpectrumPredictor(LightningModule):
             prog_bar=True,
             logger=True,
             batch_size=batch_size,
+            sync_dist=True,
         )
+        for loss_index, neutral_loss in enumerate(
+            self.neutral_losses[: y_true.size(-1) // 4]
+        ):
+            channels = slice(4 * loss_index, 4 * (loss_index + 1))
+            self.log(
+                f"val_loss_{neutral_loss}",
+                nn.functional.mse_loss(y_pred[..., channels], y_true[..., channels]),
+                on_step=False,
+                on_epoch=True,
+                batch_size=batch_size,
+                sync_dist=True,
+            )
         self.log(
             "val_corr",
             self.valid_corr,

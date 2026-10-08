@@ -115,7 +115,6 @@ class SpectralLibGenerator:
         precursor_ds = PeptideDataset(
             precursor_df, modification_df, peptide_df, level="precursor"
         )
-        # include_modloss = len(self.fragmentation.neutral_losses) > 1
         batch_sampler = SeqDataBatchSampler(
             precursor_ds,
             batch_grouping_column="sequence_length",
