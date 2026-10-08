@@ -138,9 +138,13 @@ class Ms2SpectrumPredictor(LightningModule):
 
         # Metrics
         self.train_corr = torchmetrics.PearsonCorrCoef()
-        self.valid_corr = torchmetrics.PearsonCorrCoef()
+        self.valid_corr = nn.ModuleDict(
+            {loss: torchmetrics.PearsonCorrCoef() for loss in self.neutral_losses}
+        )
         self.train_sa = SpectralAngle()
-        self.valid_sa = SpectralAngle()
+        self.valid_sa = nn.ModuleDict(
+            {loss: SpectralAngle() for loss in self.neutral_losses}
+        )
 
         self.max_lr = max_lr
         self.num_warmup_steps = num_warmup_steps
@@ -333,12 +337,6 @@ class Ms2SpectrumPredictor(LightningModule):
 
         loss, y_true, y_pred = self._compute_loss(x_aa, x_mod, x_meta, y_true)
 
-        # Flatten for correlation calculation
-        y_true_flat = y_true.reshape(-1)
-        y_pred_flat = y_pred.reshape(-1)
-        self.valid_corr.update(y_pred_flat, y_true_flat)
-        self.valid_sa.update(y_pred_flat, y_true_flat)
-
         self.log(
             "val_loss",
             loss,
@@ -353,33 +351,47 @@ class Ms2SpectrumPredictor(LightningModule):
             self.neutral_losses[: y_true.size(-1) // 4]
         ):
             channels = slice(4 * loss_index, 4 * (loss_index + 1))
+            loss_pred = y_pred[..., channels]
+            loss_true = y_true[..., channels]
+            # Pearson accumulates all values of this loss across validation.
+            corr = self.valid_corr[neutral_loss]
+            corr.update(loss_pred.reshape(-1), loss_true.reshape(-1))
+            # Spectral angle is computed per spectrum before averaging.
+            sa = self.valid_sa[neutral_loss]
+            sa.update(
+                loss_pred.reshape(batch_size, -1),
+                loss_true.reshape(batch_size, -1),
+            )
             self.log(
                 f"val_loss_{neutral_loss}",
-                nn.functional.mse_loss(y_pred[..., channels], y_true[..., channels]),
+                nn.functional.mse_loss(loss_pred, loss_true),
                 on_step=False,
                 on_epoch=True,
                 batch_size=batch_size,
                 sync_dist=True,
             )
-        self.log(
-            "val_corr",
-            self.valid_corr,
-            on_step=False,
-            on_epoch=True,
-            batch_size=batch_size,
-        )
-        self.log(
-            "val_sa",
-            self.valid_sa,
-            on_step=False,
-            on_epoch=True,
-            batch_size=batch_size,
-        )
+            self.log(
+                f"val_corr_{neutral_loss}",
+                corr,
+                on_step=False,
+                on_epoch=True,
+                batch_size=batch_size,
+            )
+            self.log(
+                f"val_sa_{neutral_loss}",
+                sa,
+                on_step=False,
+                on_epoch=True,
+                batch_size=batch_size,
+            )
 
         return loss
 
     def configure_optimizers(self):
-        """Configure optimizer and learning rate scheduler."""
+        """Configure AdamW with epoch-based warmup and cosine decay.
+
+        num_warmup_steps and num_training_steps count epochs for this model.
+        """
         if self.layer_decay < 1.0:
             param_groups = param_groups_lrd(
                 model=self,
@@ -398,7 +410,12 @@ class Ms2SpectrumPredictor(LightningModule):
             min_lr=1e-6,
         )
 
-        return ({"optimizer": optimizer, "lr_scheduler": scheduler},)
+        return (
+            {
+                "optimizer": optimizer,
+                "lr_scheduler": {"scheduler": scheduler, "interval": "epoch"},
+            },
+        )
 
     def get_trainset(self):
         if self.fractions is not None:
