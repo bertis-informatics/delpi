@@ -20,6 +20,9 @@
 DelPi-local implementation (no HF dependency), extended to support:
 - min_lr (absolute) and/or min_lr_rate (ratio)
 - param-group-safe behavior (works even if groups have different base lr)
+
+DelPi advances these schedulers once per epoch, so step counts represent epochs.
+Warmup starts at base_lr / num_warmup_steps and reaches base_lr in its last epoch.
 """
 
 from __future__ import annotations
@@ -109,7 +112,8 @@ def _cosine_warmup_lambda(
 ) -> float:
     """Cosine annealing with linear warmup (no restarts), scaled to [min_lr_rate, 1]."""
     if current_step < num_warmup_steps:
-        return float(current_step) / float(max(1, num_warmup_steps))
+        # LambdaLR initializes at step 0, which supplies the first epoch's LR.
+        return float(current_step + 1) / float(max(1, num_warmup_steps))
 
     progress = float(current_step - num_warmup_steps) / float(
         max(1, num_training_steps - num_warmup_steps)
@@ -133,7 +137,7 @@ def _cosine_hard_restarts_warmup_lambda(
 ) -> float:
     """Cosine annealing with linear warmup + hard restarts, scaled to [min_lr_rate, 1]."""
     if current_step < num_warmup_steps:
-        return float(current_step) / float(max(1, num_warmup_steps))
+        return float(current_step + 1) / float(max(1, num_warmup_steps))
 
     progress = float(current_step - num_warmup_steps) / float(
         max(1, num_training_steps - num_warmup_steps)
@@ -165,8 +169,9 @@ def get_cosine_schedule_with_warmup(
 
     Args:
         optimizer: torch optimizer to schedule.
-        num_warmup_steps: warmup steps (linear 0 → initial LR).
-        num_training_steps: total training steps.
+        num_warmup_steps: warmup epochs (linear initial LR / warmup epochs → initial LR).
+            If zero, training starts at the initial LR without warmup.
+        num_training_steps: total training epochs.
         num_cycles: number of cosine cycles (default 0.5 = single half-cycle).
         last_epoch: PyTorch scheduler arg for resuming.
         min_lr: absolute minimum LR (float) or per-param-group list; default None (=0).
@@ -204,8 +209,9 @@ def get_cosine_with_hard_restarts_schedule_with_warmup(
 
     Args:
         optimizer: torch optimizer to schedule.
-        num_warmup_steps: warmup steps (linear 0 → initial LR).
-        num_training_steps: total training steps.
+        num_warmup_steps: warmup epochs (linear initial LR / warmup epochs → initial LR).
+            If zero, training starts at the initial LR without warmup.
+        num_training_steps: total training epochs.
         num_cycles: number of hard restarts (integer, >=1).
         last_epoch: PyTorch scheduler arg for resuming.
         min_lr: absolute minimum LR (float) or per-param-group list; default None (=0).
