@@ -1,7 +1,7 @@
 import math
 
 import torch
-from torchmetrics import Metric
+from torchmetrics import Metric, PearsonCorrCoef
 from torchmetrics.utilities import dim_zero_cat
 import torch.nn.functional as F
 
@@ -47,19 +47,47 @@ class RecallAtFDR(Metric):
         return tgt_cum[k] / num_targets
 
 
+class SafePearsonCorrCoef(PearsonCorrCoef):
+    """Accumulate Pearson in float64 for sparse, low-intensity fragments.
+
+    Both inputs and states use float64 to avoid the float32 near-zero variance
+    cutoff. An undefined correlation (constant inputs or too few observations)
+    is reported as 0 by convention, not as a measured correlation.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.set_dtype(torch.float64)
+
+    def update(self, preds: torch.Tensor, target: torch.Tensor):
+        if preds.numel() == 0:
+            return
+        super().update(preds.to(torch.float64), target.to(torch.float64))
+
+    def compute(self):
+        return torch.nan_to_num(super().compute(), nan=0.0, posinf=0.0, neginf=0.0)
+
+
 class SpectralAngle(Metric):
     """
     Spectral Angle Similarity metric in [0, 1].
     1.0 = identical spectra, 0.0 = orthogonal.
+
+    With ignore_empty_targets=True, average only spectra with observed peaks.
+    A zero prediction for a nonzero target still contributes a score of 0.
     """
 
-    def __init__(self, dist_sync_on_step=False):
+    def __init__(self, dist_sync_on_step=False, ignore_empty_targets=False):
         super().__init__(dist_sync_on_step=dist_sync_on_step)
+        self.ignore_empty_targets = ignore_empty_targets
         self.add_state("sum", default=torch.tensor(0.0), dist_reduce_fx="sum")
         self.add_state("total", default=torch.tensor(0), dist_reduce_fx="sum")
 
     def update(self, preds: torch.Tensor, target: torch.Tensor):
         # preds, target: [..., D]
+        if self.ignore_empty_targets:
+            present = target.ne(0).any(dim=-1)
+            preds, target = preds[present], target[present]
         cos_sim = F.cosine_similarity(preds, target, dim=-1, eps=1e-8)
         # Robustness: treat negative cosine (angle > 90°) as 0 similarity
         cos_sim = cos_sim.clamp(min=0.0, max=1.0)
@@ -69,4 +97,5 @@ class SpectralAngle(Metric):
         self.total += score.numel()
 
     def compute(self):
-        return self.sum / self.total
+        # No observed spectra means no defined SA; report 0 by convention.
+        return self.sum / self.total.clamp_min(1)

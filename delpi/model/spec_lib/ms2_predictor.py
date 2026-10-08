@@ -13,7 +13,7 @@ from delpi.constants import COMMON_NEUTRAL_LOSS_INDEX
 from delpi.lcms.neutral_loss import NeutralLoss
 from delpi.model.spec_lib.block import ResNet1D, BiLSTM, Transformer, Permute
 from delpi.model.pos_encoder import PositionalEncoding
-from delpi.utils.metric import SpectralAngle
+from delpi.utils.metric import SafePearsonCorrCoef, SpectralAngle
 from delpi.search.tl.lr_decay import param_groups_lrd
 from delpi.utils.scheduler import get_cosine_schedule_with_warmup
 from delpi.model.spec_lib.aa_encoder import MOD_FEATURE_MAP
@@ -139,11 +139,20 @@ class Ms2SpectrumPredictor(LightningModule):
         # Metrics
         self.train_corr = torchmetrics.PearsonCorrCoef()
         self.valid_corr = nn.ModuleDict(
-            {loss: torchmetrics.PearsonCorrCoef() for loss in self.neutral_losses}
+            {loss: SafePearsonCorrCoef() for loss in self.neutral_losses}
         )
         self.train_sa = SpectralAngle()
         self.valid_sa = nn.ModuleDict(
             {loss: SpectralAngle() for loss in self.neutral_losses}
+        )
+        self.valid_sa_present = nn.ModuleDict(
+            {
+                loss: SpectralAngle(ignore_empty_targets=True)
+                for loss in self.neutral_losses
+            }
+        )
+        self.valid_present_fraction = nn.ModuleDict(
+            {loss: torchmetrics.MeanMetric() for loss in self.neutral_losses}
         )
 
         self.max_lr = max_lr
@@ -357,11 +366,16 @@ class Ms2SpectrumPredictor(LightningModule):
             corr = self.valid_corr[neutral_loss]
             corr.update(loss_pred.reshape(-1), loss_true.reshape(-1))
             # Spectral angle is computed per spectrum before averaging.
+            spectrum_pred = loss_pred.reshape(batch_size, -1)
+            spectrum_true = loss_true.reshape(batch_size, -1)
             sa = self.valid_sa[neutral_loss]
-            sa.update(
-                loss_pred.reshape(batch_size, -1),
-                loss_true.reshape(batch_size, -1),
-            )
+            sa.update(spectrum_pred, spectrum_true)
+            # Keep the original all-spectrum SA for log continuity, and also
+            # measure similarity only where this loss was actually observed.
+            sa_present = self.valid_sa_present[neutral_loss]
+            sa_present.update(spectrum_pred, spectrum_true)
+            present_fraction = self.valid_present_fraction[neutral_loss]
+            present_fraction.update(spectrum_true.ne(0).any(dim=-1).float())
             self.log(
                 f"val_loss_{neutral_loss}",
                 nn.functional.mse_loss(loss_pred, loss_true),
@@ -380,6 +394,20 @@ class Ms2SpectrumPredictor(LightningModule):
             self.log(
                 f"val_sa_{neutral_loss}",
                 sa,
+                on_step=False,
+                on_epoch=True,
+                batch_size=batch_size,
+            )
+            self.log(
+                f"val_sa_present_{neutral_loss}",
+                sa_present,
+                on_step=False,
+                on_epoch=True,
+                batch_size=batch_size,
+            )
+            self.log(
+                f"val_present_fraction_{neutral_loss}",
+                present_fraction,
                 on_step=False,
                 on_epoch=True,
                 batch_size=batch_size,
