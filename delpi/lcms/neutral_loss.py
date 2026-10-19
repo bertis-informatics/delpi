@@ -1,4 +1,10 @@
+import polars as pl
+
 from delpi.chem.composition import Composition
+from delpi.constants import COMMON_NEUTRAL_LOSSES
+
+# Physical Enum codes follow the shared fragment-intensity loss indices.
+NEUTRAL_LOSS_DTYPE = pl.Enum(COMMON_NEUTRAL_LOSSES)
 
 
 class NeutralLoss:

@@ -9,14 +9,16 @@ from lightning.pytorch import LightningModule
 import torchmetrics
 from torch.utils.data import DataLoader, Dataset
 
-from delpi.constants import COMMON_NEUTRAL_LOSS_INDEX
 from delpi.lcms.neutral_loss import NeutralLoss
 from delpi.model.spec_lib.block import ResNet1D, BiLSTM, Transformer, Permute
 from delpi.model.pos_encoder import PositionalEncoding
 from delpi.utils.metric import SafePearsonCorrCoef, SpectralAngle
+from delpi.lcms.base_ion_type import BaseIonType
+from delpi.lcms.fragmentation import get_frag_type_str
 from delpi.search.tl.lr_decay import param_groups_lrd
 from delpi.utils.scheduler import get_cosine_schedule_with_warmup
 from delpi.model.spec_lib.aa_encoder import MOD_FEATURE_MAP
+from delpi.constants import COMMON_NEUTRAL_LOSS_INDEX
 
 EPS = 1e-9
 
@@ -70,9 +72,9 @@ class Ms2SpectrumPredictor(LightningModule):
         self.neutral_losses = neutral_losses
         self.num_fragment_channels = 4 * len(neutral_losses)
         self.fragment_types = [
-            f"{ion_type}{NeutralLoss.get(loss).name}_z{charge}"
+            get_frag_type_str(ion_type, NeutralLoss.get(loss), charge)
             for loss in neutral_losses
-            for ion_type in ("b", "y")
+            for ion_type in (BaseIonType.B, BaseIonType.Y)
             for charge in (1, 2)
         ]
         self.encoder_type = encoder_type
@@ -226,9 +228,9 @@ class Ms2SpectrumPredictor(LightningModule):
         Each spectrum is normalized by the maximum of its returned channels.
         """
 
-        precursor_index_arr = batch["precursor_index"].to(
-            device="cpu", dtype=torch.uint32
-        ).numpy()
+        precursor_index_arr = (
+            batch["precursor_index"].to(device="cpu", dtype=torch.uint32).numpy()
+        )
         x_aa = batch["x_aa"].to(device=self.device)
         x_mod = batch["x_mod"].to(device=self.device)
         x_meta = batch["x_meta"].to(device=self.device)
@@ -275,12 +277,7 @@ class Ms2SpectrumPredictor(LightningModule):
             loss, y_true, y_pred
         """
         y_pred = self(x_aa, x_mod, x_meta)
-        # Legacy search fine-tuning can supply only the four no-loss channels.
-        if self.neutral_losses == (
-            NeutralLoss.NO_LOSS.symbol,
-            NeutralLoss.H3O4P.symbol,
-        ) and y_true.size(-1) == 4:
-            y_pred = y_pred[..., :4]
+
         if y_pred.shape != y_true.shape:
             raise ValueError(
                 f"MS2 target shape {tuple(y_true.shape)} does not match model "

@@ -5,6 +5,7 @@ import polars as pl
 import torch
 
 from delpi.lcms.base_ion_type import BaseIonType
+from delpi.lcms.neutral_loss import NeutralLoss
 from delpi.chem.amino_acid import AminoAcid
 from delpi.chem.modification_param import ModificationParam
 from delpi.database.fasta_parser import FastaParser
@@ -77,6 +78,9 @@ class PeptideDatabase:
         save_dir: Union[str, Path] = None,
         precursor_chunk_size: int = None,
         batch_size: int = 512,
+        neutral_losses: Sequence[str | NeutralLoss] = None,
+        min_intensity: float = 0.01,
+        gamma: float = 0.5,
         *args,
         **kwargs,
     ) -> Self:
@@ -139,6 +143,12 @@ class PeptideDatabase:
         precursor_df = precursor_df.with_row_index("precursor_index")
 
         # generate spectral library
+        if neutral_losses is None:
+            neutral_losses = (
+                [NeutralLoss.NO_LOSS, NeutralLoss.H3O4P]
+                if mod_handler.has_phospho
+                else NeutralLoss.get_common_neutral_losses()
+            )
         speclib_generator = SpectralLibGenerator(
             min_charge=min_fragment_charge,
             max_charge=max_fragment_charge,
@@ -147,18 +157,22 @@ class PeptideDatabase:
             max_fragments=max_fragments,
             min_fragment_mz=min_fragment_mz,
             max_fragment_mz=max_fragment_mz,
-            apply_phospho=mod_handler.has_phospho,
+            neutral_losses=neutral_losses,
+            min_intensity=min_intensity,
+            gamma=gamma,
             device=device,
         )
-        speclib_df, modification_df = speclib_generator.generate_spectral_lib(
-            peptide_df,
-            modification_df,
-            precursor_df,
-            prefix_mass_container,
-            progress=progress,
-            precursor_chunk_size=precursor_chunk_size,
-            save_dir=save_dir,
-            batch_size=batch_size,
+        speclib_df, modification_df, precursor_df = (
+            speclib_generator.generate_spectral_lib(
+                peptide_df,
+                modification_df,
+                precursor_df,
+                prefix_mass_container,
+                progress=progress,
+                precursor_chunk_size=precursor_chunk_size,
+                save_dir=save_dir,
+                batch_size=batch_size,
+            )
         )
 
         self.params.update(
@@ -215,7 +229,6 @@ class PeptideDatabase:
 
         save_dir = Path(save_dir)
         param_file_path = save_dir / "param.yaml"
-        # hdf_file_path = save_dir / 'data.hdf'
 
         param_dict = load_yaml(param_file_path)
         new_instance = cls()
@@ -223,7 +236,7 @@ class PeptideDatabase:
         new_instance.params.update(param_dict)
         for param_key, param_val in new_instance.__dict__.items():
             if param_key.endswith("_df"):
-                fpath = Path(rf"{save_dir}\{param_key}.parquet")
+                fpath = save_dir / f"{param_key}.parquet"
                 if fpath.exists():
                     param_val = pl.read_parquet(fpath)
                     setattr(new_instance, param_key, param_val)

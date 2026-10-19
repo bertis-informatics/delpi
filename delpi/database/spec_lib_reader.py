@@ -10,6 +10,11 @@ from delpi.chem.averagine import get_precursor_lib_df
 from delpi.lcms.base_spectra import _readonly
 from delpi.utils.yaml_file import load_yaml
 from delpi.constants import MAX_FRAGMENTS
+from delpi.database.spec_lib_schema import (
+    SPECLIB_SCHEMA,
+    NEUTRAL_LOSS_DTYPE,
+    fragment_offsets,
+)
 
 
 class SpectralLibReader:
@@ -23,6 +28,8 @@ class SpectralLibReader:
     ) -> None:
 
         self.peptide_db_path = Path(peptide_db_path)
+        if not isinstance(max_fragments, int) or not 1 <= max_fragments <= 255:
+            raise ValueError("max_fragments must be an integer in [1, 255].")
         self.max_fragments = max_fragments
         self.max_fragment_isotopes = max_fragment_isotopes
         self.max_precursor_isotopes = max_precursor_isotopes
@@ -34,11 +41,35 @@ class SpectralLibReader:
             self.params = load_yaml(self.peptide_db_path / "param.yaml")
 
         # load precursor_df and modification_df in memory
-        self.all_precursor_df = (
-            pl.scan_parquet(self.peptide_db_path / "precursor_df.parquet")
-            .select(pl.col("peptidoform_index", "precursor_mz", "precursor_charge"))
-            .with_row_index("precursor_index")
-        )
+        precursor_scan = pl.scan_parquet(self.peptide_db_path / "precursor_df.parquet")
+        precursor_schema = precursor_scan.collect_schema()
+        if any(
+            precursor_schema.get(name) != dtype
+            for name, dtype in (
+                ("speclib_offset", pl.UInt32),
+                ("speclib_rows", pl.UInt8),
+            )
+        ):
+            raise ValueError(
+                "Library requires speclib_offset (UInt32) and speclib_rows "
+                "(UInt8) in precursor_df. Regenerate libraries in the old fixed-row format."
+            )
+        speclib_schema = pl.scan_parquet(
+            self.peptide_db_path / "speclib_df.parquet"
+        ).collect_schema()
+        if speclib_schema.get("neutral_loss") != NEUTRAL_LOSS_DTYPE:
+            raise ValueError(
+                "Library neutral_loss must use the common neutral-loss Enum."
+            )
+        self.all_precursor_df = precursor_scan.select(
+            pl.col(
+                "peptidoform_index",
+                "precursor_mz",
+                "precursor_charge",
+                "speclib_offset",
+                "speclib_rows",
+            )
+        ).with_row_index("precursor_index")
 
         self.peptide_df = (
             pl.scan_parquet(self.peptide_db_path / "peptide_df.parquet")
@@ -68,37 +99,27 @@ class SpectralLibReader:
 
     def _read_speclib_df(
         self,
-        min_precursor_index: int,
-        max_precursor_index: int,
+        precursor_df: pl.DataFrame,
     ) -> pl.DataFrame:
-
-        lib_max_fragments = MAX_FRAGMENTS
-        assert self.max_fragments <= lib_max_fragments
-
-        num_precursors = max_precursor_index - min_precursor_index + 1
-        offset = min_precursor_index * lib_max_fragments
-        num_rows = num_precursors * lib_max_fragments
+        offsets = precursor_df["speclib_offset"].to_numpy()
+        counts = precursor_df["speclib_rows"].to_numpy()
+        if not np.array_equal(offsets[1:], offsets[:-1] + counts[:-1]):
+            raise ValueError("Library precursor fragment offsets are not contiguous.")
+        offset = int(offsets[0])
+        num_rows = int(counts.sum())
 
         speclib_df = (
             pl.scan_parquet(self.peptide_db_path / "speclib_df.parquet")
             .slice(offset, num_rows)
-            .select(
-                pl.col(
-                    "precursor_index",
-                    "cleavage_index",
-                    "is_prefix",
-                    "charge",
-                    "mz",
-                    "predicted_intensity",
-                    "rank",
-                )
-            )
+            .select(list(SPECLIB_SCHEMA))
+            .collect()
         )
-
-        if self.max_fragments < lib_max_fragments:
-            speclib_df = speclib_df.filter(pl.col("rank") <= self.max_fragments)
-
-        return speclib_df.collect()
+        # expected_ids = np.repeat(precursor_df["precursor_index"].to_numpy(), counts)
+        # if not np.array_equal(speclib_df["precursor_index"].to_numpy(), expected_ids):
+        #     raise ValueError(
+        #         "Library fragment rows do not match precursor offsets/counts."
+        #     )
+        return speclib_df.filter(pl.col("rank") <= self.max_fragments)
 
     def read_by_index_range(
         self, min_precursor_index: int, max_precursor_index: int
@@ -106,11 +127,26 @@ class SpectralLibReader:
 
         if min_precursor_index is None or max_precursor_index is None:
             return None
+        if min_precursor_index < 0 or max_precursor_index < min_precursor_index:
+            raise ValueError("Invalid precursor index range.")
 
         precursor_df = self.all_precursor_df.slice(
             min_precursor_index, max_precursor_index - min_precursor_index + 1
         ).collect()
-        speclib_df = self._read_speclib_df(min_precursor_index, max_precursor_index)
+        if precursor_df.height != max_precursor_index - min_precursor_index + 1:
+            raise ValueError("Precursor index range is outside the library.")
+        speclib_df = self._read_speclib_df(precursor_df)
+        local_ids = (
+            speclib_df["precursor_index"].to_numpy().astype(np.int64)
+            - min_precursor_index
+        )
+        counts = np.bincount(local_ids, minlength=precursor_df.height)
+        if np.any(counts > self.max_fragments):
+            raise ValueError(
+                "Library ranks do not enforce max_fragments per precursor."
+            )
+        counts = counts.astype(np.uint8)
+        offsets = fragment_offsets(counts)
 
         speclib_container = SpectralLibContainer(
             min_precursor_index=min_precursor_index,
@@ -141,12 +177,17 @@ class SpectralLibReader:
             ),
             precursor_mz_arr=_readonly(precursor_df["precursor_mz"].to_numpy()),
             precursor_charge_arr=_readonly(precursor_df["precursor_charge"].to_numpy()),
+            precursor_speclib_offset_arr=_readonly(offsets),
+            precursor_speclib_rows_arr=_readonly(counts),
             ## speclib data
             speclib_cleavage_index_arr=_readonly(
                 speclib_df["cleavage_index"].to_numpy()
             ),
             speclib_is_prefix_arr=_readonly(speclib_df["is_prefix"].to_numpy()),
             speclib_charge_arr=_readonly(speclib_df["charge"].to_numpy()),
+            speclib_neutral_loss_arr=_readonly(
+                speclib_df["neutral_loss"].to_physical().to_numpy()
+            ),
             speclib_mz_arr=_readonly(speclib_df["mz"].to_numpy()),
             speclib_predicted_intensity_arr=_readonly(
                 speclib_df["predicted_intensity"].to_numpy()

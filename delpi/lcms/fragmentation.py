@@ -1,20 +1,16 @@
 import polars as pl
 
 from delpi.lcms.base_ion_type import BaseIonType
-from delpi.lcms.neutral_loss import NeutralLoss
+from delpi.lcms.neutral_loss import NeutralLoss, NEUTRAL_LOSS_DTYPE
 from delpi.lcms.data_container import IonTypeContainer
 from delpi.constants import C13C12_MASS_DIFF
 
 
 def get_frag_type_str(
     base_ion_type: BaseIonType, neutral_loss: NeutralLoss, charge: int
-):
-    if neutral_loss == NeutralLoss.NO_LOSS:
-        return f"{base_ion_type.symbol}_z{charge}"
-    elif neutral_loss == NeutralLoss.H3O4P:
-        return f"{base_ion_type.symbol}_modloss_z{charge}"
-
-    return f"{base_ion_type.symbol}_{neutral_loss.symbol}_z{charge}"
+) -> str:
+    """Return the shared model/library fragment name, e.g. y-H2O_z1."""
+    return f"{base_ion_type.symbol}{neutral_loss.name}_z{charge}"
 
 
 class Fragmentation:
@@ -48,7 +44,7 @@ class Fragmentation:
     def _generate_ion_table(self):
         schema = {
             "base_ion_type": pl.Categorical,
-            "neutral_loss": pl.Categorical,
+            "neutral_loss": NEUTRAL_LOSS_DTYPE,
             "charge": pl.UInt8,
             "isotope_index": pl.UInt8,
             "is_prefix": pl.Boolean,
@@ -82,14 +78,13 @@ class Fragmentation:
         return pl.DataFrame(data, schema=schema, orient="row")
 
     def get_ion_types(self):
-        ion_type_df = (
-            self.ion_type_df.with_columns(is_modloss=pl.col("neutral_loss") != "NoLoss")
-            .sort(pl.col("is_modloss"), ~pl.col("is_prefix"), pl.col("charge"))
-            .select(pl.col("is_modloss", "is_prefix", "charge", "offset_mass"))
+        """Return loss/ion/charge/isotope ordered columns with stable loss codes."""
+        ion_type_df = self.ion_type_df.sort(
+            "neutral_loss", ~pl.col("is_prefix"), "charge", "isotope_index"
         )
         return IonTypeContainer(
             ion_type_df["is_prefix"].to_numpy(),
             ion_type_df["charge"].to_numpy(),
             ion_type_df["offset_mass"].to_numpy(),
-            ion_type_df["is_modloss"].to_numpy(),
+            ion_type_df["neutral_loss"].to_physical().cast(pl.UInt8).to_numpy(),
         )

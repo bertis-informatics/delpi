@@ -4,6 +4,11 @@ import numpy as np
 
 
 class SpectralLibContainer(NamedTuple):
+    """Loaded library slice; precursor fragment offsets are local to this slice.
+
+    Neutral-loss codes index COMMON_NEUTRAL_LOSSES. max_fragments is a cap,
+    while precursor_speclib_rows_arr gives each precursor's actual count.
+    """
 
     min_precursor_index: int
     max_precursor_index: int
@@ -23,10 +28,13 @@ class SpectralLibContainer(NamedTuple):
     precursor_peptidoform_index_arr: np.ndarray
     precursor_mz_arr: np.ndarray
     precursor_charge_arr: np.ndarray
+    precursor_speclib_offset_arr: np.ndarray
+    precursor_speclib_rows_arr: np.ndarray
 
     speclib_cleavage_index_arr: np.ndarray
     speclib_is_prefix_arr: np.ndarray
     speclib_charge_arr: np.ndarray
+    speclib_neutral_loss_arr: np.ndarray
     speclib_mz_arr: np.ndarray
     speclib_predicted_intensity_arr: np.ndarray
 
@@ -49,3 +57,4 @@ class TheoreticalPeakContainer(NamedTuple):
     fragment_is_prefix_arr: np.ndarray
     fragment_cleavage_index_arr: np.ndarray
     fragment_intensity_arr: np.ndarray
+    fragment_neutral_loss_arr: np.ndarray
