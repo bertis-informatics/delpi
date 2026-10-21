@@ -46,3 +46,10 @@ DEFAULT_REPORT_FORMAT = "parquet"  # tsv or parquet
 # to fine-tune the RT/MS2 predictors during the transfer-learning two-pass
 # search.
 DEFAULT_TL_TOP_K = 3
+
+# Minimum stored fragments required for candidate searching.
+MIN_SEARCH_FRAGMENTS = 5
+DEFAULT_PRECURSOR_ISOTOPES = 4  # M-1, M, M+1, M+2
+DEFAULT_FRAGMENT_ISOTOPES = 3  # M-1, M, M+1
+
+DEFAULT_NCE = 30.0

@@ -486,6 +486,10 @@ class SearchManager:
         )
         spec_generator = RefinedSpectralLibGenerator(
             apply_phospho=self.search_config.is_phospho_search,
+            nce=search_config.library_nce,
+            neutral_losses=search_config["fragment"].get("neutral_losses"),
+            min_intensity=search_config["fragment"].get("min_intensity", 0.01),
+            gamma=search_config["fragment"].get("gamma", 0.5),
             min_precursor_charge=search_config["precursor"].get("min_charge", 2),
             max_precursor_charge=search_config["precursor"].get("max_charge", 4),
             min_precursor_mz=search_config["precursor"].get("min_mz", 300),
@@ -559,6 +563,10 @@ class SearchManager:
             rt_predictor=None,
             ms2_predictor=None,
             apply_phospho=self.search_config.is_phospho_search,
+            nce=search_config.library_nce,
+            neutral_losses=search_config["fragment"].get("neutral_losses"),
+            min_intensity=search_config["fragment"].get("min_intensity", 0.01),
+            gamma=search_config["fragment"].get("gamma", 0.5),
             min_precursor_charge=search_config["precursor"].get("min_charge", 2),
             max_precursor_charge=search_config["precursor"].get("max_charge", 4),
             min_precursor_mz=search_config["precursor"].get("min_mz", 300),
@@ -570,6 +578,9 @@ class SearchManager:
         )
         spec_generator._build_database(
             search_config.db_dir, combined_precursor_index_arr
+        )
+        spec_generator.nce = float(
+            spec_generator.source_params.get("fragment", {}).get("nce", 30.0)
         )
         ## Update the reference retention times in the modification dataframe
         spec_generator._update_ref_rt(target_df)
@@ -587,7 +598,7 @@ class SearchManager:
                 on="g_precursor_index",
                 how="inner",
             )
-            .sort("precursor_index")
+            .sort(["precursor_index", "rank"], descending=[False, True])
             .select(list(spec_generator.speclib_df_schema.keys()))
             .collect()
         )

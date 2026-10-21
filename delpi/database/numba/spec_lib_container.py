@@ -58,3 +58,4 @@ class TheoreticalPeakContainer(NamedTuple):
     fragment_cleavage_index_arr: np.ndarray
     fragment_intensity_arr: np.ndarray
     fragment_neutral_loss_arr: np.ndarray
+    fragment_isotope_index_arr: np.ndarray

@@ -17,6 +17,7 @@ from delpi.database.spec_lib_generator import SpectralLibGenerator
 from delpi.database.utils import create_peptidoform_df
 from delpi.search.progress import ProgressTracker
 from delpi.utils.yaml_file import load_yaml, save_yaml
+from delpi.constants import DEFAULT_NCE
 
 PEPTIDE_SEQ_REGEX = rf"^[{AminoAcid.peptide_n_term}{AminoAcid.protein_n_term}]?[{AminoAcid.standard_amino_acid_chars}]+[{AminoAcid.peptide_c_term}{AminoAcid.protein_c_term}]?$"
 
@@ -81,6 +82,7 @@ class PeptideDatabase:
         neutral_losses: Sequence[str | NeutralLoss] = None,
         min_intensity: float = 0.01,
         gamma: float = 0.5,
+        nce: float = DEFAULT_NCE,
         *args,
         **kwargs,
     ) -> Self:
@@ -160,6 +162,7 @@ class PeptideDatabase:
             neutral_losses=neutral_losses,
             min_intensity=min_intensity,
             gamma=gamma,
+            nce=nce,
             device=device,
         )
         speclib_df, modification_df, precursor_df = (

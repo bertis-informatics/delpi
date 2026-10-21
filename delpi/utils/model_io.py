@@ -102,6 +102,14 @@ def load_model(cls: Type[T], path: str | Path) -> T:
             stacklevel=2,
         )
 
+    schema_version = getattr(cls, "INPUT_SCHEMA_VERSION", None)
+    if (
+        schema_version is not None
+        and payload["hyper_parameters"].get("input_schema_version") != schema_version
+    ):
+        raise ValueError(
+            f"{cls.__name__} requires input schema {schema_version}; this checkpoint uses an older input layout and must be retrained."
+        )
     model = cls(**payload["hyper_parameters"])
     model.load_state_dict(payload["model_state_dict"])
     model.meta = meta

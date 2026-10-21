@@ -8,7 +8,8 @@ from delpi.model.spec_lib.aa_encoder import (
     encode_modification_feature_from_strings,
 )
 
-DEFAULT_NCE = 30
+from delpi.constants import DEFAULT_NCE
+
 DEFAULT_FRAGMENTATION = 0
 DEFAULT_MASS_ANALYZER = 0
 
@@ -21,9 +22,11 @@ class PeptideDataset(Dataset):
         modification_df: pl.DataFrame,
         peptide_df: pl.DataFrame,
         level: str = "precursor",  # "precursor" or "peptidoform"
+        nce: float = DEFAULT_NCE,
     ):
         assert level in ["precursor", "peptidoform"], "Invalid dataset level"
         self.is_precursor_level = level == "precursor"
+        self.nce = float(nce)
 
         # Every table's primary key is 0..N-1 and row-position-aligned, so
         # foreign keys resolve via plain array indexing instead of a join:
@@ -72,7 +75,7 @@ class PeptideDataset(Dataset):
             x_meta = torch.FloatTensor(
                 [
                     precursor_charge,
-                    DEFAULT_NCE,
+                    self.nce,
                     DEFAULT_FRAGMENTATION,
                     DEFAULT_MASS_ANALYZER,
                 ]

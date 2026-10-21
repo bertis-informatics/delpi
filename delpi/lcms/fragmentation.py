@@ -4,6 +4,7 @@ from delpi.lcms.base_ion_type import BaseIonType
 from delpi.lcms.neutral_loss import NeutralLoss, NEUTRAL_LOSS_DTYPE
 from delpi.lcms.data_container import IonTypeContainer
 from delpi.constants import C13C12_MASS_DIFF
+from delpi.chem.averagine import get_isotope_indices
 
 
 def get_frag_type_str(
@@ -27,8 +28,7 @@ class Fragmentation:
         **kwargs,
     ):
 
-        if max_fragment_isotopes > 2:
-            raise NotImplementedError()
+        get_isotope_indices(max_fragment_isotopes)
 
         self.min_charge = min_charge
         self.max_charge = max_charge
@@ -46,7 +46,7 @@ class Fragmentation:
             "base_ion_type": pl.Categorical,
             "neutral_loss": NEUTRAL_LOSS_DTYPE,
             "charge": pl.UInt8,
-            "isotope_index": pl.UInt8,
+            "isotope_index": pl.Int8,
             "is_prefix": pl.Boolean,
             "offset_mass": pl.Float32,
             "frag_type": pl.String,
@@ -62,7 +62,7 @@ class Fragmentation:
                         base_ion_type, neutral_loss, charge
                     )
 
-                    for iso_index in range(self.max_fragment_isotopes):
+                    for iso_index in get_isotope_indices(self.max_fragment_isotopes):
                         data.append(
                             (
                                 base_ion_type.symbol,
@@ -77,9 +77,12 @@ class Fragmentation:
 
         return pl.DataFrame(data, schema=schema, orient="row")
 
-    def get_ion_types(self):
-        """Return loss/ion/charge/isotope ordered columns with stable loss codes."""
-        ion_type_df = self.ion_type_df.sort(
+    def get_ion_types(self, isotope_index: int | None = None):
+        """Return ordered ion columns, optionally selecting a specific isotope."""
+        ion_type_df = self.ion_type_df
+        if isotope_index is not None:
+            ion_type_df = ion_type_df.filter(pl.col("isotope_index") == isotope_index)
+        ion_type_df = ion_type_df.sort(
             "neutral_loss", ~pl.col("is_prefix"), "charge", "isotope_index"
         )
         return IonTypeContainer(

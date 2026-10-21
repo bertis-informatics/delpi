@@ -6,10 +6,15 @@ import numpy as np
 from delpi.model.rt_calibrator import RetentionTimeCalibrator
 from delpi.database.numba.spec_lib_container import SpectralLibContainer
 from delpi.database.utils import create_peptidoform_df
-from delpi.chem.averagine import get_precursor_lib_df
+from delpi.chem.averagine import get_precursor_lib_df, get_isotope_indices
 from delpi.lcms.base_spectra import _readonly
 from delpi.utils.yaml_file import load_yaml
-from delpi.constants import MAX_FRAGMENTS
+from delpi.constants import (
+    MAX_FRAGMENTS,
+    DEFAULT_NCE,
+    DEFAULT_PRECURSOR_ISOTOPES,
+    DEFAULT_FRAGMENT_ISOTOPES,
+)
 from delpi.database.spec_lib_schema import (
     SPECLIB_SCHEMA,
     NEUTRAL_LOSS_DTYPE,
@@ -23,14 +28,16 @@ class SpectralLibReader:
         self,
         peptide_db_path: str,
         max_fragments: int = MAX_FRAGMENTS,
-        max_precursor_isotopes: int = 3,
-        max_fragment_isotopes: int = 2,
+        max_precursor_isotopes: int = DEFAULT_PRECURSOR_ISOTOPES,
+        max_fragment_isotopes: int = DEFAULT_FRAGMENT_ISOTOPES,
     ) -> None:
 
         self.peptide_db_path = Path(peptide_db_path)
         if not isinstance(max_fragments, int) or not 1 <= max_fragments <= 255:
             raise ValueError("max_fragments must be an integer in [1, 255].")
         self.max_fragments = max_fragments
+        get_isotope_indices(max_fragment_isotopes)
+        get_isotope_indices(max_precursor_isotopes)
         self.max_fragment_isotopes = max_fragment_isotopes
         self.max_precursor_isotopes = max_precursor_isotopes
 
@@ -90,6 +97,10 @@ class SpectralLibReader:
         self.averagine_df = get_precursor_lib_df(max_isotopes=max_precursor_isotopes)
 
         self._peptidoform_df = None
+
+    @property
+    def library_nce(self):
+        return float(self.params.get("fragment", {}).get("nce", DEFAULT_NCE))
 
     def calibrate_rt(self, rt_calibrator: RetentionTimeCalibrator) -> None:
         rt_df = rt_calibrator.predict(self.modification_df["ref_rt"])

@@ -8,47 +8,46 @@ averagine_df = pl.read_parquet(DATA_DIR / "averagine.parquet").with_columns(
 )
 
 
+def get_isotope_indices(max_isotopes):
+    """Total isotope count, starting at M-1 and always including M."""
+    if not 2 <= max_isotopes <= 8:
+        raise ValueError("max_isotopes must be between 2 and 8")
+    return list(range(-1, max_isotopes - 1))
+
+
 def get_precursor_lib_df(max_isotopes, min_mass=300, max_mass=7000):
-
-    get_offset_mass = (
-        (pl.col("isotope_index") * C13C12_MASS_DIFF)
-        .cast(pl.Float32)
-        .alias("offset_mass")
+    isotopes = pl.DataFrame(
+        {"isotope_index": get_isotope_indices(max_isotopes)},
+        schema={"isotope_index": pl.Int8},
     )
-
-    get_normalized_intensity = pl.col("predicted_intensity") / pl.col(
-        "predicted_intensity"
-    ).max().over("mass")
-
-    avg_df = (
+    return (
         averagine_df.filter(pl.col("mass").is_between(min_mass, max_mass))
+        .join(isotopes, how="cross")
         .with_columns(
-            pl.col("envelope")
-            .list.eval(pl.element().rank(descending=True).cast(pl.UInt8))
-            .alias("rank"),
-            pl.int_ranges(pl.col("envelope").list.len(), dtype=pl.UInt8).alias(
-                "isotope_index"
-            ),
+            pl.when(pl.col("isotope_index") < 0)
+            .then(0.0)
+            .otherwise(
+                pl.col("envelope")
+                .list.get(pl.col("isotope_index").clip(lower_bound=0), null_on_oob=True)
+                .fill_null(0.0)
+            )
+            .cast(pl.Float32)
+            .alias("predicted_intensity")
         )
-        .explode(["isotope_index", "envelope", "rank"], empty_as_null=True)
-        .filter(pl.col("isotope_index") < max_isotopes)
-        .rename({"envelope": "predicted_intensity"})
-        .sort(["mass", "rank"])
-        .with_columns(get_offset_mass, get_normalized_intensity)
+        .with_columns(
+            (pl.col("isotope_index") * C13C12_MASS_DIFF)
+            .cast(pl.Float32)
+            .alias("offset_mass"),
+            (
+                pl.col("predicted_intensity")
+                / pl.col("predicted_intensity").max().over("mass")
+            ).alias("predicted_intensity"),
+            pl.col("predicted_intensity")
+            .rank("ordinal", descending=True)
+            .over("mass")
+            .cast(pl.UInt8)
+            .alias("rank"),
+        )
+        .drop("envelope")
+        .sort("mass", "isotope_index")
     )
-
-    return avg_df
-
-
-# df = get_precursor_lib_df(3, min_mass=50, max_mass=5000)
-# df1 = df.group_by(pl.col('mass')).agg(pl.all().last())
-
-# from matplotlib import pyplot as plt
-# z = np.polyfit(df1['mass'], df1['predicted_intensity'], 8)
-# p = np.poly1d(z)
-
-
-# plt.figure()
-# plt.plot(df1['mass'], df1['predicted_intensity'])
-# plt.plot(df1['mass'], p(df1['mass']))
-# plt.savefig('./temp/averagine.jpg')

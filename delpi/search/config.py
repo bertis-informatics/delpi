@@ -1,13 +1,14 @@
 from typing import Union, List
 from pathlib import Path
-
+import math
 
 from pymsio import MassSpecFileReader
+from delpi.model.input import AcquisitionMode
 from delpi.chem.modification_param import ModificationParam
 from delpi.search.result_manager import ResultManager
 from delpi.database.decoy_generator import DecoyGenerator
 from delpi.utils.yaml_file import load_yaml, save_yaml, resolve_input_files
-from delpi.constants import DEFAULT_Q_VALUE_CUTOFF
+from delpi.constants import DEFAULT_Q_VALUE_CUTOFF, DEFAULT_NCE
 from delpi.search.tda.protein_scoring import (
     DEFAULT_PROTEIN_SCORING,
     ProteinScoringMethod,
@@ -49,7 +50,33 @@ class SearchConfig:
     @property
     def acquisition_method(self) -> str:
         """Acquisition method for this search: 'DDA' or 'DIA' (default 'DIA')."""
-        return self.config.get("acquisition_method", "DIA").upper()
+        mode = self.config.get(
+            "acquisition_mode", self.config.get("acquisition_method", "DIA")
+        ).upper()
+        if mode not in AcquisitionMode.__members__:
+            raise ValueError("acquisition_mode must be DDA or DIA")
+        return mode
+
+    @property
+    def acquisition_mode(self) -> AcquisitionMode:
+        return AcquisitionMode[self.acquisition_method]
+
+    @staticmethod
+    def _validate_nce(value):
+        nce = float(value)
+        if not math.isfinite(nce) or nce < 0:
+            raise ValueError("NCE must be finite and nonnegative")
+        return nce
+
+    @property
+    def nce(self) -> float:
+        return self._validate_nce(self.config.get("nce", DEFAULT_NCE))
+
+    @property
+    def library_nce(self) -> float:
+        return self._validate_nce(
+            self.config.get("fragment", {}).get("nce", DEFAULT_NCE)
+        )
 
     @property
     def db_dir(self):
@@ -117,6 +144,7 @@ class SearchConfig:
                     f"Missing required parameter '{field}' in configuration"
                 )
 
+        _ = self.acquisition_mode, self.nce, self.library_nce
         validate_protein_scoring(self.protein_scoring)
 
         # Create output directory

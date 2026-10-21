@@ -10,6 +10,7 @@ import pyarrow.parquet as pq
 import torch
 from torch.utils.data import DataLoader
 
+from delpi.constants import DEFAULT_NCE
 from delpi.lcms.base_ion_type import BaseIonType
 from delpi.lcms.fragmentation import Fragmentation, get_frag_type_str
 from delpi.lcms.neutral_loss import NeutralLoss
@@ -58,6 +59,7 @@ class SpectralLibGenerator:
         ms2_predictor: Ms2SpectrumPredictor = None,
         rt_predictor: RetentionTimePredictor = None,
         gamma: float = 0.5,
+        nce: float = DEFAULT_NCE,
     ):
         if not isinstance(max_fragments, int) or not 1 <= max_fragments <= 255:
             raise ValueError("max_fragments must be an integer in [1, 255].")
@@ -69,6 +71,9 @@ class SpectralLibGenerator:
             raise ValueError("The MS2 predictor supports fragment charges 1 and 2.")
         if not 0 <= min_fragment_mz <= max_fragment_mz:
             raise ValueError("Invalid fragment m/z range.")
+        if not np.isfinite(nce) or nce < 0:
+            raise ValueError("NCE must be finite and nonnegative")
+        self.nce = float(nce)
         self.max_fragments = max_fragments
         self.min_intensity = min_intensity
         self.gamma = float(gamma)
@@ -96,7 +101,7 @@ class SpectralLibGenerator:
             max_charge,
             prefix_ion_type=prefix_ion_type,
             suffix_ion_type=suffix_ion_type,
-            max_fragment_isotopes=1,
+            max_fragment_isotopes=2,
             neutral_losses=[NeutralLoss.get(loss) for loss in self.neutral_losses],
         )
 
@@ -132,6 +137,7 @@ class SpectralLibGenerator:
             "neutral_losses": list(self.neutral_losses),
             "min_intensity": self.min_intensity,
             "gamma": self.gamma,
+            "nce": self.nce,
             "format_version": 2,
             "min_mz": self.min_fragment_mz,
             "max_mz": self.max_fragment_mz,
@@ -139,7 +145,7 @@ class SpectralLibGenerator:
 
     def _get_prediction_layout(self):
         """Resolve requested ions to model output columns during initialization."""
-        table = self.fragmentation.ion_type_df
+        table = self.fragmentation.ion_type_df.filter(pl.col("isotope_index") == 0)
         model_columns = {
             name: i for i, name in enumerate(self.ms2_predictor.fragment_types)
         }
@@ -370,7 +376,7 @@ class SpectralLibGenerator:
         # sequence_length while guaranteeing no batch spans two chunks, so
         # chunk transitions can be detected from the batch stream alone.
         precursor_ds = PeptideDataset(
-            precursor_df, modification_df, peptide_df, level="precursor"
+            precursor_df, modification_df, peptide_df, level="precursor", nce=self.nce
         )
         batch_sampler = ChunkedSeqDataBatchSampler(
             precursor_ds,

@@ -67,8 +67,8 @@ class RTBootstrapConfig:
     initial_rt_tolerance: float = 0.25
     fallback_rt_tolerance: float = 0.35
     max_fragments: int = 6
-    max_precursor_isotopes: int = 1
-    max_fragment_isotopes: int = 1
+    max_precursor_isotopes: int = 2
+    max_fragment_isotopes: int = 2
 
 
 @dataclass
