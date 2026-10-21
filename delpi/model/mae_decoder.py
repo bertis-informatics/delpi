@@ -3,7 +3,11 @@ import torch.nn as nn
 
 from timm.models.vision_transformer import Block
 
-from delpi.model.feature_encoder import ExpPeakEncoder
+from delpi.model.feature_encoder import (
+    ExpPeakEncoder,
+    valid_tokens,
+    token_attention_mask,
+)
 
 
 class Decoder(torch.nn.Module):
@@ -41,9 +45,17 @@ class Decoder(torch.nn.Module):
         torch.nn.init.normal_(self.mask_token, std=0.02)
         # self.apply(self._init_weights)
 
-    def forward(self, x_in, x_latent, backward_indexes, n_theo_tokens):
+    def forward(
+        self,
+        x_in,
+        x_latent,
+        backward_indexes,
+        n_theo_tokens,
+        theo_valid_mask,
+        exp_valid_mask=None,
+    ):
 
-        n_extra_tokens = n_theo_tokens + 1  # +1 for cls_token
+        n_extra_tokens = n_theo_tokens + 2  # CLS and acquisition context
 
         x = self.input_encoder(x_latent)
 
@@ -62,12 +74,17 @@ class Decoder(torch.nn.Module):
 
         # x_ = x_ + self.input_meta_encoder(x_in[:, :, self.output_dim : -2])
         # x_ = x_ + self.pos_encoder(x_in[:, :, -2], x_in[:, :, -1])
-        x_ += self.input_meta_encoder(x_in[..., self.output_dim :])
+        x_ += self.input_meta_encoder(x_in[..., self.output_dim :], exp_valid_mask)
 
         # append theo_peak_tokens & cls token
         x = torch.cat([x[:, :n_extra_tokens, :], x_], dim=1)
 
-        x = self.layer_norm(self.transformer(x))
+        exp_valid = valid_tokens(x_in, exp_valid_mask)
+        valid, bias = token_attention_mask(x, theo_valid_mask, exp_valid)
+        x = x.masked_fill(~valid.unsqueeze(-1), 0)
+        for block in self.transformer:
+            x = block(x, attn_mask=bias).masked_fill(~valid.unsqueeze(-1), 0)
+        x = self.layer_norm(x)
 
         # predictor projection
         x = self.predictor(x)
@@ -75,4 +92,4 @@ class Decoder(torch.nn.Module):
         # remove theo_peak_tokens & cls token
         x = x[:, n_extra_tokens:, :]
 
-        return x
+        return x.masked_fill(~exp_valid.unsqueeze(-1), 0)

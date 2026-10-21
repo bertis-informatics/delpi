@@ -4,6 +4,7 @@ import numba as nb
 import numpy as np
 
 
+from delpi.search.context import make_context
 from delpi.database.numba.spec_lib_container import SpectralLibContainer
 from delpi.lcms.data_container import PeakContainer, MetaContainer
 from delpi.search.dda.peak_group import DdaPeakGroupContainer
@@ -37,6 +38,7 @@ def _make_batch_in_parallel(
     X_rank: np.ndarray,
     ms1_scale_arr: np.ndarray,
     ms2_scale_arr: np.ndarray,
+    theo_valid_mask: np.ndarray,
 ):
     precursor_index0_arr = peak_group_container.precursor_index0_arr
     min_precursor_index = speclib_container.min_precursor_index
@@ -53,7 +55,7 @@ def _make_batch_in_parallel(
         ms2_frame_num = peak_group_container.frame_num_arr[k]
 
         theo_peaks = get_theoretical_peaks(speclib_container, precursor_index0)
-        _ = get_x_theo(theo_peaks, X_theo[i])
+        _ = get_x_theo(theo_peaks, X_theo[i], theo_valid_mask[i])
 
         _, ms1_scale, ms2_scale = get_x_exp(
             precursor_index0=precursor_index0,
@@ -77,20 +79,25 @@ def _make_batch_in_parallel(
         ms2_scale_arr[i] = ms2_scale
 
 
-def _allocate_dda_buffer(batch_size: int, num_theoretical_peaks: int):
+def _allocate_dda_buffer(
+    batch_size: int,
+    num_theoretical_peaks: int,
+    max_exp_peaks: int = MAX_EXP_PEAK_TOKENS,
+):
     """Allocate a complete set of numpy arrays for one DDA batch."""
     return {
+        "theo_valid_mask": np.empty(
+            (batch_size, num_theoretical_peaks), dtype=np.bool_
+        ),
         "X_theo": np.empty(
             (batch_size, num_theoretical_peaks, THEO_TOKEN_DIM), dtype=np.float32
         ),
-        "X_exp": np.empty(
-            (batch_size, MAX_EXP_PEAK_TOKENS, EXP_TOKEN_DIM), dtype=np.float32
-        ),
+        "X_exp": np.empty((batch_size, max_exp_peaks, EXP_TOKEN_DIM), dtype=np.float32),
         "X_precursor_index": np.empty(batch_size, dtype=np.uint32),
         "ms1_scale_arr": np.empty(batch_size, dtype=np.float32),
         "ms2_scale_arr": np.empty(batch_size, dtype=np.float32),
         "X_indices": np.empty((batch_size, 64), dtype=np.int32),
-        "X_rank": np.empty((batch_size, MAX_EXP_PEAK_TOKENS), dtype=np.int8),
+        "X_rank": np.empty((batch_size, max_exp_peaks), dtype=np.int16),
     }
 
 
@@ -106,13 +113,20 @@ def generate_batches(
     ms2_mass_tol: float,
     batch_size: int,
     num_buffers: int = 2,
+    *,
+    acquisition_mode: int,
+    nce: float,
+    library_nce: float,
 ):
     num_theoretical_peaks = (
         speclib_container.max_fragments + speclib_container.max_precursor_isotopes
     )
 
+    max_exp_peaks = max(
+        MAX_EXP_PEAK_TOKENS, int(peak_group_container.peak_count_arr.max(initial=0))
+    )
     buffers = [
-        _allocate_dda_buffer(batch_size, num_theoretical_peaks)
+        _allocate_dda_buffer(batch_size, num_theoretical_peaks, max_exp_peaks)
         for _ in range(num_buffers)
     ]
 
@@ -140,6 +154,22 @@ def generate_batches(
             buf["X_rank"],
             buf["ms1_scale_arr"],
             buf["ms2_scale_arr"],
+            buf["theo_valid_mask"],
+        )
+
+        precursor_mz = speclib_container.precursor_mz_arr[
+            peak_group_container.precursor_index0_arr[batch_indices]
+        ]
+        meta_indices = ms2_meta_df.frame_num_to_index_arr[frame_num_arr[batch_indices]]
+        isolation_min_mz = ms2_meta_df.isolation_min_mz_arr[meta_indices]
+        isolation_max_mz = ms2_meta_df.isolation_max_mz_arr[meta_indices]
+        context = make_context(
+            precursor_mz,
+            acquisition_mode,
+            nce,
+            library_nce,
+            isolation_min_mz,
+            isolation_max_mz,
         )
 
         yield (
@@ -151,4 +181,6 @@ def generate_batches(
             buf["X_rank"][:cur_batch_size, :num_peaks],
             buf["ms1_scale_arr"][:cur_batch_size],
             buf["ms2_scale_arr"][:cur_batch_size],
+            buf["theo_valid_mask"][:cur_batch_size],
+            context,
         )

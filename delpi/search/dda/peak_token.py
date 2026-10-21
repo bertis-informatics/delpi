@@ -13,8 +13,11 @@ from delpi.search.dia.peak_token import (
     EXP_MZ_ERROR_IDX,
     EXP_AB_IDX,
     EXP_Z_SCORE_IDX,
-    EXP_IS_PRECURSOR_IDX,
-    EXP_IS_PREFIX_IDX,
+    EXP_ION_TYPE_IDX,
+    ION_PRECURSOR,
+    ION_B,
+    ION_Y,
+    EXP_NEUTRAL_LOSS_IDX,
     EXP_CHARGE_IDX,
     EXP_ISOTOPE_INDEX_IDX,
     EXP_MS_LEVEL_IDX,
@@ -57,14 +60,20 @@ def _set_x_exp(
         if is_precursor:
             theo_charge = theo_peaks.precursor_charge
             theo_isotope_index = theo_peaks.precursor_isotope_index_arr[theo_i_]
-            theo_is_prefix = False
+            theo_ion_type = ION_PRECURSOR
+            theo_neutral_loss = 0
             theo_cleavage_index = 0.0
             theo_rev_cleavage_index = 0.0
         else:
             theo_i = theo_i_ % num_fragments
-            theo_isotope_index = theo_i_ // num_fragments
+            theo_isotope_index = theo_peaks.fragment_isotope_index_arr[
+                theo_i_ // num_fragments
+            ]
             theo_charge = theo_peaks.fragment_charge_arr[theo_i]
-            theo_is_prefix = theo_peaks.fragment_is_prefix_arr[theo_i]
+            theo_ion_type = (
+                ION_B if theo_peaks.fragment_is_prefix_arr[theo_i] else ION_Y
+            )
+            theo_neutral_loss = theo_peaks.fragment_neutral_loss_arr[theo_i]
             theo_cleavage_index = theo_peaks.fragment_cleavage_index_arr[theo_i]
             theo_rev_cleavage_index = seq_len - 2 - theo_cleavage_index
 
@@ -73,6 +82,8 @@ def _set_x_exp(
             time_idx = lookup_time_index(frame_num_key_arr, time_index_val_arr, fn)
 
             if time_idx >= 0:
+                if counter >= x_exp.shape[0]:
+                    raise ValueError("Experimental token buffer is too small")
                 mz = peak_df.mz_arr[exp_i]
                 ab = peak_df.ab_arr[exp_i]
                 z_score = peak_df.z_score_arr[exp_i]
@@ -82,8 +93,8 @@ def _set_x_exp(
                 )
                 x_exp[counter, EXP_AB_IDX] = ab
                 x_exp[counter, EXP_Z_SCORE_IDX] = z_score
-                x_exp[counter, EXP_IS_PRECURSOR_IDX] = is_precursor
-                x_exp[counter, EXP_IS_PREFIX_IDX] = theo_is_prefix
+                x_exp[counter, EXP_ION_TYPE_IDX] = theo_ion_type
+                x_exp[counter, EXP_NEUTRAL_LOSS_IDX] = theo_neutral_loss
                 x_exp[counter, EXP_CHARGE_IDX] = theo_charge
                 x_exp[counter, EXP_ISOTOPE_INDEX_IDX] = theo_isotope_index
                 x_exp[counter, EXP_MS_LEVEL_IDX] = ms_level
@@ -91,8 +102,7 @@ def _set_x_exp(
                 x_exp[counter, EXP_REV_CLEAVAGE_INDEX_IDX] = theo_rev_cleavage_index
                 x_exp[counter, EXP_TIME_INDEX_IDX] = time_idx
 
-                # theoretical-intensity rank of this fragment (0 = library's most
-                # intense predicted fragment for this precursor), for any
+                # Soft family-aware selection rank (0 = highest score), for any
                 # isotope; get_pmsm_median_intensity filters isotope via x_exp itself
                 if (x_rank is not None) and (is_precursor == False):
                     x_rank[counter] = num_fragments - theo_i - 1
@@ -107,9 +117,6 @@ def _set_x_exp(
                     ind_count += 1
 
                 counter += 1
-                if counter >= x_exp.shape[0]:
-                    print("Warning: MAX_EXP_PEAK_TOKENS exceeded.")
-                    break
 
     # abundance scaling
     if max_ab > 0:
@@ -152,7 +159,9 @@ def get_x_exp(
             ms2_peak_df.mz_arr, theo_peaks.fragment_mz_arr.flatten(), ms2_mass_tol
         )
     else:
-        ms2_st, ms2_ed = peak_index_container.fragment_ms2_indices[precursor_index0]
+        ms2_st, ms2_ed = peak_index_container.fragment_ms2_indices[
+            precursor_index0, :, : theo_peaks.fragment_mz_arr.size
+        ]
         pc_ms1_st, pc_ms1_ed = peak_index_container.precursor_ms1_indices[
             precursor_index0
         ]

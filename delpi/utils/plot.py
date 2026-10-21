@@ -14,7 +14,7 @@ def plot_pmsm(x_exp: np.ndarray):
     fig, axs = plt.subplots(2, 1, sharex=True, sharey=False)
     x = np.arange(9)
 
-    precursor_peak_df = peak_df.filter(pl.col("is_precursor"))
+    precursor_peak_df = peak_df.filter(pl.col("ion_type") == 0)
     for grp, sub_df in precursor_peak_df.group_by(
         ["isotope_index", "ms_level"], maintain_order=True
     ):
@@ -24,10 +24,10 @@ def plot_pmsm(x_exp: np.ndarray):
         axs[0].plot(x, y, linestyle=line_style)
     axs[0].set_title("Precursor XICs")
     fragment_peak_df = peak_df.filter(
-        (~pl.col("is_precursor")) & (pl.col("isotope_index") == 0)
+        (pl.col("ion_type") != 0) & (pl.col("isotope_index") == 0)
     )
     for grp, sub_df in fragment_peak_df.group_by(
-        ["cleavage_index", "charge", "is_prefix"], maintain_order=True
+        ["cleavage_index", "charge", "ion_type", "neutral_loss"], maintain_order=True
     ):
         y = np.zeros(9)
         y[sub_df["time_index"]] = sub_df["ab"]

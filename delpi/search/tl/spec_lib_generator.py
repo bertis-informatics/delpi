@@ -7,12 +7,14 @@ import numpy as np
 import torch
 
 from delpi.lcms.base_ion_type import BaseIonType
+from delpi.lcms.neutral_loss import NeutralLoss
 from delpi.model.spec_lib import Ms2SpectrumPredictor
-
 from delpi.database.peptide_database import PeptideDatabase
 from delpi.database.spec_lib_generator import SpectralLibGenerator
 from delpi.database.precursor_generator import PrecursorGenerator
 from delpi.model.spec_lib.rt_predictor import RetentionTimePredictor
+from delpi.database.spec_lib_schema import with_speclib_index
+from delpi.utils.yaml_file import load_yaml, save_yaml
 
 
 class RefinedSpectralLibGenerator(SpectralLibGenerator):
@@ -21,7 +23,7 @@ class RefinedSpectralLibGenerator(SpectralLibGenerator):
         self,
         rt_predictor: RetentionTimePredictor,
         ms2_predictor: Ms2SpectrumPredictor,
-        apply_phospho,
+        apply_phospho=False,
         min_fragment_charge: int = 1,
         max_fragment_charge: int = 2,
         min_precursor_charge: int = 2,
@@ -34,9 +36,16 @@ class RefinedSpectralLibGenerator(SpectralLibGenerator):
         suffix_ion_type=BaseIonType.Y,
         max_fragments=16,
         device: Union[str, torch.device] = "cuda:0",
+        neutral_losses=None,
         *args,
         **kwargs,
     ):
+        if neutral_losses is None:
+            neutral_losses = (
+                [NeutralLoss.NO_LOSS, NeutralLoss.H3O4P]
+                if apply_phospho
+                else NeutralLoss.get_common_neutral_losses()
+            )
         super().__init__(
             rt_predictor=rt_predictor,
             ms2_predictor=ms2_predictor,
@@ -47,7 +56,7 @@ class RefinedSpectralLibGenerator(SpectralLibGenerator):
             max_fragments=max_fragments,
             min_fragment_mz=min_fragment_mz,
             max_fragment_mz=max_fragment_mz,
-            apply_phospho=apply_phospho,
+            neutral_losses=neutral_losses,
             device=device,
             *args,
             **kwargs,
@@ -66,6 +75,8 @@ class RefinedSpectralLibGenerator(SpectralLibGenerator):
 
     def _build_database(self, db_dir: Path, precursor_index_arr: np.ndarray):
 
+        param_path = db_dir / "param.yaml"
+        self.source_params = load_yaml(param_path) if param_path.exists() else {}
         pmsm_df = PeptideDatabase.join(
             db_dir,
             pl.DataFrame({"precursor_index": precursor_index_arr}),
@@ -165,7 +176,7 @@ class RefinedSpectralLibGenerator(SpectralLibGenerator):
             batch_size=512,
         )
 
-        ms2_df = self.predict_ms2_spectra(
+        ms2_df, self.precursor_df = self.predict_ms2_spectra(
             peptide_df=self.peptide_df,
             modification_df=self.modification_df,
             precursor_df=self.precursor_df,
@@ -185,8 +196,17 @@ class RefinedSpectralLibGenerator(SpectralLibGenerator):
         self.sequence_df.write_parquet(save_dir / "sequence_df.parquet")
         self.peptide_df.write_parquet(save_dir / "peptide_df.parquet")
         self.modification_df.write_parquet(save_dir / "modification_df.parquet")
+        # Also rebase offsets after copying a subset of the original library.
+        counts = np.bincount(
+            self.speclib_df["precursor_index"].to_numpy(),
+            minlength=self.precursor_df.height,
+        )
+        self.precursor_df = with_speclib_index(self.precursor_df, counts)
         self.precursor_df.write_parquet(save_dir / "precursor_df.parquet")
         self.speclib_df.write_parquet(save_dir / "speclib_df.parquet")
+        params = dict(getattr(self, "source_params", {}))
+        params["fragment"] = self.param_dict
+        save_yaml(save_dir / "param.yaml", params)
 
     def _update_ref_rt(self, target_df: pl.DataFrame):
         from delpi.model.rt_calibrator import RetentionTimeCalibrator

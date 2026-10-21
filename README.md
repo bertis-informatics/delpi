@@ -191,13 +191,26 @@ Create a YAML configuration file based on the [example template](data/example_pa
 
 | Field | Description |
 |-------|-------------|
-| *acquisition_method* | Acquisition mode (`DIA` or `DDA`) |
+| *acquisition_mode* | Acquisition mode (`DIA` or `DDA`); `acquisition_method` remains an alias |
 | *input_files* | Paths to LC–MS/MS data files. Accepts a single string or a list, where each entry is either an explicit file path or a glob pattern (`*`, `?`, `[]`, and recursive `**` are supported), e.g. `/data/*.mzML` or `/data/**/*.mzML`. |
 | *fasta_file* | Protein database in FASTA format |
 | *output_directory* | Directory where search results will be written |
 | *database_directory* | Directory for storing internally generated in silico spectral libraries (if libraries generated using the same FASTA file and search options already exist, they will be reused) |
 
 **Optional fields:**
+
+`nce` sets the acquisition NCE used in the search-model context (default: 30).
+`fragment.nce` sets the NCE used to predict library intensities (default: 30);
+this value is saved in library metadata and supplies `LIBRARY_NCE` during search.
+Isolation offsets retain their sign and are scaled with `asinh(offset / 5)`.
+
+The search model now uses input schema 2: categorical ion type and neutral loss,
+a separate acquisition context token, signed isotope indices, and explicit
+theoretical-token validity masks. Checkpoints trained on the previous token
+layout require retraining. Default precursor isotopes are M−1 through M+2;
+fragment matching uses M−1, M, and M+1. Isotope counts must be at least two,
+with M always in the second row. RT calibration uses only that M row.
+Precursors with fewer than five stored fragments are excluded.
 
 `protein_scoring` selects the score used by the protein picker and by global
 and run-specific protein-group FDR:

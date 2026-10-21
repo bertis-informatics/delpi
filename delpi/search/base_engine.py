@@ -282,6 +282,7 @@ class BaseSearchEngine(ABC):
                 return
 
             preparator = TransferLearningDataPreparator(
+                nce=self.search_config.nce,
                 tolerance_in_ppm=self.search_config["ms2_mass_tol_in_ppm"],
                 apply_phospho=self.search_config.is_phospho_search,
             )

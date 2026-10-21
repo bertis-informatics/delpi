@@ -86,6 +86,7 @@ class DDASearchEngine(BaseSearchEngine):
         save_quant: bool = False,
         progress: ProgressTracker = None,
         peak_groups: tuple = None,
+        library_nce: float = 30.0,
     ) -> Dict[str, np.ndarray]:
         """Search DDA spectra for a specific isolation window."""
 
@@ -108,6 +109,8 @@ class DDASearchEngine(BaseSearchEngine):
                 rt_window_half,
                 isolation_lower_tol_in_da=ISOLATION_LOWER_TOL,
                 isolation_upper_tol_in_da=ISOLATION_UPPER_TOL,
+                ms1_mass_tol=ms1_tol,
+                ms2_mass_tol=ms2_tol,
                 topk=peak_group_topk,
             )
 
@@ -126,6 +129,9 @@ class DDASearchEngine(BaseSearchEngine):
             ms1_mass_tol=ms1_tol,
             ms2_mass_tol=ms2_tol,
             batch_size=batch_size,
+            acquisition_mode=search_config.acquisition_mode,
+            nce=search_config.nce,
+            library_nce=library_nce,
         )
 
         if progress is None:
@@ -151,10 +157,20 @@ class DDASearchEngine(BaseSearchEngine):
             n = x_theo_t.shape[0]
             X_theo = X_theo_tensor[:n]
             X_theo.copy_(x_theo_t, non_blocking=True)
+            if X_exp_tensor.shape[1] < x_exp_t.shape[1]:
+                X_exp_tensor = X_exp_tensor.new_empty(
+                    (batch_size, x_exp_t.shape[1], x_exp_t.shape[2])
+                )
             X_exp = X_exp_tensor[:n, : x_exp_t.shape[1], :]
             X_exp.copy_(x_exp_t, non_blocking=True)
 
-            logits, x_feature = model(X_theo, X_exp, return_feature=True)
+            theo_valid = tensors[8].to(device=X_theo.device, non_blocking=True)
+            context = tensors[9].to(
+                device=X_theo.device, dtype=X_theo.dtype, non_blocking=True
+            )
+            logits, x_feature = model(
+                X_theo, X_exp, context, theo_valid, return_feature=True
+            )
             logits = logits.flatten()
             mask = logits > logit_cutoff
 
@@ -235,13 +251,25 @@ class DDASearchEngine(BaseSearchEngine):
         ms1_peak_df = run.ms1_map.get_peak_container()
 
         X_theo_tensor = torch.empty(
-            (batch_size, 19, len(THEORETICAL_PEAK)),
-            dtype=torch.float16,
+            (
+                batch_size,
+                speclib_reader.max_fragments + speclib_reader.max_precursor_isotopes,
+                len(THEORETICAL_PEAK),
+            ),
+            dtype=(
+                torch.float16
+                if torch.device(self.device).type == "cuda"
+                else torch.float32
+            ),
             device=self.device,
         )
         X_exp_tensor = torch.rand(
             (batch_size, 512, len(EXPERIMENTAL_PEAK)),
-            dtype=torch.float16,
+            dtype=(
+                torch.float16
+                if torch.device(self.device).type == "cuda"
+                else torch.float32
+            ),
             device=self.device,
         )
 
@@ -270,6 +298,8 @@ class DDASearchEngine(BaseSearchEngine):
                             rt_window_half,
                             isolation_lower_tol_in_da=ISOLATION_LOWER_TOL,
                             isolation_upper_tol_in_da=ISOLATION_UPPER_TOL,
+                            ms1_mass_tol=search_config["ms1_mass_tol_in_ppm"],
+                            ms2_mass_tol=search_config["ms2_mass_tol_in_ppm"],
                             topk=TOPK_PER_PRECURSOR,
                         )
                         yield ms2_map, sc, pgc, pic
@@ -324,6 +354,7 @@ class DDASearchEngine(BaseSearchEngine):
                     save_quant=save_quant,
                     progress=progress,
                     peak_groups=(pgc, pic),
+                    library_nce=speclib_reader.library_nce,
                 )
                 if (
                     results.get("frame_num") is not None

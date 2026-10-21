@@ -8,6 +8,7 @@ from delpi.database.numba.spec_lib_container import SpectralLibContainer
 from delpi.search.dia.peak_group import PeakIndexContainer
 from delpi.database.numba.spec_lib_utils import get_theoretical_peaks
 from delpi.utils.peak import find_peak_index
+from delpi.constants import MIN_SEARCH_FRAGMENTS
 from delpi.constants import DDA_MATCHED_PEAKS_CUTOFF_LB, DDA_MATCHED_PEAKS_CUTOFF_UB
 
 
@@ -40,6 +41,12 @@ def _assign_spectra_to_bins(rt_window_center, rt_window_half, rt_bin_count, rt_a
 
     # Edge-case: no spectra or bins
     if n_spec == 0 or rt_bin_count <= 0:
+        return assigned
+
+    if rt_bin_count == 1:
+        i = np.argmin(np.abs(rt_array - rt_window_center))
+        if abs(rt_array[i] - rt_window_center) <= rt_window_half:
+            assigned[0] = i
         return assigned
 
     # Bin spacing so the last bin's centre hits max(rt_array)
@@ -211,7 +218,7 @@ def _find_ms2_spectra(
 
     ms2_frame_num_to_index = ms2_meta_df.frame_num_to_index_arr
     min_idx, max_idx = ms2_frame_indexes[0], ms2_frame_indexes[-1]
-    mono_frag_pk_count = np.full(max_idx - min_idx + 1, -1, dtype=np.int8)
+    mono_frag_pk_count = np.full(max_idx - min_idx + 1, -1, dtype=np.int32)
     for i in ms2_frame_indexes:
         mono_frag_pk_count[i - min_idx] = 0
 
@@ -227,7 +234,7 @@ def _find_ms2_spectra(
                 mono_frag_pk_count[ms2_frame_idx - min_idx] += 1
 
     ms2_ii = np.empty(ms2_frame_indexes.shape[0], dtype=np.uint32)
-    ms2_score = np.empty(ms2_frame_indexes.shape[0], dtype=np.int8)
+    ms2_score = np.empty(ms2_frame_indexes.shape[0], dtype=np.int32)
 
     ms2_ii_cnt = 0
     for ii, idx in enumerate(ms2_frame_indexes):
@@ -266,7 +273,6 @@ def find_peak_groups(
 
     rt_bin_count = rt_window_radius * 2 + 1
 
-    num_fragments = speclib_container.max_fragments
     num_precursors = speclib_container.precursor_mz_arr.shape[0]
     min_precursor_index = speclib_container.min_precursor_index
     num_precursor_peaks = speclib_container.max_precursor_isotopes
@@ -274,13 +280,13 @@ def find_peak_groups(
         speclib_container.max_fragments * speclib_container.max_fragment_isotopes
     )
 
-    precursor_ms1_indices = np.empty(
+    precursor_ms1_indices = np.zeros(
         (num_precursors, 2, num_precursor_peaks), dtype=np.uint32
     )
-    precursor_ms2_indices = np.empty(
+    precursor_ms2_indices = np.zeros(
         (num_precursors, 2, num_precursor_peaks), dtype=np.uint32
     )
-    fragment_ms2_indices = np.empty(
+    fragment_ms2_indices = np.zeros(
         (num_precursors, 2, num_fragment_peaks),
         dtype=np.uint32,
     )
@@ -293,11 +299,18 @@ def find_peak_groups(
     time_index_val_results = [np.empty((0, 0, 0), dtype=np.int8)] * num_precursors
 
     for precursor_index0 in nb.prange(num_precursors):
+        num_fragments = int(
+            speclib_container.precursor_speclib_rows_arr[precursor_index0]
+        )
+        if num_fragments < MIN_SEARCH_FRAGMENTS:
+            continue
+        mono_start = num_fragments
+        mono_stop = 2 * num_fragments
         # rt_lb, rt_ub = frag_db.get_rt_range(precursor_index0)
         theo_peaks = get_theoretical_peaks(speclib_container, precursor_index0)
 
         precursor_charge = theo_peaks.precursor_charge
-        precursor_mz = theo_peaks.precursor_mz_arr[0]
+        precursor_mz = speclib_container.precursor_mz_arr[precursor_index0]
         min_matched = max(
             min_peak_count, get_matched_peak_cutoff(theo_peaks.sequence_length)
         )
@@ -326,8 +339,8 @@ def find_peak_groups(
         peak_group_ii = _find_ms2_spectra(
             ms2_meta_df,
             ms2_peak_df,
-            ms2_st[:num_fragments],
-            ms2_ed[:num_fragments],
+            ms2_st[mono_start:mono_stop],
+            ms2_ed[mono_start:mono_stop],
             ms2_frame_indexes,
             min_matched,
             topk,
@@ -345,8 +358,8 @@ def find_peak_groups(
             ms2_peak_df.mz_arr, theo_peaks.precursor_mz_arr, ms2_mass_tol
         )
         # store matching results
-        fragment_ms2_indices[precursor_index0, 0] = ms2_st
-        fragment_ms2_indices[precursor_index0, 1] = ms2_ed
+        fragment_ms2_indices[precursor_index0, 0, : ms2_st.size] = ms2_st
+        fragment_ms2_indices[precursor_index0, 1, : ms2_ed.size] = ms2_ed
         precursor_ms1_indices[precursor_index0, 0] = pc_ms1_st
         precursor_ms1_indices[precursor_index0, 1] = pc_ms1_ed
         precursor_ms2_indices[precursor_index0, 0] = pc_ms2_st
@@ -394,7 +407,7 @@ def find_peak_groups(
         np.array([arr.shape[0] for arr in peak_count_results], dtype=np.uint32)
     )
 
-    n = num_peak_groups[-1]
+    n = int(num_peak_groups[-1]) if num_precursors else 0
     precursor_index0_arr = np.empty(n, dtype=np.uint32)
     peak_count_arr = np.empty(n, dtype=np.uint16)
     frame_num_arr = np.empty(n, dtype=np.uint32)

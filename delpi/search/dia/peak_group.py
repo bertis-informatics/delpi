@@ -12,6 +12,7 @@ from delpi.database.numba.spec_lib_utils import (
 )
 from delpi.utils.signal import find_local_maxima, cluster_peaks_with_weights
 from delpi.utils.peak import find_peak_index
+from delpi.constants import MIN_SEARCH_FRAGMENTS
 from delpi.constants import QUANT_FRAGMENTS
 
 
@@ -201,7 +202,7 @@ def sum_neighborhood(all_peak_count_arr, rt_window_radius, peak_group_arr):
     return sum_peak_count_arr
 
 
-@nb.njit(parallel=True, fastmath=True, cache=True)
+@nb.njit(parallel=True, cache=True)
 def find_peak_groups(
     speclib_container: SpectralLibContainer,
     ms1_peak_df: PeakContainer,
@@ -215,7 +216,6 @@ def find_peak_groups(
     topk: int = 10,
 ) -> Tuple[PeakGroupContainer, PeakIndexContainer]:
 
-    num_fragments = speclib_container.max_fragments
     num_precursors = speclib_container.precursor_mz_arr.shape[0]
     min_precursor_index = speclib_container.min_precursor_index
     peak_group_results = [np.empty(0, dtype=np.uint32)] * num_precursors
@@ -226,23 +226,37 @@ def find_peak_groups(
         speclib_container.max_fragments * speclib_container.max_fragment_isotopes
     )
 
-    precursor_ms1_indices = np.empty(
+    precursor_ms1_indices = np.zeros(
         (num_precursors, 2, num_precursor_peaks), dtype=np.uint32
     )
-    precursor_ms2_indices = np.empty(
+    precursor_ms2_indices = np.zeros(
         (num_precursors, 2, num_precursor_peaks), dtype=np.uint32
     )
-    fragment_ms2_indices = np.empty(
+    fragment_ms2_indices = np.zeros(
         (num_precursors, 2, num_fragment_peaks), dtype=np.uint32
     )
 
     for precursor_index0 in nb.prange(num_precursors):
+        num_fragments = int(
+            speclib_container.precursor_speclib_rows_arr[precursor_index0]
+        )
+        if num_fragments < MIN_SEARCH_FRAGMENTS:
+            continue
+        mono_start = num_fragments
+        mono_stop = 2 * num_fragments
 
         min_frame_index, max_frame_index = get_frame_index_range(
             speclib_container, frame_num_map.ms2_rt_arr, precursor_index0
         )
 
-        xic_len = max_frame_index - min_frame_index + 1
+        if (
+            min_frame_index >= frame_num_map.ms2_rt_arr.size
+            or max_frame_index < min_frame_index
+        ):
+            continue
+        xic_len = int(max_frame_index) - int(min_frame_index) + 1
+        if xic_len < 2 * rt_window_radius + 1:
+            continue
         peak_lb = rt_window_radius  # inclusive
         peak_ub = xic_len - rt_window_radius - 1  # inclusive
 
@@ -259,8 +273,8 @@ def find_peak_groups(
         pc_ms2_st, pc_ms2_ed = find_peak_index(ms2_peak_df.mz_arr, mz_arr, ms2_mass_tol)
 
         # store matching results
-        fragment_ms2_indices[precursor_index0, 0] = ms2_st
-        fragment_ms2_indices[precursor_index0, 1] = ms2_ed
+        fragment_ms2_indices[precursor_index0, 0, : ms2_st.size] = ms2_st
+        fragment_ms2_indices[precursor_index0, 1, : ms2_ed.size] = ms2_ed
         precursor_ms1_indices[precursor_index0, 0] = pc_ms1_st
         precursor_ms1_indices[precursor_index0, 1] = pc_ms1_ed
         precursor_ms2_indices[precursor_index0, 0] = pc_ms2_st
@@ -284,8 +298,8 @@ def find_peak_groups(
         xic_arr = make_xic_array(
             ms2_peak_df,
             frame_num_map,
-            ms2_st,
-            ms2_ed,
+            ms2_st[mono_start:mono_stop],
+            ms2_ed[mono_start:mono_stop],
             min_frame_index,
             max_frame_index,
             num_fragments,
@@ -300,6 +314,9 @@ def find_peak_groups(
         )
         mask = (xic_peak_count_arr >= min_xic_peak_count) & (quant_peak_count_arr > 0)
         peak_group_arr = np.flatnonzero(mask).astype(np.uint32)
+        peak_group_arr = peak_group_arr[
+            (peak_group_arr > 0) & (peak_group_arr < xic_len - 1)
+        ]
 
         if peak_group_arr.shape[0] < 1:
             continue
@@ -354,10 +371,11 @@ def find_peak_groups(
         peak_count_results[precursor_index0] = sum_peak_count_arr
         num_peak_groups[precursor_index0] = n_groups
 
+    total_groups = int(num_peak_groups.sum())
     num_peak_groups = np.cumsum(num_peak_groups)
-    precursor_index0_arr = np.empty(num_peak_groups[-1], dtype=np.uint32)
-    frame_num_arr = np.empty(num_peak_groups[-1], dtype=np.uint32)
-    peak_count_arr = np.empty(num_peak_groups[-1], dtype=np.uint16)
+    precursor_index0_arr = np.empty(total_groups, dtype=np.uint32)
+    frame_num_arr = np.empty(total_groups, dtype=np.uint32)
+    peak_count_arr = np.empty(total_groups, dtype=np.uint16)
 
     for i in nb.prange(num_precursors):
         st = 0 if i == 0 else num_peak_groups[i - 1]

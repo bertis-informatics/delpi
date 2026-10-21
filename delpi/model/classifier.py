@@ -7,6 +7,7 @@ import lightning.pytorch as pl
 
 from delpi.model.mae_encoder import Encoder
 from delpi.model.input import TheoPeakInput, ExpPeakInput
+from delpi.model.feature_encoder import valid_tokens
 
 
 class DelPiModel(pl.LightningModule):
@@ -19,6 +20,8 @@ class DelPiModel(pl.LightningModule):
         model = DelPiModel.load("path/to/model.pth")
     """
 
+    INPUT_SCHEMA_VERSION = 2
+
     def __init__(
         self,
         embed_dim: int = 192,
@@ -28,6 +31,7 @@ class DelPiModel(pl.LightningModule):
         global_pool: Literal["token", "avg", "split"] = "token",
         layers: Sequence[int] = [64, 32],
         dropout: float = 0.1,
+        input_schema_version: int = 2,
         **kwargs,
     ):
         super().__init__()
@@ -36,6 +40,11 @@ class DelPiModel(pl.LightningModule):
             raise ValueError(
                 f"global_pool must be 'token', 'avg', or 'split', got {global_pool!r}"
             )
+        if input_schema_version != self.INPUT_SCHEMA_VERSION:
+            raise ValueError(
+                "Unsupported DelPi input schema; retrain the model for schema 2"
+            )
+        self.save_hyperparameters(ignore=["kwargs"])
         self.global_pool = global_pool
         self.transform = None
 
@@ -68,26 +77,28 @@ class DelPiModel(pl.LightningModule):
         fc_layers.append(nn.Linear(num_neurons[-1], 1))
         self.classifier = nn.Sequential(*fc_layers)
 
-    def _pool_features(self, x: torch.Tensor, n_theo_tokens: int) -> torch.Tensor:
-        """Pool encoder output according to self.global_pool.
+    def _pool_features(self, x, n_theo_tokens, theo_valid_mask, exp_valid_mask):
+        """Pool [CLS, context, theoretical, experimental], excluding padding."""
 
-        Token layout after encoder: [CLS | theo_tokens (n_theo_tokens) | exp_tokens]
+        def mean(tokens, valid):
+            weights = valid.unsqueeze(-1).to(tokens.dtype)
+            return (tokens * weights).sum(1) / weights.sum(1).clamp_min(1)
 
-        Args:
-            x: encoder output of shape [B, 1 + n_theo + n_exp, embed_dim]
-            n_theo_tokens: number of theoretical peak tokens
-        Returns:
-            Pooled feature tensor of shape [B, embed_dim]
-        """
         if self.global_pool == "token":
             return x[:, 0]
-        elif self.global_pool == "avg":
-            return x[:, 1:].mean(dim=1)
-        else:  # "split"
-            cls = x[:, 0]
-            theo_avg = x[:, 1 : 1 + n_theo_tokens].mean(dim=1)
-            exp_avg = x[:, 1 + n_theo_tokens :].mean(dim=1)
-            return self.split_proj(torch.cat([cls, theo_avg, exp_avg], dim=-1))
+        if self.global_pool == "avg":
+            valid = torch.cat(
+                (
+                    torch.ones((x.shape[0], 1), dtype=torch.bool, device=x.device),
+                    theo_valid_mask,
+                    exp_valid_mask,
+                ),
+                dim=1,
+            )
+            return mean(x[:, 1:], valid)
+        theo_avg = mean(x[:, 2 : 2 + n_theo_tokens], theo_valid_mask)
+        exp_avg = mean(x[:, 2 + n_theo_tokens :], exp_valid_mask)
+        return self.split_proj(torch.cat((x[:, 0], theo_avg, exp_avg), dim=-1))
 
     @classmethod
     def load(cls, path: str | Path) -> Self:
@@ -100,13 +111,22 @@ class DelPiModel(pl.LightningModule):
         self,
         x_theo: torch.Tensor,
         x_exp: torch.Tensor,
+        x_context: torch.Tensor,
+        theo_valid_mask: torch.Tensor,
+        exp_valid_mask: torch.Tensor | None = None,
         return_feature: bool = False,
     ):
         if self.transform is not None:
-            x_theo, x_exp = self.transform(x_theo, x_exp)
+            x_theo, x_exp, x_context = self.transform(x_theo, x_exp, x_context)
 
-        x = self.encoder._forward_impl(x_theo, x_exp)
-        x_feature = self._pool_features(x, n_theo_tokens=x_theo.shape[1])
+        theo_valid_mask = valid_tokens(x_theo, theo_valid_mask)
+        exp_valid_mask = valid_tokens(x_exp, exp_valid_mask)
+        x = self.encoder._forward_impl(
+            x_theo, x_exp, x_context, theo_valid_mask, exp_valid_mask
+        )
+        x_feature = self._pool_features(
+            x, x_theo.shape[1], theo_valid_mask, exp_valid_mask
+        )
         logits = self.classifier(x_feature)
 
         if return_feature:

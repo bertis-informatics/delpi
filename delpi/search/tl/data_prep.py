@@ -71,11 +71,11 @@ class TransferLearningDataPreparator:
         self.fragmentation = Fragmentation(
             min_charge=self.min_charge,
             max_charge=self.max_charge,
-            max_fragment_isotopes=1,
+            max_fragment_isotopes=2,
             neutral_losses=neutral_losses,
         )
 
-        self.ion_type_container = self.fragmentation.get_ion_types()
+        self.ion_type_container = self.fragmentation.get_ion_types(isotope_index=0)
 
     def prepare_training_data(
         self,
@@ -373,4 +373,3 @@ class TransferLearningDataPreparator:
                 stats["nce_distribution"][float(nce)] += 1
 
         return stats
-

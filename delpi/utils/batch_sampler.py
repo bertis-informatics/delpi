@@ -1,6 +1,8 @@
 from typing import List
 
 import numpy as np
+import torch
+import torch.distributed as dist
 
 from torch.utils.data import Dataset
 from torch.utils.data.sampler import BatchSampler
@@ -181,32 +183,42 @@ def get_batch_sampler_for_seq_data(
     batch_size: int,
     local_rank: int = 0,
 ):
-    """Create batch sampler that supports multi-GPU training."""
+    """Create a length-grouped sampler for this rank.
+
+    Distributed callers must have an initialized process group and pass the
+    global rank as ``local_rank`` (the historical argument name).
+    """
 
     if world_size > 1:
-        batch_sampler = None
-        batch_count_list = []
-        for rank in range(world_size):
-            dist_sampler = DistributedSampler(
-                dataset,
-                shuffle=shuffle,
-                seed=rand_seed,
-                num_replicas=world_size,
-                rank=rank,
-            )
-            batch_sampler_ = SeqDataBatchSampler(
-                dataset,
-                batch_size=batch_size,
-                batch_grouping_column=batch_grouping_column,
-                shuffle=shuffle,
-                seed=rand_seed,
-                indices=list(dist_sampler),
-            )
-            batch_count_list.append(batch_sampler_.count_num_of_batches())
-            if rank == local_rank:
-                batch_sampler = batch_sampler_
-        # reset batch_count
-        batch_sampler.batch_count = min(batch_count_list)
+        if not dist.is_initialized():
+            raise RuntimeError("Distributed batch sampling requires a process group")
+        dist_sampler = DistributedSampler(
+            dataset,
+            shuffle=shuffle,
+            seed=rand_seed,
+            num_replicas=world_size,
+            rank=local_rank,
+        )
+        batch_sampler = SeqDataBatchSampler(
+            dataset,
+            batch_size=batch_size,
+            batch_grouping_column=batch_grouping_column,
+            shuffle=shuffle,
+            seed=rand_seed,
+            indices=list(dist_sampler),
+        )
+        # Exchange only the local count instead of rebuilding every rank's
+        # shuffled indices. Keep the existing minimum-batch stopping policy.
+        device = (
+            torch.device("cuda", torch.cuda.current_device())
+            if dist.get_backend() == "nccl"
+            else torch.device("cpu")
+        )
+        batch_count = torch.tensor(
+            batch_sampler.count_num_of_batches(), dtype=torch.int64, device=device
+        )
+        dist.all_reduce(batch_count, op=dist.ReduceOp.MIN)
+        batch_sampler.batch_count = int(batch_count.item())
     else:
         batch_sampler = SeqDataBatchSampler(
             dataset,

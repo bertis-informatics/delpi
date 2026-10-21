@@ -1,7 +1,13 @@
 import torch
 from timm.models.vision_transformer import Block
 
-from delpi.model.feature_encoder import TheoPeakEncoder, ExpPeakEncoder
+from delpi.model.feature_encoder import (
+    TheoPeakEncoder,
+    ExpPeakEncoder,
+    ContextEncoder,
+    valid_tokens,
+    token_attention_mask,
+)
 
 
 class Encoder(torch.nn.Module):
@@ -17,6 +23,7 @@ class Encoder(torch.nn.Module):
     ) -> None:
         super().__init__()
 
+        self.context_encoder = ContextEncoder(embed_dim)
         self.cls_token = torch.nn.Parameter(torch.zeros(1, 1, embed_dim))
 
         self.theo_peak_encoder = TheoPeakEncoder(
@@ -60,55 +67,28 @@ class Encoder(torch.nn.Module):
 
         return x_masked, mask, backward_indexes
 
-    def forward(self, x_theo, x_exp, mask_ratio):
-
+    def forward(
+        self, x_theo, x_exp, x_context, mask_ratio, theo_valid_mask, exp_valid_mask=None
+    ):
+        exp_valid = valid_tokens(x_exp, exp_valid_mask)
         x_exp, mask, backward_indexes = self.random_masking(x_exp, mask_ratio)
-        x = self._forward_impl(x_theo, x_exp)
-
+        mask = mask * exp_valid.to(mask.dtype)
+        forward_indexes = torch.argsort(backward_indexes, dim=1)[:, : x_exp.shape[1]]
+        exp_valid = torch.gather(exp_valid, 1, forward_indexes)
+        x = self._forward_impl(x_theo, x_exp, x_context, theo_valid_mask, exp_valid)
         return x, mask, backward_indexes
 
-    def _forward_impl(self, x_theo: torch.Tensor, x_exp: torch.Tensor):
-
-        # x_exp = self.exp_peak_encoder(x_exp[:, :, :-2]) + self.pos_encoder(
-        #     x_exp[:, :, -2], x_exp[:, :, -1]
-        # )
-        # x_theo = self.theo_peak_encoder(x_theo[:, :, :-1]) + self.pos_encoder_1d(
-        #     x_theo[:, :, -1]
-        # )
-        x_theo = self.theo_peak_encoder(x_theo)
-        x_exp = self.exp_peak_encoder(x_exp)
-
-        # append cls_token and theoretical_peak_tokens,
-        #       [B, len_keep, D] -> [B, len_keep+1+len_theo, D]
-        # cls_token = self.cls_token + self.pos_encoder.pos_embed[0, :]
-        cls_tokens = self.cls_token.expand(x_theo.shape[0], -1, -1)
-
-        x = torch.cat((cls_tokens, x_theo, x_exp), dim=1)
-
-        x = self.transformer(x)
-        x = self.layer_norm(x)
-
-        return x
-
-
-def test_encoder():
-    from delpi.model.input import THEORETICAL_PEAK, EXPERIMENTAL_PEAK
-
-    encoder = Encoder(
-        theo_peak_dim=len(THEORETICAL_PEAK), exp_peak_dim=len(EXPERIMENTAL_PEAK)
-    )
-
-    x_theo = torch.rand(32, 51, len(THEORETICAL_PEAK))
-
-    x_exp = torch.rand(32, 40, len(EXPERIMENTAL_PEAK))
-
-    # assign cleavage indices
-    x_exp[:, :, -2] = torch.randint(0, 30, x_exp.shape[:2])
-
-    # assign scan indices
-    x_exp[:, :, -1] = torch.randint(0, 9, x_exp.shape[:2])
-
-    # assign cleavage indices
-    x_theo[:, :, -1] = torch.randint(0, 30, x_theo.shape[:2])
-
-    self = encoder
+    def _forward_impl(
+        self, x_theo, x_exp, x_context, theo_valid_mask, exp_valid_mask=None
+    ):
+        theo_valid = valid_tokens(x_theo, theo_valid_mask)
+        exp_valid = valid_tokens(x_exp, exp_valid_mask)
+        theo = self.theo_peak_encoder(x_theo, theo_valid)
+        exp = self.exp_peak_encoder(x_exp, exp_valid)
+        context = self.context_encoder(x_context)
+        cls = self.cls_token.expand(x_theo.shape[0], -1, -1)
+        x = torch.cat((cls, context, theo, exp), dim=1)
+        valid, bias = token_attention_mask(x, theo_valid, exp_valid)
+        for block in self.transformer:
+            x = block(x, attn_mask=bias).masked_fill(~valid.unsqueeze(-1), 0)
+        return self.layer_norm(x).masked_fill(~valid.unsqueeze(-1), 0)
