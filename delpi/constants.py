@@ -12,11 +12,12 @@ BOLTZMANN = 1.380657e-23
 RESCALING_CONSTANT = 0.9995
 RESCALING_CONSTANT_HIGH_PRECISION = 274.335215
 
-# Precursor mass tolerance for isolation window
-# Given an isolation window (I_min, I_max), p
+# DDA precursor filtering around the isolation window
+# Allow M+2 isotopes below the window and small transmission margins.
 # I_min - ISOLATION_LOWER_TOL/charge < precursor_mz < I_max + ISOLATION_UPPER_TOL/charge
+# DIA uses the isolation window without tolerance.
 ISOLATION_LOWER_TOL = 3.5
-ISOLATION_UPPER_TOL = 1.25
+ISOLATION_UPPER_TOL = 0.25
 
 # Stable indices using delpi.lcms.neutral_loss.NeutralLoss.symbol notation.
 # This order defines the loss blocks in fragment intensity arrays.
