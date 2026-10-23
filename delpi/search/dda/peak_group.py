@@ -263,7 +263,7 @@ def find_peak_groups(
     ms2_peak_df: PeakContainer,
     rt_window_half: float,
     isolation_lower_tol_in_da: float = 3.5,
-    isolation_upper_tol_in_da: float = 1.25,
+    isolation_upper_tol_in_da: float = 0.25,
     ms1_mass_tol: float = 10,
     ms2_mass_tol: float = 10,
     rt_window_radius: int = 4,
