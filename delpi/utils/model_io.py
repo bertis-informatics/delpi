@@ -86,7 +86,7 @@ def load_model(cls: Type[T], path: str | Path) -> T:
         ValueError: If ``meta["model_name"]`` does not match ``cls.__name__``,
             indicating that the file was exported for a different model class.
     """
-    payload = torch.load(Path(path), weights_only=True)
+    payload = torch.load(Path(path), map_location="cpu", weights_only=True)
     meta = payload.get("meta", {})
 
     saved_name = meta.get("model_name")

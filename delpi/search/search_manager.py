@@ -48,6 +48,7 @@ from delpi.constants import (
     DEFAULT_Q_VALUE_CUTOFF,
     DEFAULT_REPORT_FORMAT,
     DEFAULT_TL_TOP_K,
+    MAX_FRAGMENTS,
 )
 
 SUPPORTED_DEVICES = ["cuda"]
@@ -486,6 +487,8 @@ class SearchManager:
         )
         spec_generator = RefinedSpectralLibGenerator(
             apply_phospho=self.search_config.is_phospho_search,
+            max_fragments=search_config["fragment"].get("max_fragments", MAX_FRAGMENTS),
+            device=self.device,
             nce=search_config.library_nce,
             neutral_losses=search_config["fragment"].get("neutral_losses"),
             min_intensity=search_config["fragment"].get("min_intensity", 0.01),
@@ -562,6 +565,8 @@ class SearchManager:
         spec_generator = RefinedSpectralLibGenerator(
             rt_predictor=None,
             ms2_predictor=None,
+            max_fragments=search_config["fragment"].get("max_fragments", MAX_FRAGMENTS),
+            device=self.device,
             apply_phospho=self.search_config.is_phospho_search,
             nce=search_config.library_nce,
             neutral_losses=search_config["fragment"].get("neutral_losses"),

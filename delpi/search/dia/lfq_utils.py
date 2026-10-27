@@ -15,11 +15,8 @@ from delpi.search.dia.peak_token import (
 from delpi.constants import (
     RT_WINDOW_LEN,
     RT_WINDOW_RADIUS,
-    MAX_FRAGMENTS,
     QUANT_FRAGMENTS,
 )
-
-MAX_THEO_INDEX = MAX_FRAGMENTS - 1
 
 
 @nb.njit(parallel=True, cache=True)
@@ -63,14 +60,15 @@ def get_pmsm_median_intensity(
     top_k: int = 6,
 ) -> np.ndarray:
     """Median intensity of matched, center-window, monoisotopic, top-
-    ``QUANT_FRAGMENTS``-ranked fragment ion peaks, computed directly from
+    ``top_k``-ranked fragment ion peaks, computed directly from
     ``x_exp``'s peak annotations -- no separate XIC array needed. Shared by
     DIA and DDA, since both build ``x_exp``/``x_rank`` with the same
     conventions (center == ``RT_WINDOW_RADIUS``; ``x_rank`` only set, and
     always >= 0, for fragment peaks -- see `_set_x_exp`).
 
-    Restricting to ``0 <= x_rank < QUANT_FRAGMENTS`` keeps this consistent
-    with `get_xic_array`, which only ever holds those same ranked channels.
+    Ranks follow the library's soft family-aware selection score. Only
+    positive, monoisotopic MS2 fragment matches contribute, including all
+    stored neutral losses; missing channels never enter the average.
 
     ``x_exp``'s AB column is normalized to a per-PmSM max of 1 (see
     `_set_x_exp`'s fragment-ion scaling), so the median computed from it must
@@ -88,7 +86,14 @@ def get_pmsm_median_intensity(
         k = 0
         for j in range(M):
             rank = rank_arr[j]
-            if 0 <= rank < top_k and x_arr[j, EXP_ISOTOPE_INDEX_IDX] == 0:
+            if (
+                0 <= rank < top_k
+                and x_arr[j, EXP_ISOTOPE_INDEX_IDX] == 0
+                and x_arr[j, EXP_ION_TYPE_IDX] != 0
+                and x_arr[j, EXP_MS_LEVEL_IDX] == 2
+                and np.isfinite(x_arr[j, EXP_AB_IDX])
+                and x_arr[j, EXP_AB_IDX] > 0
+            ):
                 t = nb.int8(x_arr[j, EXP_TIME_INDEX_IDX])
                 if abs(t - RT_WINDOW_RADIUS) <= neighbor_window:
                     values[k] = x_arr[j, EXP_AB_IDX]
@@ -118,14 +123,16 @@ def get_xic_array(
 ) -> np.ndarray:
     """Build a ``(QUANT_FRAGMENTS, RT_WINDOW_LEN)`` max-held fragment-intensity
     array per PmSM directly from ``x_exp``, channel-indexed by ``x_rank``
-    (each matched fragment peak's theoretical-intensity rank, as set by
-    `delpi.search.dia.peak_token._set_x_exp` -- 0 == the library's most
-    intense predicted fragment for this precursor; -1 == not ranked).
+    (each matched fragment peak's soft family-aware selection rank, as set by
+    `delpi.search.dia.peak_token._set_x_exp` -- 0 == the highest selection
+    score for this precursor; -1 == not ranked).
 
     Rank, not peak position, is required downstream: cross-run MaxLFQ
     (`perform_lfq`) selects fragment channels once per precursor group and
     reuses the same channel indices for every run's row, so the same
     theoretical fragment must always land in the same channel.
+    QUANT_FRAGMENTS is capacity only: absent library fragments stay zero and
+    are excluded by LFQ fragment selection. Neutral losses have separate channels.
 
     ``x_exp``'s AB column is normalized to a per-PmSM max of 1, so the result
     is rescaled by ``ms2_scale_arr`` (see `get_pmsm_median_intensity`) to
@@ -141,7 +148,14 @@ def get_xic_array(
         rank_arr = x_rank[n]
         for j in range(M):
             channel = rank_arr[j]
-            if 0 <= channel < QUANT_FRAGMENTS and x_arr[j, EXP_ISOTOPE_INDEX_IDX] == 0:
+            if (
+                0 <= channel < QUANT_FRAGMENTS
+                and x_arr[j, EXP_ISOTOPE_INDEX_IDX] == 0
+                and x_arr[j, EXP_ION_TYPE_IDX] != 0
+                and x_arr[j, EXP_MS_LEVEL_IDX] == 2
+                and np.isfinite(x_arr[j, EXP_AB_IDX])
+                and x_arr[j, EXP_AB_IDX] > 0
+            ):
                 t = nb.int8(x_arr[j, EXP_TIME_INDEX_IDX])
                 if 0 <= t < RT_WINDOW_LEN:
                     ab = x_arr[j, EXP_AB_IDX]

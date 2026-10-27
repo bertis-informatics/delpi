@@ -58,8 +58,6 @@ class ExpPeakInput(InputEnum):
 
 class ContextInput(InputEnum):
     ACQUISITION_MODE = "acquisition_mode", 0, "uint8"
-    # Keep the spelling from the original schema proposal as an alias.
-    ACQUSITION_MODE = "acquisition_mode", 0, "uint8"
     NCE = "nce", 1, "float32"
     LIBRARY_NCE = "library_nce", 2, "float32"
     ISOLATION_LEFT = "isolation_left", 3, "float32"

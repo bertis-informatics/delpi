@@ -27,15 +27,12 @@ class SpectralLibReader:
     def __init__(
         self,
         peptide_db_path: str,
-        max_fragments: int = MAX_FRAGMENTS,
+        max_fragments: int | None = None,
         max_precursor_isotopes: int = DEFAULT_PRECURSOR_ISOTOPES,
         max_fragment_isotopes: int = DEFAULT_FRAGMENT_ISOTOPES,
     ) -> None:
 
         self.peptide_db_path = Path(peptide_db_path)
-        if not isinstance(max_fragments, int) or not 1 <= max_fragments <= 255:
-            raise ValueError("max_fragments must be an integer in [1, 255].")
-        self.max_fragments = max_fragments
         get_isotope_indices(max_fragment_isotopes)
         get_isotope_indices(max_precursor_isotopes)
         self.max_fragment_isotopes = max_fragment_isotopes
@@ -46,6 +43,14 @@ class SpectralLibReader:
             self.params = {}
         else:
             self.params = load_yaml(self.peptide_db_path / "param.yaml")
+
+        if max_fragments is None:
+            max_fragments = self.params.get("fragment", {}).get(
+                "max_fragments", MAX_FRAGMENTS
+            )
+        if not isinstance(max_fragments, int) or not 1 <= max_fragments <= 255:
+            raise ValueError("max_fragments must be an integer in [1, 255].")
+        self.max_fragments = max_fragments
 
         # load precursor_df and modification_df in memory
         precursor_scan = pl.scan_parquet(self.peptide_db_path / "precursor_df.parquet")
@@ -130,7 +135,13 @@ class SpectralLibReader:
         #     raise ValueError(
         #         "Library fragment rows do not match precursor offsets/counts."
         #     )
-        return speclib_df.filter(pl.col("rank") <= self.max_fragments)
+        # Recompute offsets/counts from usable rows in read_by_index_range.
+        # Rank order also defines the stable cross-run quantification channels.
+        return speclib_df.filter(
+            (pl.col("rank") <= self.max_fragments)
+            & pl.col("predicted_intensity").is_finite()
+            & (pl.col("predicted_intensity") > 0)
+        )
 
     def read_by_index_range(
         self, min_precursor_index: int, max_precursor_index: int
