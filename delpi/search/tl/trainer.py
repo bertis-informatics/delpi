@@ -3,6 +3,7 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 import torch
+import h5py
 
 from lightning.pytorch.callbacks.early_stopping import EarlyStopping
 from lightning.pytorch.callbacks import ModelCheckpoint
@@ -35,14 +36,34 @@ class TransferLearningTrainer:
     def __init__(self, training_params: dict = None):
         self.training_params = {**DEFAULT_TRAINING_PARAMS, **(training_params or {})}
 
+    def _load_pretrained_model(self):
+        pretrained = Ms2SpectrumPredictor.load(MODEL_DIR / "delpi.ms2_predictor.pth")
+        params = dict(pretrained.hparams)
+        params.update(
+            max_lr=self.training_params["max_lr"],
+            num_warmup_steps=self.training_params["num_warmup_steps"],
+            num_training_steps=self.training_params["max_epochs"],
+            layer_decay=0.9,
+        )
+        model = Ms2SpectrumPredictor(**params)
+        model.load_state_dict(pretrained.state_dict())
+        return model
+
     def train(
         self,
         output_dir: Path,
         result_aggregator: ResultsAggregator,
         device: torch.device,
         tl_ms2_h5_path: Path,
-    ) -> np.ndarray:
+    ) -> Ms2SpectrumPredictor:
 
+        model = self._load_pretrained_model()
+        with h5py.File(tl_ms2_h5_path, "r") as hf:
+            if list(hf.attrs.get("fragment_types", [])) != model.fragment_types:
+                raise ValueError(
+                    "TL fragment columns differ from the pretrained predictor; "
+                    "regenerate the TL HDF file."
+                )
         logger = CSVLogger(save_dir=output_dir, version=f"ms2_predictor_tl")
         hdf_files = [tl_ms2_h5_path]
         label_df = PeptideDatabase.join(
@@ -71,27 +92,6 @@ class TransferLearningTrainer:
             None if len(train_labels) < 100000 else min(100000 / len(train_labels), 0.5)
         )
 
-        model = Ms2SpectrumPredictor(
-            encoder_type="transformer",
-            mod_embedding_dim=8,
-            meta_embedding_dim=4,
-            embedding_dim=192,
-            dropout=0.1,
-            max_lr=self.training_params["max_lr"],
-            num_warmup_steps=self.training_params["num_warmup_steps"],
-            num_training_steps=max_epochs,
-            transformer_depth=12,
-            transformer_num_heads=12,
-            transformer_qkv_bias=True,
-            transformer_drop_path_rate=0.1,
-            layer_decay=0.9,
-        )
-
-        pretrained_weights = Ms2SpectrumPredictor.load(
-            MODEL_DIR / "delpi.ms2_predictor.pth"
-        ).state_dict()
-        _ = model.load_state_dict(pretrained_weights, strict=False)
-
         # Set datasets for multi-GPU training
         model.set_dataset(
             train_ds,
@@ -107,7 +107,7 @@ class TransferLearningTrainer:
         trainer = Trainer(
             max_epochs=max_epochs,
             accelerator=device.type,
-            devices=[device.index] if device.index is not None else [0],
+            devices=1 if device.type == "cpu" else [device.index or 0],
             logger=logger,
             default_root_dir=logger.log_dir,
             callbacks=callbacks,
@@ -124,9 +124,7 @@ class TransferLearningTrainer:
 
         return trained_model
 
-    def _split_labels_by_peptide(
-        self, label_df
-    ) -> tuple[np.ndarray, np.ndarray]:
+    def _split_labels_by_peptide(self, label_df) -> tuple[np.ndarray, np.ndarray]:
         unique_peptide_indices = label_df["peptide_index"].unique().to_numpy()
         if unique_peptide_indices.shape[0] < 2:
             raise ValueError("Need at least two unique peptide indices for TL split")

@@ -18,6 +18,7 @@ from delpi.utils.yaml_file import load_yaml, save_yaml
 
 
 class RefinedSpectralLibGenerator(SpectralLibGenerator):
+    """Refine predictions, or copy original entries when predictors are None."""
 
     def __init__(
         self,
@@ -72,6 +73,12 @@ class RefinedSpectralLibGenerator(SpectralLibGenerator):
         self.max_precursor_charge = max_precursor_charge
         self.min_precursor_mz = min_precursor_mz
         self.max_precursor_mz = max_precursor_mz
+
+    def _get_prediction_layout(self):
+        # The no-TL path only copies rows and must not load a predictor or GPU.
+        if self._ms2_predictor is None:
+            return None, None
+        return super()._get_prediction_layout()
 
     def _build_database(self, db_dir: Path, precursor_index_arr: np.ndarray):
 
@@ -167,7 +174,8 @@ class RefinedSpectralLibGenerator(SpectralLibGenerator):
         db_dir: Path,
         precursor_index_arr: np.ndarray,
     ):
-
+        if self._ms2_predictor is None or self._rt_predictor is None:
+            raise ValueError("Refined prediction requires both MS2 and RT predictors.")
         self._build_database(db_dir, precursor_index_arr)
         rt_df = self.predict_rt(
             peptide_df=self.peptide_df,
@@ -196,6 +204,10 @@ class RefinedSpectralLibGenerator(SpectralLibGenerator):
         self.sequence_df.write_parquet(save_dir / "sequence_df.parquet")
         self.peptide_df.write_parquet(save_dir / "peptide_df.parquet")
         self.modification_df.write_parquet(save_dir / "modification_df.parquet")
+        self.speclib_df = self.speclib_df.filter(
+            pl.col("predicted_intensity").is_finite()
+            & (pl.col("predicted_intensity") > 0)
+        ).sort(["precursor_index", "rank"], descending=[False, True])
         # Also rebase offsets after copying a subset of the original library.
         counts = np.bincount(
             self.speclib_df["precursor_index"].to_numpy(),
@@ -205,7 +217,12 @@ class RefinedSpectralLibGenerator(SpectralLibGenerator):
         self.precursor_df.write_parquet(save_dir / "precursor_df.parquet")
         self.speclib_df.write_parquet(save_dir / "speclib_df.parquet")
         params = dict(getattr(self, "source_params", {}))
-        params["fragment"] = self.param_dict
+        if self._ms2_predictor is not None:
+            params["fragment"] = self.param_dict
+        else:
+            # Copied intensities retain the original NCE, losses and selection
+            # settings, regardless of the current search configuration.
+            params["fragment"] = dict(params.get("fragment", self.param_dict))
         save_yaml(save_dir / "param.yaml", params)
 
     def _update_ref_rt(self, target_df: pl.DataFrame):

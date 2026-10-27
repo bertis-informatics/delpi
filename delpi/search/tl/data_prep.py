@@ -8,7 +8,10 @@ import polars as pl
 import numpy as np
 
 from pymsio import MassSpecData, ReaderFactory
-from delpi.lcms.fragmentation import Fragmentation
+from delpi.constants import COMMON_NEUTRAL_LOSSES
+from delpi.lcms.base_ion_type import BaseIonType
+from delpi.lcms.data_container import IonTypeContainer
+from delpi.lcms.fragmentation import Fragmentation, get_frag_type_str
 from delpi.lcms.neutral_loss import NeutralLoss
 from delpi.database.precursor_generator import PrecursorGenerator
 from delpi.database.numba.prefix_mass_array import PrefixMassArrayContainer
@@ -25,7 +28,7 @@ class TransferLearningDataPreparator:
 
     Extracts fragment-ion intensities/RT for identified PmSMs from a raw
     LC-MS/MS file and persists them to a shared HDF5 file (grouped by
-    ``{run_index}/{sequence_length}/{array_name}``) so that transfer-learning
+    ``{sequence_length}/{array_name}``) so that transfer-learning
     data from every run can live in a single file instead of each run's own
     result file.
     """
@@ -36,9 +39,7 @@ class TransferLearningDataPreparator:
         frag_method: int = 0,  # 0: HCD, 1: CID
         mass_analyzer: int = 0,  # 0: FTMS, 1: ITMS
         tolerance_in_ppm: float = 10.0,
-        apply_phospho: bool = False,
-        min_charge: int = 1,
-        max_charge: int = 2,
+        neutral_losses=COMMON_NEUTRAL_LOSSES,
     ):
         """
         Args:
@@ -46,17 +47,20 @@ class TransferLearningDataPreparator:
             frag_method: Fragmentation method (0: HCD, 1: CID).
             mass_analyzer: Mass analyzer type (0: FTMS, 1: ITMS).
             tolerance_in_ppm: Fragment matching tolerance in ppm.
-            apply_phospho: Whether to include the phospho neutral loss.
-            min_charge: Minimum fragment charge.
-            max_charge: Maximum fragment charge.
+            neutral_losses: Loss symbols in the pretrained predictor's output order.
+                TL supervises all model channels, independently of library selection.
         """
         self.nce = nce
         self.frag_method = frag_method
         self.mass_analyzer = mass_analyzer
         self.tolerance_in_ppm = tolerance_in_ppm
-        self.apply_phospho = apply_phospho
-        self.min_charge = min_charge
-        self.max_charge = max_charge
+        self.neutral_losses = tuple(neutral_losses)
+        self.fragment_types = [
+            get_frag_type_str(ion, NeutralLoss.get(loss), charge)
+            for loss in self.neutral_losses
+            for ion in (BaseIonType.B, BaseIonType.Y)
+            for charge in (1, 2)
+        ]
 
         # Initialize fragmentation and precursor generator
         self.precursor_gen = PrecursorGenerator()
@@ -64,18 +68,21 @@ class TransferLearningDataPreparator:
 
     def _setup_fragmentation(self):
         """Initialize fragmentation configuration"""
-        neutral_losses = [NeutralLoss.NO_LOSS]
-        if self.apply_phospho:
-            neutral_losses.append(NeutralLoss.H3O4P)
-
         self.fragmentation = Fragmentation(
-            min_charge=self.min_charge,
-            max_charge=self.max_charge,
+            min_charge=1,
+            max_charge=2,
             max_fragment_isotopes=2,
-            neutral_losses=neutral_losses,
+            neutral_losses=[NeutralLoss.get(loss) for loss in self.neutral_losses],
         )
-
-        self.ion_type_container = self.fragmentation.get_ion_types(isotope_index=0)
+        table = self.fragmentation.ion_type_df.filter(pl.col("isotope_index") == 0)
+        columns = table["frag_type"].to_list()
+        table = table[[columns.index(name) for name in self.fragment_types]]
+        self.ion_type_container = IonTypeContainer(
+            table["is_prefix"].to_numpy(),
+            table["charge"].to_numpy(),
+            table["offset_mass"].to_numpy(),
+            table["neutral_loss"].to_physical().cast(pl.UInt8).to_numpy(),
+        )
 
     def prepare_training_data(
         self,
@@ -149,8 +156,8 @@ class TransferLearningDataPreparator:
         collected_data = self.prepare_training_data(pmsm_df, lcms_data)
         self.save_to_hdf(collected_data, h5_file_path)
 
-    @staticmethod
     def save_to_hdf(
+        self,
         collected_data: Dict[int, Dict[str, np.ndarray]],
         h5_file_path: Union[Path, str],
     ) -> None:
@@ -173,6 +180,13 @@ class TransferLearningDataPreparator:
         h5_file_path.parent.mkdir(parents=True, exist_ok=True)
 
         with h5py.File(h5_file_path, "a") as hf:
+            saved_columns = list(hf.attrs.get("fragment_types", []))
+            if (len(hf) or saved_columns) and saved_columns != self.fragment_types:
+                raise ValueError(
+                    "TL fragment columns differ from the pretrained predictor; "
+                    "regenerate the TL HDF file."
+                )
+            hf.attrs["fragment_types"] = self.fragment_types
             for seq_len, data_dict in collected_data.items():
                 if not data_dict:
                     continue
