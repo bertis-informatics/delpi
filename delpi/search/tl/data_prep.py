@@ -8,7 +8,6 @@ import polars as pl
 import numpy as np
 
 from pymsio import MassSpecData, ReaderFactory
-from delpi.constants import COMMON_NEUTRAL_LOSSES
 from delpi.lcms.base_ion_type import BaseIonType
 from delpi.lcms.data_container import IonTypeContainer
 from delpi.lcms.fragmentation import Fragmentation, get_frag_type_str
@@ -39,7 +38,7 @@ class TransferLearningDataPreparator:
         frag_method: int = 0,  # 0: HCD, 1: CID
         mass_analyzer: int = 0,  # 0: FTMS, 1: ITMS
         tolerance_in_ppm: float = 10.0,
-        neutral_losses=COMMON_NEUTRAL_LOSSES,
+        apply_phospho: bool = False,
     ):
         """
         Args:
@@ -47,17 +46,19 @@ class TransferLearningDataPreparator:
             frag_method: Fragmentation method (0: HCD, 1: CID).
             mass_analyzer: Mass analyzer type (0: FTMS, 1: ITMS).
             tolerance_in_ppm: Fragment matching tolerance in ppm.
-            neutral_losses: Loss symbols in the pretrained predictor's output order.
-                TL supervises all model channels, independently of library selection.
+            apply_phospho: Include the four H3O4P mod-loss channels after regular ions.
         """
         self.nce = nce
         self.frag_method = frag_method
         self.mass_analyzer = mass_analyzer
         self.tolerance_in_ppm = tolerance_in_ppm
-        self.neutral_losses = tuple(neutral_losses)
+        self.apply_phospho = apply_phospho
+        losses = [NeutralLoss.NO_LOSS]
+        if apply_phospho:
+            losses.append(NeutralLoss.H3O4P)
         self.fragment_types = [
-            get_frag_type_str(ion, NeutralLoss.get(loss), charge)
-            for loss in self.neutral_losses
+            get_frag_type_str(ion, loss, charge)
+            for loss in losses
             for ion in (BaseIonType.B, BaseIonType.Y)
             for charge in (1, 2)
         ]
@@ -72,7 +73,11 @@ class TransferLearningDataPreparator:
             min_charge=1,
             max_charge=2,
             max_fragment_isotopes=2,
-            neutral_losses=[NeutralLoss.get(loss) for loss in self.neutral_losses],
+            neutral_losses=(
+                [NeutralLoss.NO_LOSS, NeutralLoss.H3O4P]
+                if self.apply_phospho
+                else [NeutralLoss.NO_LOSS]
+            ),
         )
         table = self.fragmentation.ion_type_df.filter(pl.col("isotope_index") == 0)
         columns = table["frag_type"].to_list()
@@ -81,7 +86,7 @@ class TransferLearningDataPreparator:
             table["is_prefix"].to_numpy(),
             table["charge"].to_numpy(),
             table["offset_mass"].to_numpy(),
-            table["neutral_loss"].to_physical().cast(pl.UInt8).to_numpy(),
+            (table["neutral_loss"] == NeutralLoss.H3O4P.symbol).to_numpy(),
         )
 
     def prepare_training_data(

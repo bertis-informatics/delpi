@@ -12,7 +12,7 @@ from delpi.database.numba.spec_lib_utils import (
 )
 from delpi.utils.signal import find_local_maxima, cluster_peaks_with_weights
 from delpi.utils.peak import find_peak_index
-from delpi.constants import MIN_SEARCH_FRAGMENTS
+from delpi.constants import MIN_SEARCH_FRAGMENTS, RT_WINDOW_RADIUS
 from delpi.constants import QUANT_FRAGMENTS
 
 
@@ -210,7 +210,7 @@ def find_peak_groups(
     frame_num_map: DIAWindowFrameNumMap,
     ms1_mass_tol: float = 10,
     ms2_mass_tol: float = 10,
-    rt_window_radius: int = 4,
+    rt_window_radius: int = RT_WINDOW_RADIUS,
     min_xic_peak_count: int = 3,
     min_peak_count: int = 12,
     topk: int = 10,
@@ -338,13 +338,16 @@ def find_peak_groups(
         mask = (peak_group_arr >= peak_lb) & (peak_group_arr <= peak_ub)
         peak_group_arr = peak_group_arr[mask]
 
-        ## count the number of experimental peaks for each peak group
+        ## count all experimental tokens for batching
         sum_peak_count_arr = sum_neighborhood(
             all_peak_count_arr, rt_window_radius, peak_group_arr
         )
 
-        ## filtering with min_peak_count
-        mask = sum_peak_count_arr >= min_peak_count
+        ## filter using occupied monoisotopic fragment XIC bins only
+        mono_peak_count_arr = sum_neighborhood(
+            spec_peak_count_arr, rt_window_radius, peak_group_arr
+        )
+        mask = mono_peak_count_arr >= min_peak_count
         sum_peak_count_arr = sum_peak_count_arr[mask]
         peak_group_arr = peak_group_arr[mask]
 

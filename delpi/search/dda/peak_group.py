@@ -8,7 +8,7 @@ from delpi.database.numba.spec_lib_container import SpectralLibContainer
 from delpi.search.dia.peak_group import PeakIndexContainer
 from delpi.database.numba.spec_lib_utils import get_theoretical_peaks
 from delpi.utils.peak import find_peak_index
-from delpi.constants import MIN_SEARCH_FRAGMENTS
+from delpi.constants import MIN_SEARCH_FRAGMENTS, RT_WINDOW_LEN, RT_WINDOW_RADIUS
 from delpi.constants import DDA_MATCHED_PEAKS_CUTOFF_LB, DDA_MATCHED_PEAKS_CUTOFF_UB
 
 
@@ -96,7 +96,7 @@ def _generate_peak_group_arrays(
     ms2_meta_df: MetaContainer,
     ms2_frame_indexes: np.ndarray,
     rt_window_half: float,
-    rt_bin_count: int = 9,
+    rt_bin_count: int = RT_WINDOW_LEN,
 ):
     peak_group_count = peak_group_ii.shape[0]
     frame_num_arr = ms2_meta_df.frame_num_arr[ms2_frame_indexes[peak_group_ii]]
@@ -266,7 +266,7 @@ def find_peak_groups(
     isolation_upper_tol_in_da: float = 0.25,
     ms1_mass_tol: float = 10,
     ms2_mass_tol: float = 10,
-    rt_window_radius: int = 4,
+    rt_window_radius: int = RT_WINDOW_RADIUS,
     min_peak_count: int = DDA_MATCHED_PEAKS_CUTOFF_LB,
     topk: int = 10,
 ) -> Tuple[DdaPeakGroupContainer, PeakIndexContainer]:

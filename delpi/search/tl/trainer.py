@@ -59,7 +59,11 @@ class TransferLearningTrainer:
 
         model = self._load_pretrained_model()
         with h5py.File(tl_ms2_h5_path, "r") as hf:
-            if list(hf.attrs.get("fragment_types", [])) != model.fragment_types:
+            columns = list(hf.attrs.get("fragment_types", []))
+            if (
+                len(columns) not in (4, 8)
+                or columns != model.fragment_types[: len(columns)]
+            ):
                 raise ValueError(
                     "TL fragment columns differ from the pretrained predictor; "
                     "regenerate the TL HDF file."

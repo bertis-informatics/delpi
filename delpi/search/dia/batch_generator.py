@@ -69,6 +69,7 @@ def _make_batch_in_parallel(
     ms1_scale_arr: np.ndarray,
     ms2_scale_arr: np.ndarray,
     theo_valid_mask: np.ndarray,
+    rt_window_radius: int,
 ):
     frame_num_arr = peak_group_container.frame_num_arr
     precursor_index0_arr = peak_group_container.precursor_index0_arr
@@ -95,7 +96,7 @@ def _make_batch_in_parallel(
             ms1_peak_df=ms1_peak_df,
             ms2_peak_df=ms2_peak_df,
             frame_num_map=frame_num_map,
-            rt_window_radius=RT_WINDOW_RADIUS,
+            rt_window_radius=rt_window_radius,
             peak_index_container=peak_index_container,
             ms1_mass_tol=ms1_mass_tol,
             ms2_mass_tol=ms2_mass_tol,
@@ -147,6 +148,7 @@ def generate_batches(
     library_nce: float,
     isolation_min_mz: float,
     isolation_max_mz: float,
+    rt_window_radius: int = RT_WINDOW_RADIUS,
 ):
 
     num_theoretical_peaks = (
@@ -185,6 +187,7 @@ def generate_batches(
             buf["ms1_scale_arr"],
             buf["ms2_scale_arr"],
             buf["theo_valid_mask"],
+            rt_window_radius,
         )
 
         precursor_mz = speclib_container.precursor_mz_arr[

@@ -3,18 +3,15 @@
 import numpy as np
 import polars as pl
 
-from delpi.lcms.neutral_loss import NEUTRAL_LOSS_DTYPE
-
-
 SPECLIB_SCHEMA = {
     "precursor_index": pl.UInt32,
     "cleavage_index": pl.UInt8,
     "is_prefix": pl.Boolean,
     "charge": pl.UInt8,
-    "neutral_loss": NEUTRAL_LOSS_DTYPE,
+    "is_modloss": pl.Boolean,
     "mz": pl.Float32,
     "predicted_intensity": pl.Float32,
-    "rank": pl.UInt8,  # Descending selection score (1 is best).
+    "rank": pl.UInt8,  # Descending predicted intensity (1 is strongest).
 }
 
 

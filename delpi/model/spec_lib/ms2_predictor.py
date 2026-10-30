@@ -1,4 +1,4 @@
-from typing import Dict, Self, Sequence
+from typing import Dict, Self
 from pathlib import Path
 
 import numpy as np
@@ -18,17 +18,20 @@ from delpi.lcms.fragmentation import get_frag_type_str
 from delpi.search.tl.lr_decay import param_groups_lrd
 from delpi.utils.scheduler import get_cosine_schedule_with_warmup
 from delpi.model.spec_lib.aa_encoder import MOD_FEATURE_MAP
-from delpi.constants import COMMON_NEUTRAL_LOSS_INDEX
 
 EPS = 1e-9
 
 
 class Ms2SpectrumPredictor(LightningModule):
-    """Predict four b/y charge channels per neutral loss, in the supplied order.
+    """Predict b/y charge 1–2, followed by their phospho-specific mod-loss channels."""
 
-    The default preserves legacy 8-channel checkpoints and search callers.
-    Pass COMMON_NEUTRAL_LOSSES when training the 16-channel Prospect model.
-    """
+    num_fragment_channels = 8
+    fragment_types = [
+        get_frag_type_str(ion, loss, charge)
+        for loss in (NeutralLoss.NO_LOSS, NeutralLoss.H3O4P)
+        for ion in (BaseIonType.B, BaseIonType.Y)
+        for charge in (1, 2)
+    ]
 
     def __init__(
         self,
@@ -49,34 +52,12 @@ class Ms2SpectrumPredictor(LightningModule):
         transformer_qkv_bias: bool = True,
         transformer_drop_path_rate: float = 0.0,
         layer_decay: float = 1.0,
-        neutral_losses: Sequence[str] = (
-            NeutralLoss.NO_LOSS.symbol,
-            NeutralLoss.H3O4P.symbol,
-        ),
         *args,
         **kwargs,
     ):
+        # Older eight-channel exports may retain this obsolete hyperparameter.
+        kwargs.pop("neutral_losses", None)
         super().__init__(*args, **kwargs)
-
-        neutral_losses = tuple(neutral_losses)
-        if (
-            not neutral_losses
-            or neutral_losses[0] != NeutralLoss.NO_LOSS.symbol
-            or len(set(neutral_losses)) != len(neutral_losses)
-            or any(loss not in COMMON_NEUTRAL_LOSS_INDEX for loss in neutral_losses)
-        ):
-            raise ValueError(
-                "neutral_losses must contain unique DelPi neutral-loss symbols "
-                f"with {NeutralLoss.NO_LOSS.symbol!r} first."
-            )
-        self.neutral_losses = neutral_losses
-        self.num_fragment_channels = 4 * len(neutral_losses)
-        self.fragment_types = [
-            get_frag_type_str(ion_type, NeutralLoss.get(loss), charge)
-            for loss in neutral_losses
-            for ion_type in (BaseIonType.B, BaseIonType.Y)
-            for charge in (1, 2)
-        ]
         self.encoder_type = encoder_type
 
         # Embedding layer
@@ -128,33 +109,28 @@ class Ms2SpectrumPredictor(LightningModule):
             )
 
         # Output layer for fragment intensities
-        # Four channels [b_z1, b_z2, y_z1, y_z2] per neutral loss.
+        # Four regular channels, followed by four H3O4P mod-loss channels.
         # Input: (B, L-1, encoder_output_dim) -> (B, L-1, num_fragment_channels)
         self.fragment_predictor = nn.Sequential(
             nn.Linear(encoder_output_dim, 64),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(64, self.num_fragment_channels),
-            nn.ReLU(),  # Ensure non-negative intensities
         )
 
         # Metrics
+        loss_names = (NeutralLoss.NO_LOSS.symbol, NeutralLoss.H3O4P.symbol)
         self.train_corr = torchmetrics.PearsonCorrCoef()
         self.valid_corr = nn.ModuleDict(
-            {loss: SafePearsonCorrCoef() for loss in self.neutral_losses}
+            {loss: SafePearsonCorrCoef() for loss in loss_names}
         )
         self.train_sa = SpectralAngle()
-        self.valid_sa = nn.ModuleDict(
-            {loss: SpectralAngle() for loss in self.neutral_losses}
-        )
+        self.valid_sa = nn.ModuleDict({loss: SpectralAngle() for loss in loss_names})
         self.valid_sa_present = nn.ModuleDict(
-            {
-                loss: SpectralAngle(ignore_empty_targets=True)
-                for loss in self.neutral_losses
-            }
+            {loss: SpectralAngle(ignore_empty_targets=True) for loss in loss_names}
         )
         self.valid_present_fraction = nn.ModuleDict(
-            {loss: torchmetrics.MeanMetric() for loss in self.neutral_losses}
+            {loss: torchmetrics.MeanMetric() for loss in loss_names}
         )
 
         self.max_lr = max_lr
@@ -186,7 +162,7 @@ class Ms2SpectrumPredictor(LightningModule):
 
         save_model(self, save_path, model_version=model_version)
 
-    def forward(self, x_aa, x_mod, x_meta):
+    def forward(self, x_aa, x_mod, x_meta, *, return_raw: bool = False):
         """
         Forward pass for MS2 spectrum prediction.
 
@@ -194,9 +170,10 @@ class Ms2SpectrumPredictor(LightningModule):
             x_aa: Amino acid sequence tensor (B, L+2) where L is peptide length
             x_mod: Encoded modification features (B, L+2, number of elements)
             x_meta: Precursor charge, NCE, fragmentation, mass analyzer (B, 4)
+            return_raw: Return unclamped outputs for the regression loss.
 
         Returns:
-            Fragment intensities (B, L-1, 4 * len(neutral_losses)), with
+            Fragment intensities (B, L-1, 8), with
             [b_z1, b_z2, y_z1, y_z2] in each neutral-loss block.
         """
         # Pass through AA and Mod embedding layers
@@ -216,15 +193,14 @@ class Ms2SpectrumPredictor(LightningModule):
         # Predict fragment intensities
         y_pred = self.fragment_predictor(x_emb)
 
-        return y_pred
+        return y_pred if return_raw else y_pred.clamp_min(0)
 
     @torch.inference_mode()
     def predict_batch(self, batch: Dict[str, torch.Tensor]) -> pl.DataFrame:
         """Return normalized intensities for each precursor and cleavage.
 
-        Columns follow the configured neutral-loss order and are named
-        "{ion_type}{neutral_loss.name}_z{charge}", e.g. "b_z1", "y-H2O_z1",
-        or "y-H3O4P_z2". All configured losses are returned.
+        The four regular b/y charge 1–2 columns precede four H3O4P columns,
+        e.g. "b_z1" and "y-H3O4P_z2". All eight columns are returned.
         Each spectrum is normalized by the maximum of its returned channels.
         """
 
@@ -266,7 +242,7 @@ class Ms2SpectrumPredictor(LightningModule):
 
     def _compute_loss(self, x_aa, x_mod, x_meta, y_true):
         """
-        Compute loss for MS2 spectrum prediction.
+        Compute MSE on raw outputs so negative predictions retain gradients.
 
         Args:
             x_aa: Amino acid sequence tensor
@@ -274,18 +250,17 @@ class Ms2SpectrumPredictor(LightningModule):
             y_true: True fragment intensities (B, L-1, num_fragment_channels)
 
         Returns:
-            loss, y_true, y_pred
+            loss, y_true, raw predictions (clamp only for inference and metrics)
         """
-        y_pred = self(x_aa, x_mod, x_meta)
+        y_pred = self(x_aa, x_mod, x_meta, return_raw=True)
 
-        if y_pred.shape != y_true.shape:
+        # Non-phospho TL supervises the first four channels, as on main.
+        if y_true.size(-1) not in (4, 8) or y_pred.shape[:-1] != y_true.shape[:-1]:
             raise ValueError(
                 f"MS2 target shape {tuple(y_true.shape)} does not match model "
-                f"output {tuple(y_pred.shape)} for neutral_losses={self.neutral_losses}. "
-                "Use targets with the same neutral-loss channel order as the model."
+                f"output {tuple(y_pred.shape)}. Expected 4 regular or 8 regular/mod-loss channels."
             )
-
-        # Supervise every fragment channel, including all configured neutral losses.
+        y_pred = y_pred[..., : y_true.size(-1)]
         loss = nn.functional.mse_loss(y_pred, y_true)
 
         return loss, y_true, y_pred
@@ -301,6 +276,7 @@ class Ms2SpectrumPredictor(LightningModule):
 
         loss, y_true, y_pred = self._compute_loss(x_aa, x_mod, x_meta, y_true)
 
+        y_pred = y_pred.clamp_min(0)
         # Flatten for correlation calculation
         y_true_flat = y_true.reshape(-1)
         y_pred_flat = y_pred.reshape(-1)
@@ -353,12 +329,15 @@ class Ms2SpectrumPredictor(LightningModule):
             batch_size=batch_size,
             sync_dist=True,
         )
-        for loss_index, neutral_loss in enumerate(
-            self.neutral_losses[: y_true.size(-1) // 4]
+        for loss_index, loss_type in enumerate(
+            (NeutralLoss.NO_LOSS, NeutralLoss.H3O4P)[: y_true.size(-1) // 4]
         ):
+            neutral_loss = loss_type.symbol
             channels = slice(4 * loss_index, 4 * (loss_index + 1))
             loss_pred = y_pred[..., channels]
             loss_true = y_true[..., channels]
+            loss_mse = nn.functional.mse_loss(loss_pred, loss_true)
+            loss_pred = loss_pred.clamp_min(0)
             # Pearson accumulates all values of this loss across validation.
             corr = self.valid_corr[neutral_loss]
             corr.update(loss_pred.reshape(-1), loss_true.reshape(-1))
@@ -375,7 +354,7 @@ class Ms2SpectrumPredictor(LightningModule):
             present_fraction.update(spectrum_true.ne(0).any(dim=-1).float())
             self.log(
                 f"val_loss_{neutral_loss}",
-                nn.functional.mse_loss(loss_pred, loss_true),
+                loss_mse,
                 on_step=False,
                 on_epoch=True,
                 batch_size=batch_size,

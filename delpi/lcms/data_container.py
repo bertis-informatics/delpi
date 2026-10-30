@@ -4,12 +4,12 @@ import numpy as np
 
 
 class IonTypeContainer(NamedTuple):
-    """Ion columns; neutral_loss_index_arr uses COMMON_NEUTRAL_LOSS_INDEX codes."""
+    """Ion columns with a flag for phospho-specific H3O4P loss."""
 
     is_prefix_arr: np.ndarray
     charge_arr: np.ndarray
     offset_mass_arr: np.ndarray
-    neutral_loss_index_arr: np.ndarray
+    is_modloss_arr: np.ndarray
 
 
 class PeakContainer(NamedTuple):

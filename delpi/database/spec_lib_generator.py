@@ -1,7 +1,7 @@
 import os
 import uuid
 from pathlib import Path
-from typing import Sequence, Union
+from typing import Union
 
 import polars as pl
 import numpy as np
@@ -15,10 +15,8 @@ from delpi.lcms.base_ion_type import BaseIonType
 from delpi.lcms.fragmentation import Fragmentation, get_frag_type_str
 from delpi.lcms.neutral_loss import NeutralLoss
 from delpi.lcms.data_container import IonTypeContainer
-from delpi.constants import COMMON_NEUTRAL_LOSS_INDEX
 from delpi.database.spec_lib_schema import (
     SPECLIB_SCHEMA,
-    NEUTRAL_LOSS_DTYPE,
     fragment_offsets,
     with_speclib_index,
 )
@@ -33,13 +31,11 @@ from delpi import MODEL_DIR
 
 
 class SpectralLibGenerator:
-    """Generate libraries with intensity / family_rank**gamma fragment selection.
+    """Generate libraries with the top N fragments by predicted intensity.
 
-    Families share (cleavage_index, is_prefix) across charges and neutral losses.
-    min_intensity is the inclusive normalized-intensity threshold; gamma=0
-    recovers intensity-only ranking. max_fragments is an upper bound.
-    Selected fragments are stored in increasing selection-score order, with
-    rank 1 assigned to the fragment with the highest score.
+    min_intensity is the inclusive normalized-intensity threshold and
+    max_fragments is an upper bound. Rows are stored in increasing intensity
+    order, with rank 1 assigned to the strongest fragment.
     """
 
     speclib_df_schema = SPECLIB_SCHEMA
@@ -53,20 +49,17 @@ class SpectralLibGenerator:
         max_fragments: int = 16,
         min_fragment_mz: float = 200,
         max_fragment_mz: float = 1800,
-        neutral_losses: Sequence[str | NeutralLoss] = None,
+        apply_phospho: bool = False,
         min_intensity: float = 0.01,
         device: Union[str, torch.device] = "cuda:0",
         ms2_predictor: Ms2SpectrumPredictor = None,
         rt_predictor: RetentionTimePredictor = None,
-        gamma: float = 0.5,
         nce: float = DEFAULT_NCE,
     ):
         if not isinstance(max_fragments, int) or not 1 <= max_fragments <= 255:
             raise ValueError("max_fragments must be an integer in [1, 255].")
         if not 0 <= min_intensity <= 1:
             raise ValueError("min_intensity must be in [0, 1].")
-        if not np.isfinite(gamma) or gamma < 0:
-            raise ValueError("gamma must be finite and nonnegative.")
         if not 1 <= min_charge <= max_charge <= 2:
             raise ValueError("The MS2 predictor supports fragment charges 1 and 2.")
         if not 0 <= min_fragment_mz <= max_fragment_mz:
@@ -76,25 +69,12 @@ class SpectralLibGenerator:
         self.nce = float(nce)
         self.max_fragments = max_fragments
         self.min_intensity = min_intensity
-        self.gamma = float(gamma)
         self.min_fragment_mz = min_fragment_mz
         self.max_fragment_mz = max_fragment_mz
-        if neutral_losses is None:
-            neutral_losses = NeutralLoss.get_common_neutral_losses()
-        if isinstance(neutral_losses, str):
-            raise ValueError("neutral_losses must be a sequence of loss symbols.")
-        self.neutral_losses = tuple(
-            loss.symbol if isinstance(loss, NeutralLoss) else loss
-            for loss in neutral_losses
-        )
-        if (
-            not self.neutral_losses
-            or any(
-                loss not in COMMON_NEUTRAL_LOSS_INDEX for loss in self.neutral_losses
-            )
-            or len(set(self.neutral_losses)) != len(self.neutral_losses)
-        ):
-            raise ValueError("neutral_losses must contain unique common loss symbols.")
+        self.apply_phospho = bool(apply_phospho)
+        losses = [NeutralLoss.NO_LOSS]
+        if apply_phospho:
+            losses.append(NeutralLoss.H3O4P)
 
         self.fragmentation = Fragmentation(
             min_charge,
@@ -102,7 +82,7 @@ class SpectralLibGenerator:
             prefix_ion_type=prefix_ion_type,
             suffix_ion_type=suffix_ion_type,
             max_fragment_isotopes=2,
-            neutral_losses=[NeutralLoss.get(loss) for loss in self.neutral_losses],
+            neutral_losses=losses,
         )
 
         self.device = device
@@ -134,9 +114,8 @@ class SpectralLibGenerator:
             "prefix_ion_type": self.fragmentation.base_ion_types[0].symbol,
             "suffix_ion_type": self.fragmentation.base_ion_types[1].symbol,
             "max_fragments": self.max_fragments,
-            "neutral_losses": list(self.neutral_losses),
+            "apply_phospho": self.apply_phospho,
             "min_intensity": self.min_intensity,
-            "gamma": self.gamma,
             "nce": self.nce,
             "format_version": 2,
             "min_mz": self.min_fragment_mz,
@@ -164,7 +143,7 @@ class SpectralLibGenerator:
             table["is_prefix"].to_numpy(),
             table["charge"].to_numpy(),
             table["offset_mass"].to_numpy(),
-            table["neutral_loss"].to_physical().cast(pl.UInt8).to_numpy(),
+            (table["neutral_loss"] == NeutralLoss.H3O4P.symbol).to_numpy(),
         )
         return ion_types, np.asarray(columns)
 
@@ -173,9 +152,6 @@ class SpectralLibGenerator:
         capacity = len(counts) * max_fragments
         keep = (np.arange(max_fragments)[None, :] < counts[:, None]).ravel()
         data = {name: values[:capacity][keep] for name, values in arrays.items()}
-        data["neutral_loss"] = pl.Series(
-            "neutral_loss", data["neutral_loss"], dtype=pl.UInt8
-        ).cast(NEUTRAL_LOSS_DTYPE)
         return pl.DataFrame(data, schema=SPECLIB_SCHEMA)
 
     def predict_ms2_spectra(
@@ -410,7 +386,7 @@ class SpectralLibGenerator:
         out_clevage_index_arr = np.empty(chunk_row_capacity, dtype=np.uint8)
         out_is_prefix_arr = np.empty(chunk_row_capacity, dtype=np.bool_)
         out_charge_arr = np.empty(chunk_row_capacity, dtype=np.uint8)
-        out_neutral_loss_arr = np.empty(chunk_row_capacity, dtype=np.uint8)
+        out_is_modloss_arr = np.empty(chunk_row_capacity, dtype=np.bool_)
         out_num_rows_arr = np.empty(effective_chunk_size, dtype=np.uint8)
         all_counts = np.zeros(n_precursors, dtype=np.uint8)
         rows_written = 0
@@ -437,7 +413,7 @@ class SpectralLibGenerator:
                     "cleavage_index": out_clevage_index_arr,
                     "is_prefix": out_is_prefix_arr,
                     "charge": out_charge_arr,
-                    "neutral_loss": out_neutral_loss_arr,
+                    "is_modloss": out_is_modloss_arr,
                     "mz": out_mz_arr,
                     "predicted_intensity": out_pred_intensity_arr,
                     "rank": out_rank_arr,
@@ -519,7 +495,7 @@ class SpectralLibGenerator:
                     out_clevage_index_arr,
                     out_is_prefix_arr,
                     out_charge_arr,
-                    out_neutral_loss_arr,
+                    out_is_modloss_arr,
                     out_mz_arr,
                     out_pred_intensity_arr,
                     out_rank_arr,
@@ -534,7 +510,6 @@ class SpectralLibGenerator:
                     min_intensity=self.min_intensity,
                     detectable_min_mz=detectable_min_mz,
                     detectable_max_mz=detectable_max_mz,
-                    gamma=self.gamma,
                 )
                 progress.advance(n)
 

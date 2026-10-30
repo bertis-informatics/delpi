@@ -1,10 +1,4 @@
-import polars as pl
-
 from delpi.chem.composition import Composition
-from delpi.constants import COMMON_NEUTRAL_LOSSES
-
-# Physical Enum codes follow the shared fragment-intensity loss indices.
-NEUTRAL_LOSS_DTYPE = pl.Enum(COMMON_NEUTRAL_LOSSES)
 
 
 class NeutralLoss:
@@ -28,10 +22,6 @@ class NeutralLoss:
         if isinstance(other, NeutralLoss):
             return self.symbol == other.symbol
         return False
-
-    @classmethod
-    def get_common_neutral_losses(cls):
-        return [cls.NO_LOSS, cls.H2O, cls.NH3]
 
     @classmethod
     def get(cls, symbol):

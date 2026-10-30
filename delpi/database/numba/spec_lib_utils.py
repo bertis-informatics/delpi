@@ -114,7 +114,7 @@ def get_theoretical_peaks(
         fragment_is_prefix_arr=fragment_is_prefix_arr,
         fragment_cleavage_index_arr=fragment_cleavage_index_arr,
         fragment_intensity_arr=fragment_intensity_arr,
-        fragment_neutral_loss_arr=speclib_container.speclib_neutral_loss_arr[st:ed],
+        fragment_is_modloss_arr=speclib_container.speclib_is_modloss_arr[st:ed],
         fragment_isotope_index_arr=fragment_isotope_index_arr,
     )
 
@@ -128,15 +128,12 @@ def _select_intense_fragments(
     min_intensity: float = 0.01,
     detectable_min_mz: float = 200.0,
     detectable_max_mz: float = 2000.0,
-    gamma: float = 0.5,
 ):
-    """Select eligible fragments using soft family-aware intensity ranking.
+    """Select the top N eligible fragments by predicted intensity.
 
     Normalize to the strongest finite, in-range fragment among the requested
-    ion types before applying the inclusive threshold. Within each family
-    (cleavage_index, is_prefix), rank eligible fragments by decreasing intensity
-    and score them as intensity / family_rank**gamma. Store selected rows in
-    increasing score order, leaving the normalized intensities unchanged.
+    ion types before applying the inclusive threshold. Store selected rows in
+    increasing intensity order.
     """
     ion_count = ion_type_container.charge_arr.shape[0]
     cleavage_count = intensity_arr.shape[0]
@@ -177,19 +174,7 @@ def _select_intense_fragments(
         secondary = is_prefix.argsort(kind="mergesort")
         primary = intensity_arr[candidates][secondary].argsort(kind="mergesort")
         ordered = candidates[secondary][primary]
-        family_counts = np.zeros((cleavage_count, 2), dtype=np.int64)
-        selection_scores = np.empty(ordered.size, dtype=np.float64)
-        for k in range(ordered.size - 1, -1, -1):
-            fragment = ordered[k]
-            cleavage = cleavage_index_arr[fragment]
-            prefix = int(ion_type_container.is_prefix_arr[ion_type_index_arr[fragment]])
-            family_counts[cleavage, prefix] += 1
-            family_rank = family_counts[cleavage, prefix]
-            selection_scores[k] = intensity_arr[fragment] / family_rank**gamma
-        # Stable score ties favor the higher intensity, then the existing ion
-        # order. gamma=0 therefore reproduces intensity-only selection.
-        score_order = selection_scores.argsort(kind="mergesort")
-        selected = ordered[score_order][-max_fragments:]
+        selected = ordered[-max_fragments:]
     else:
         selected = np.empty(0, dtype=np.int64)
     ions = ion_type_index_arr[selected]
@@ -197,7 +182,7 @@ def _select_intense_fragments(
         cleavage_index_arr[selected],
         ion_type_container.is_prefix_arr[ions],
         ion_type_container.charge_arr[ions],
-        ion_type_container.neutral_loss_index_arr[ions],
+        ion_type_container.is_modloss_arr[ions],
         mz_arr[selected],
         intensity_arr[selected],
     )
@@ -209,7 +194,7 @@ def update_speclib_chunk_arr(
     out_cleavage_index_arr: np.ndarray,
     out_is_prefix_arr: np.ndarray,
     out_charge_arr: np.ndarray,
-    out_neutral_loss_arr: np.ndarray,
+    out_is_modloss_arr: np.ndarray,
     out_mz_arr: np.ndarray,
     out_pred_intensity_arr: np.ndarray,
     out_rank_arr: np.ndarray,
@@ -224,7 +209,6 @@ def update_speclib_chunk_arr(
     min_intensity: float = 0.01,
     detectable_min_mz: float = 200.0,
     detectable_max_mz: float = 2000.0,
-    gamma: float = 0.5,
 ):
     """Write into temporary fixed-capacity slots; only actual rows are saved."""
     batch_count, cleavage_count, _ = batch_intensity_arr.shape
@@ -236,7 +220,7 @@ def update_speclib_chunk_arr(
         prefix_mass_arr = prefix_mass_container.prefix_mass_array[
             start : start + cleavage_count + 1
         ]
-        cleavage, is_prefix, charge, neutral_loss, mz, intensity = (
+        cleavage, is_prefix, charge, is_modloss, mz, intensity = (
             _select_intense_fragments(
                 ion_type_container,
                 prefix_mass_arr,
@@ -245,7 +229,6 @@ def update_speclib_chunk_arr(
                 min_intensity,
                 detectable_min_mz,
                 detectable_max_mz,
-                gamma,
             )
         )
         local_index = np.int64(precursor_index) - np.int64(chunk_start_precursor_index)
@@ -257,9 +240,9 @@ def update_speclib_chunk_arr(
         out_cleavage_index_arr[start:stop] = cleavage
         out_is_prefix_arr[start:stop] = is_prefix
         out_charge_arr[start:stop] = charge
-        out_neutral_loss_arr[start:stop] = neutral_loss
+        out_is_modloss_arr[start:stop] = is_modloss
         out_mz_arr[start:stop] = mz
         out_pred_intensity_arr[start:stop] = intensity
-        # Rank 1 is the highest selection score, used by reader-side limits.
+        # Rank 1 is the highest predicted intensity, used by reader-side limits.
         for k in range(count):
             out_rank_arr[start + k] = count - k

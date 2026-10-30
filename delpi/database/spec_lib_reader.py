@@ -17,7 +17,6 @@ from delpi.constants import (
 )
 from delpi.database.spec_lib_schema import (
     SPECLIB_SCHEMA,
-    NEUTRAL_LOSS_DTYPE,
     fragment_offsets,
 )
 
@@ -69,9 +68,9 @@ class SpectralLibReader:
         speclib_schema = pl.scan_parquet(
             self.peptide_db_path / "speclib_df.parquet"
         ).collect_schema()
-        if speclib_schema.get("neutral_loss") != NEUTRAL_LOSS_DTYPE:
+        if speclib_schema.get("is_modloss") != pl.Boolean:
             raise ValueError(
-                "Library neutral_loss must use the common neutral-loss Enum."
+                "Library requires an is_modloss (Boolean) column; regenerate the library."
             )
         self.all_precursor_df = precursor_scan.select(
             pl.col(
@@ -207,9 +206,7 @@ class SpectralLibReader:
             ),
             speclib_is_prefix_arr=_readonly(speclib_df["is_prefix"].to_numpy()),
             speclib_charge_arr=_readonly(speclib_df["charge"].to_numpy()),
-            speclib_neutral_loss_arr=_readonly(
-                speclib_df["neutral_loss"].to_physical().to_numpy()
-            ),
+            speclib_is_modloss_arr=_readonly(speclib_df["is_modloss"].to_numpy()),
             speclib_mz_arr=_readonly(speclib_df["mz"].to_numpy()),
             speclib_predicted_intensity_arr=_readonly(
                 speclib_df["predicted_intensity"].to_numpy()

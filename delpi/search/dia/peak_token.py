@@ -3,7 +3,7 @@ import numba as nb
 
 from delpi.lcms.data_container import DIAWindowFrameNumMap, PeakContainer
 from delpi.database.numba.spec_lib_container import TheoreticalPeakContainer
-from delpi.model.input import TheoPeakInput, ExpPeakInput, IonType
+from delpi.model.input import TheoPeakInput, ExpPeakInput
 from delpi.search.dia.peak_group import PeakIndexContainer
 from delpi.utils.peak import find_peak_index
 from delpi.constants import RT_WINDOW_RADIUS
@@ -14,8 +14,9 @@ THEO_TOKEN_DIM = len(TheoPeakInput)
 EXP_TOKEN_DIM = len(ExpPeakInput)
 
 THEO_PRED_INTENSITY_IDX = TheoPeakInput.PRED_INTENSITY.index
-THEO_ION_TYPE_IDX = TheoPeakInput.ION_TYPE.index
-THEO_NEUTRAL_LOSS_IDX = TheoPeakInput.NEUTRAL_LOSS.index
+THEO_IS_PRECURSOR_IDX = TheoPeakInput.IS_PRECURSOR.index
+THEO_IS_PREFIX_IDX = TheoPeakInput.IS_PREFIX.index
+THEO_IS_MODLOSS_IDX = TheoPeakInput.IS_MODLOSS.index
 THEO_CHARGE_IDX = TheoPeakInput.CHARGE.index
 THEO_ISOTOPE_INDEX_IDX = TheoPeakInput.ISOTOPE_INDEX.index
 THEO_CLEAVAGE_INDEX_IDX = TheoPeakInput.CLEAVAGE_INDEX.index
@@ -24,19 +25,15 @@ THEO_REV_CLEAVAGE_INDEX_IDX = TheoPeakInput.REV_CLEAVAGE_INDEX.index
 EXP_MZ_ERROR_IDX = ExpPeakInput.MZ_ERROR.index
 EXP_AB_IDX = ExpPeakInput.AB.index
 EXP_Z_SCORE_IDX = ExpPeakInput.Z_SCORE.index
-EXP_ION_TYPE_IDX = ExpPeakInput.ION_TYPE.index
-EXP_NEUTRAL_LOSS_IDX = ExpPeakInput.NEUTRAL_LOSS.index
+EXP_IS_PRECURSOR_IDX = ExpPeakInput.IS_PRECURSOR.index
+EXP_IS_PREFIX_IDX = ExpPeakInput.IS_PREFIX.index
+EXP_IS_MODLOSS_IDX = ExpPeakInput.IS_MODLOSS.index
 EXP_CHARGE_IDX = ExpPeakInput.CHARGE.index
 EXP_ISOTOPE_INDEX_IDX = ExpPeakInput.ISOTOPE_INDEX.index
 EXP_MS_LEVEL_IDX = ExpPeakInput.MS_LEVEL.index
 EXP_CLEAVAGE_INDEX_IDX = ExpPeakInput.CLEAVAGE_INDEX.index
 EXP_REV_CLEAVAGE_INDEX_IDX = ExpPeakInput.REV_CLEAVAGE_INDEX.index
 EXP_TIME_INDEX_IDX = ExpPeakInput.TIME_INDEX.index
-
-
-ION_PRECURSOR = int(IonType.PRECURSOR)
-ION_B = int(IonType.B)
-ION_Y = int(IonType.Y)
 
 
 @nb.njit(nogil=True, cache=True)
@@ -59,15 +56,12 @@ def get_x_theo(
         valid_mask[:] = False
         valid_mask[:n] = True
     x_theo[:m, THEO_PRED_INTENSITY_IDX] = theo_peaks.precursor_intensity_arr
-    x_theo[:m, THEO_ION_TYPE_IDX] = ION_PRECURSOR
+    x_theo[:m, THEO_IS_PRECURSOR_IDX] = True
     x_theo[:m, THEO_CHARGE_IDX] = theo_peaks.precursor_charge
     x_theo[:m, THEO_ISOTOPE_INDEX_IDX] = theo_peaks.precursor_isotope_index_arr
     x_theo[m:n, THEO_PRED_INTENSITY_IDX] = theo_peaks.fragment_intensity_arr
-    for i in range(n - m):
-        x_theo[m + i, THEO_ION_TYPE_IDX] = (
-            ION_B if theo_peaks.fragment_is_prefix_arr[i] else ION_Y
-        )
-    x_theo[m:n, THEO_NEUTRAL_LOSS_IDX] = theo_peaks.fragment_neutral_loss_arr
+    x_theo[m:n, THEO_IS_PREFIX_IDX] = theo_peaks.fragment_is_prefix_arr
+    x_theo[m:n, THEO_IS_MODLOSS_IDX] = theo_peaks.fragment_is_modloss_arr
     x_theo[m:n, THEO_CHARGE_IDX] = theo_peaks.fragment_charge_arr
     x_theo[m:n, THEO_CLEAVAGE_INDEX_IDX] = theo_peaks.fragment_cleavage_index_arr
     x_theo[m:n, THEO_REV_CLEAVAGE_INDEX_IDX] = (
@@ -104,14 +98,15 @@ def _set_x_exp(
     ind_count = 0
     # quant_peak_count = 0
     max_ab = 0.0
+    center_frame_index = (min_frame_index + max_frame_index) // 2
     for theo_i_, (st, ed) in enumerate(zip(st_indices, ed_indices)):
         theo_mz = mz_arr[theo_i_]
         if is_precursor:
             theo_i = theo_i_
             theo_charge = theo_peaks.precursor_charge
             theo_isotope_index = theo_peaks.precursor_isotope_index_arr[theo_i]
-            theo_ion_type = ION_PRECURSOR
-            theo_neutral_loss = 0
+            theo_is_prefix = False
+            theo_is_modloss = False
             theo_cleavage_index = 0.0
             theo_rev_cleavage_index = 0.0
         else:
@@ -120,10 +115,8 @@ def _set_x_exp(
                 theo_i_ // num_fragments
             ]
             theo_charge = theo_peaks.fragment_charge_arr[theo_i]
-            theo_ion_type = (
-                ION_B if theo_peaks.fragment_is_prefix_arr[theo_i] else ION_Y
-            )
-            theo_neutral_loss = theo_peaks.fragment_neutral_loss_arr[theo_i]
+            theo_is_prefix = theo_peaks.fragment_is_prefix_arr[theo_i]
+            theo_is_modloss = theo_peaks.fragment_is_modloss_arr[theo_i]
             theo_cleavage_index = theo_peaks.fragment_cleavage_index_arr[theo_i]
             theo_rev_cleavage_index = seq_len - 2 - theo_cleavage_index
 
@@ -136,15 +129,16 @@ def _set_x_exp(
                 mz = peak_df.mz_arr[exp_i]
                 ab = peak_df.ab_arr[exp_i]
                 z_score = peak_df.z_score_arr[exp_i]
-                time_index = fi - min_frame_index
+                time_index = fi - center_frame_index
                 max_ab = max(ab, max_ab)
                 x_exp[counter, EXP_MZ_ERROR_IDX] = (
                     (mz - theo_mz) / theo_mz * (1e6 / mz_tol)
                 )
                 x_exp[counter, EXP_AB_IDX] = ab
                 x_exp[counter, EXP_Z_SCORE_IDX] = z_score
-                x_exp[counter, EXP_ION_TYPE_IDX] = theo_ion_type
-                x_exp[counter, EXP_NEUTRAL_LOSS_IDX] = theo_neutral_loss
+                x_exp[counter, EXP_IS_PRECURSOR_IDX] = is_precursor
+                x_exp[counter, EXP_IS_PREFIX_IDX] = theo_is_prefix
+                x_exp[counter, EXP_IS_MODLOSS_IDX] = theo_is_modloss
                 x_exp[counter, EXP_CHARGE_IDX] = theo_charge
                 x_exp[counter, EXP_ISOTOPE_INDEX_IDX] = theo_isotope_index
                 x_exp[counter, EXP_MS_LEVEL_IDX] = ms_level
@@ -152,7 +146,7 @@ def _set_x_exp(
                 x_exp[counter, EXP_REV_CLEAVAGE_INDEX_IDX] = theo_rev_cleavage_index
                 x_exp[counter, EXP_TIME_INDEX_IDX] = time_index
 
-                # Soft family-aware selection rank (0 = highest score), for any
+                # Predicted-intensity rank (0 = strongest fragment), for any
                 # isotope; get_xic_array filters to monoisotopic via x_exp itself
                 if (x_rank is not None) and (is_precursor == False):
                     x_rank[counter] = num_fragments - theo_i - 1
@@ -160,8 +154,7 @@ def _set_x_exp(
                 # save matched peak indices at the RT center
                 if (
                     (x_ind is not None)
-                    and (fi > min_frame_index + 2)
-                    and (fi < max_frame_index - 2)
+                    and (abs(time_index) <= 1)
                     and (ind_count < x_ind.shape[0])
                 ):
                     x_ind[ind_count] = exp_i

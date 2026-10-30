@@ -81,6 +81,7 @@ class PositionalEncoder2D(nn.Module):
 
 
 class PositionalEncoder1D(nn.Module):
+    """Sinusoidal encoding for signed positions, independent of window radius."""
 
     def __init__(self, embed_size, max_len):
         super().__init__()
@@ -96,18 +97,11 @@ class PositionalEncoder1D(nn.Module):
 
         self.register_buffer("pos_embed", pos_embed)
 
-    def forward(self, cleavage_indices):
-
-        pos_embed = self.pos_embed
-        embed_size = pos_embed.shape[-1]
-
-        pos_embed_indices = cleavage_indices.to(torch.int64)
-        pos_embed = torch.gather(
-            pos_embed[None, :, :].expand(cleavage_indices.shape[0], -1, -1),
-            dim=1,
-            index=pos_embed_indices.unsqueeze(-1).repeat(1, 1, embed_size),
-        )
-
+    def forward(self, positions):
+        indices = positions.to(torch.int64)
+        pos_embed = self.pos_embed[indices.abs()]
+        # sin(-t) = -sin(t), cos(-t) = cos(t). Indexing creates a copy.
+        pos_embed[..., 0::2] *= indices.sign().unsqueeze(-1)
         return pos_embed
 
 

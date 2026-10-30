@@ -2,6 +2,7 @@ from matplotlib import pyplot as plt
 import numpy as np
 import polars as pl
 
+from delpi.constants import RT_WINDOW_LEN, RT_WINDOW_RADIUS
 from delpi.model.input import ExpPeakInput
 from delpi.model.rt_calibrator import RetentionTimeCalibrator
 
@@ -12,25 +13,33 @@ def plot_pmsm(x_exp: np.ndarray):
     peak_df = pl.DataFrame(peak_data).sort("time_index")
 
     fig, axs = plt.subplots(2, 1, sharex=True, sharey=False)
-    x = np.arange(9)
+    x = np.arange(-RT_WINDOW_RADIUS, RT_WINDOW_RADIUS + 1)
 
-    precursor_peak_df = peak_df.filter(pl.col("ion_type") == 0)
+    precursor_peak_df = peak_df.filter(pl.col("is_precursor"))
     for grp, sub_df in precursor_peak_df.group_by(
         ["isotope_index", "ms_level"], maintain_order=True
     ):
         line_style = "dotted" if grp[1] > 1 else "solid"
-        y = np.zeros(9)
-        y[sub_df["time_index"]] = sub_df["ab"]
+        y = np.zeros(RT_WINDOW_LEN)
+        np.maximum.at(
+            y,
+            sub_df["time_index"].to_numpy() + RT_WINDOW_RADIUS,
+            sub_df["ab"].to_numpy(),
+        )
         axs[0].plot(x, y, linestyle=line_style)
     axs[0].set_title("Precursor XICs")
     fragment_peak_df = peak_df.filter(
-        (pl.col("ion_type") != 0) & (pl.col("isotope_index") == 0)
+        ~pl.col("is_precursor") & (pl.col("isotope_index") == 0)
     )
     for grp, sub_df in fragment_peak_df.group_by(
-        ["cleavage_index", "charge", "ion_type", "neutral_loss"], maintain_order=True
+        ["cleavage_index", "charge", "is_prefix", "is_modloss"], maintain_order=True
     ):
-        y = np.zeros(9)
-        y[sub_df["time_index"]] = sub_df["ab"]
+        y = np.zeros(RT_WINDOW_LEN)
+        np.maximum.at(
+            y,
+            sub_df["time_index"].to_numpy() + RT_WINDOW_RADIUS,
+            sub_df["ab"].to_numpy(),
+        )
         axs[1].plot(x, y)
     axs[1].set_title("Fragment XICs")
     return fig, axs

@@ -5,7 +5,6 @@ import polars as pl
 import torch
 
 from delpi.lcms.base_ion_type import BaseIonType
-from delpi.lcms.neutral_loss import NeutralLoss
 from delpi.chem.amino_acid import AminoAcid
 from delpi.chem.modification_param import ModificationParam
 from delpi.database.fasta_parser import FastaParser
@@ -79,9 +78,7 @@ class PeptideDatabase:
         save_dir: Union[str, Path] = None,
         precursor_chunk_size: int = None,
         batch_size: int = 512,
-        neutral_losses: Sequence[str | NeutralLoss] = None,
         min_intensity: float = 0.01,
-        gamma: float = 0.5,
         nce: float = DEFAULT_NCE,
         *args,
         **kwargs,
@@ -145,12 +142,6 @@ class PeptideDatabase:
         precursor_df = precursor_df.with_row_index("precursor_index")
 
         # generate spectral library
-        if neutral_losses is None:
-            neutral_losses = (
-                [NeutralLoss.NO_LOSS, NeutralLoss.H3O4P]
-                if mod_handler.has_phospho
-                else NeutralLoss.get_common_neutral_losses()
-            )
         speclib_generator = SpectralLibGenerator(
             min_charge=min_fragment_charge,
             max_charge=max_fragment_charge,
@@ -159,9 +150,8 @@ class PeptideDatabase:
             max_fragments=max_fragments,
             min_fragment_mz=min_fragment_mz,
             max_fragment_mz=max_fragment_mz,
-            neutral_losses=neutral_losses,
+            apply_phospho=mod_handler.has_phospho,
             min_intensity=min_intensity,
-            gamma=gamma,
             nce=nce,
             device=device,
         )

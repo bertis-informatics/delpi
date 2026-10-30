@@ -6,7 +6,7 @@ from delpi.model.input import TheoPeakInput, ExpPeakInput, ContextInput
 class PeptideMultiSpectraMatchScaler(torch.nn.Module):
     """Scale charge/isotopes by 5, NCE by 100, isolation offsets by asinh(x/5).
 
-    Preserve categorical codes, raw MS levels, and caller-owned buffers.
+    Preserve boolean flags, acquisition mode, raw MS levels, and caller-owned buffers.
     """
 
     def __init__(self, charge_denom: float = 5, isotope_denom: float = 5):

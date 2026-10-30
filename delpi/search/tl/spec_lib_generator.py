@@ -7,7 +7,6 @@ import numpy as np
 import torch
 
 from delpi.lcms.base_ion_type import BaseIonType
-from delpi.lcms.neutral_loss import NeutralLoss
 from delpi.model.spec_lib import Ms2SpectrumPredictor
 from delpi.database.peptide_database import PeptideDatabase
 from delpi.database.spec_lib_generator import SpectralLibGenerator
@@ -37,16 +36,9 @@ class RefinedSpectralLibGenerator(SpectralLibGenerator):
         suffix_ion_type=BaseIonType.Y,
         max_fragments=16,
         device: Union[str, torch.device] = "cuda:0",
-        neutral_losses=None,
         *args,
         **kwargs,
     ):
-        if neutral_losses is None:
-            neutral_losses = (
-                [NeutralLoss.NO_LOSS, NeutralLoss.H3O4P]
-                if apply_phospho
-                else NeutralLoss.get_common_neutral_losses()
-            )
         super().__init__(
             rt_predictor=rt_predictor,
             ms2_predictor=ms2_predictor,
@@ -57,7 +49,7 @@ class RefinedSpectralLibGenerator(SpectralLibGenerator):
             max_fragments=max_fragments,
             min_fragment_mz=min_fragment_mz,
             max_fragment_mz=max_fragment_mz,
-            neutral_losses=neutral_losses,
+            apply_phospho=apply_phospho,
             device=device,
             *args,
             **kwargs,

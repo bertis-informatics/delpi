@@ -19,19 +19,12 @@ RESCALING_CONSTANT_HIGH_PRECISION = 274.335215
 ISOLATION_LOWER_TOL = 3.5
 ISOLATION_UPPER_TOL = 0.25
 
-# Stable indices using delpi.lcms.neutral_loss.NeutralLoss.symbol notation.
-# This order defines the loss blocks in fragment intensity arrays.
-COMMON_NEUTRAL_LOSSES = ("NoLoss", "H2O", "NH3", "H3O4P")
-COMMON_NEUTRAL_LOSS_INDEX = {
-    loss: index for index, loss in enumerate(COMMON_NEUTRAL_LOSSES)
-}
-
 MAX_FRAGMENTS = 16
 DEFAULT_Q_VALUE_CUTOFF = 0.01
 
 QUANT_FRAGMENTS = 12
-RT_WINDOW_LEN = 9
-RT_WINDOW_RADIUS = RT_WINDOW_LEN // 2
+RT_WINDOW_RADIUS = 4
+RT_WINDOW_LEN = 2 * RT_WINDOW_RADIUS + 1
 
 DIA_MATCHED_PEAKS_CUTOFF = 9
 DDA_MATCHED_PEAKS_CUTOFF_LB = 3

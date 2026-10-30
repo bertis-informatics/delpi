@@ -30,7 +30,6 @@ from delpi.search.search_state import SearchState
 from delpi.search.progress.tracker import ProgressTracker
 from delpi.search.progress.tqdm_tracker import TqdmProgressTracker
 from delpi.search.progress.callback_tracker import CallbackProgressTracker
-from delpi.model.spec_lib.ms2_predictor import Ms2SpectrumPredictor
 from delpi.utils.fdr import calculate_q_value
 from delpi.utils.log_config import configure_logging
 from delpi import MODEL_DIR
@@ -282,13 +281,11 @@ class BaseSearchEngine(ABC):
                 logger.info(f"No TL training PmSMs selected for {raw_path}; skipping")
                 return
 
-            predictor = Ms2SpectrumPredictor.load(MODEL_DIR / "delpi.ms2_predictor.pth")
             preparator = TransferLearningDataPreparator(
                 nce=self.search_config.nce,
                 tolerance_in_ppm=self.search_config["ms2_mass_tol_in_ppm"],
-                neutral_losses=predictor.neutral_losses,
+                apply_phospho=self.search_config.is_phospho_search,
             )
-            del predictor
             preparator.extract_and_save(target_pmsm_df, raw_path, tl_ms2_h5_path)
             logger.info(f"Transfer learning data prepared for {raw_path}")
         except Exception as e:

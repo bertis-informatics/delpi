@@ -1,5 +1,7 @@
 from enum import Enum, IntEnum
 
+INPUT_SCHEMA_VERSION = 4
+
 
 class InputEnum(Enum):
 
@@ -21,12 +23,6 @@ class InputEnum(Enum):
         return [e.value for e in cls]
 
 
-class IonType(IntEnum):
-    PRECURSOR = 0
-    B = 1
-    Y = 2
-
-
 class AcquisitionMode(IntEnum):
     DDA = 0
     DIA = 1
@@ -34,12 +30,13 @@ class AcquisitionMode(IntEnum):
 
 class TheoPeakInput(InputEnum):
     PRED_INTENSITY = "predicted_intensity", 0, "float32"
-    ION_TYPE = "ion_type", 1, "uint8"
-    NEUTRAL_LOSS = "neutral_loss", 2, "uint8"
-    CHARGE = "charge", 3, "uint8"
-    ISOTOPE_INDEX = "isotope_index", 4, "int8"
-    CLEAVAGE_INDEX = "cleavage_index", 5, "uint8"
-    REV_CLEAVAGE_INDEX = "reverse_cleavage_index", 6, "uint8"
+    IS_PRECURSOR = "is_precursor", 1, "bool"
+    IS_PREFIX = "is_prefix", 2, "bool"
+    IS_MODLOSS = "is_modloss", 3, "bool"  # False: NoLoss, True: H3O4P
+    CHARGE = "charge", 4, "uint8"
+    ISOTOPE_INDEX = "isotope_index", 5, "int8"
+    CLEAVAGE_INDEX = "cleavage_index", 6, "uint8"
+    REV_CLEAVAGE_INDEX = "reverse_cleavage_index", 7, "uint8"
 
 
 class ExpPeakInput(InputEnum):
@@ -47,13 +44,14 @@ class ExpPeakInput(InputEnum):
     AB = "ab", 1, "float32"
     Z_SCORE = "z_score", 2, "float32"
     MS_LEVEL = "ms_level", 3, "uint8"
-    ION_TYPE = "ion_type", 4, "uint8"
-    NEUTRAL_LOSS = "neutral_loss", 5, "uint8"
-    CHARGE = "charge", 6, "uint8"
-    ISOTOPE_INDEX = "isotope_index", 7, "int8"
-    TIME_INDEX = "time_index", 8, "uint8"
-    CLEAVAGE_INDEX = "cleavage_index", 9, "uint8"
-    REV_CLEAVAGE_INDEX = "reverse_cleavage_index", 10, "uint8"
+    IS_PRECURSOR = "is_precursor", 4, "bool"
+    IS_PREFIX = "is_prefix", 5, "bool"
+    IS_MODLOSS = "is_modloss", 6, "bool"  # False: NoLoss, True: H3O4P
+    CHARGE = "charge", 7, "uint8"
+    ISOTOPE_INDEX = "isotope_index", 8, "int8"
+    TIME_INDEX = "time_index", 9, "int8"  # Scan offset from the RT center (0).
+    CLEAVAGE_INDEX = "cleavage_index", 10, "uint8"
+    REV_CLEAVAGE_INDEX = "reverse_cleavage_index", 11, "uint8"
 
 
 class ContextInput(InputEnum):

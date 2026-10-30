@@ -6,7 +6,7 @@ import torch.nn as nn
 import lightning.pytorch as pl
 
 from delpi.model.mae_encoder import Encoder
-from delpi.model.input import TheoPeakInput, ExpPeakInput
+from delpi.model.input import INPUT_SCHEMA_VERSION, TheoPeakInput, ExpPeakInput
 from delpi.model.feature_encoder import valid_tokens
 
 
@@ -20,7 +20,7 @@ class DelPiModel(pl.LightningModule):
         model = DelPiModel.load("path/to/model.pth")
     """
 
-    INPUT_SCHEMA_VERSION = 2
+    INPUT_SCHEMA_VERSION = INPUT_SCHEMA_VERSION
 
     def __init__(
         self,
@@ -31,7 +31,7 @@ class DelPiModel(pl.LightningModule):
         global_pool: Literal["token", "avg", "split"] = "token",
         layers: Sequence[int] = [64, 32],
         dropout: float = 0.1,
-        input_schema_version: int = 2,
+        input_schema_version: int = INPUT_SCHEMA_VERSION,
         **kwargs,
     ):
         super().__init__()
@@ -42,7 +42,7 @@ class DelPiModel(pl.LightningModule):
             )
         if input_schema_version != self.INPUT_SCHEMA_VERSION:
             raise ValueError(
-                "Unsupported DelPi input schema; retrain the model for schema 2"
+                f"Unsupported DelPi input schema; retrain the model for schema {INPUT_SCHEMA_VERSION}"
             )
         self.save_hyperparameters(ignore=["kwargs"])
         self.global_pool = global_pool

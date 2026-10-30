@@ -1,7 +1,7 @@
 import polars as pl
 
 from delpi.lcms.base_ion_type import BaseIonType
-from delpi.lcms.neutral_loss import NeutralLoss, NEUTRAL_LOSS_DTYPE
+from delpi.lcms.neutral_loss import NeutralLoss
 from delpi.lcms.data_container import IonTypeContainer
 from delpi.constants import C13C12_MASS_DIFF
 from delpi.chem.averagine import get_isotope_indices
@@ -44,7 +44,7 @@ class Fragmentation:
     def _generate_ion_table(self):
         schema = {
             "base_ion_type": pl.Categorical,
-            "neutral_loss": NEUTRAL_LOSS_DTYPE,
+            "neutral_loss": pl.String,
             "charge": pl.UInt8,
             "isotope_index": pl.Int8,
             "is_prefix": pl.Boolean,
@@ -82,12 +82,12 @@ class Fragmentation:
         ion_type_df = self.ion_type_df
         if isotope_index is not None:
             ion_type_df = ion_type_df.filter(pl.col("isotope_index") == isotope_index)
-        ion_type_df = ion_type_df.sort(
-            "neutral_loss", ~pl.col("is_prefix"), "charge", "isotope_index"
-        )
+        ion_type_df = ion_type_df.with_columns(
+            is_modloss=pl.col("neutral_loss") == NeutralLoss.H3O4P.symbol
+        ).sort("is_modloss", ~pl.col("is_prefix"), "charge", "isotope_index")
         return IonTypeContainer(
             ion_type_df["is_prefix"].to_numpy(),
             ion_type_df["charge"].to_numpy(),
             ion_type_df["offset_mass"].to_numpy(),
-            ion_type_df["neutral_loss"].to_physical().cast(pl.UInt8).to_numpy(),
+            ion_type_df["is_modloss"].to_numpy(),
         )

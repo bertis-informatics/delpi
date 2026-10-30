@@ -6,14 +6,13 @@ from delpi.search.dia.lfq_frag_select import (
     filter_fragments_by_cross_run_intensity,
 )
 from delpi.search.dia.peak_token import (
-    EXP_ION_TYPE_IDX,
+    EXP_IS_PRECURSOR_IDX,
     EXP_ISOTOPE_INDEX_IDX,
     EXP_MS_LEVEL_IDX,
     EXP_TIME_INDEX_IDX,
     EXP_AB_IDX,
 )
 from delpi.constants import (
-    RT_WINDOW_LEN,
     RT_WINDOW_RADIUS,
     QUANT_FRAGMENTS,
 )
@@ -63,10 +62,10 @@ def get_pmsm_median_intensity(
     ``top_k``-ranked fragment ion peaks, computed directly from
     ``x_exp``'s peak annotations -- no separate XIC array needed. Shared by
     DIA and DDA, since both build ``x_exp``/``x_rank`` with the same
-    conventions (center == ``RT_WINDOW_RADIUS``; ``x_rank`` only set, and
+    conventions (time_index == 0 at the center; ``x_rank`` only set, and
     always >= 0, for fragment peaks -- see `_set_x_exp`).
 
-    Ranks follow the library's soft family-aware selection score. Only
+    Ranks follow the library's predicted fragment intensity. Only
     positive, monoisotopic MS2 fragment matches contribute, including all
     stored neutral losses; missing channels never enter the average.
 
@@ -89,13 +88,13 @@ def get_pmsm_median_intensity(
             if (
                 0 <= rank < top_k
                 and x_arr[j, EXP_ISOTOPE_INDEX_IDX] == 0
-                and x_arr[j, EXP_ION_TYPE_IDX] != 0
+                and x_arr[j, EXP_IS_PRECURSOR_IDX] == 0
                 and x_arr[j, EXP_MS_LEVEL_IDX] == 2
                 and np.isfinite(x_arr[j, EXP_AB_IDX])
                 and x_arr[j, EXP_AB_IDX] > 0
             ):
                 t = nb.int8(x_arr[j, EXP_TIME_INDEX_IDX])
-                if abs(t - RT_WINDOW_RADIUS) <= neighbor_window:
+                if abs(t) <= neighbor_window:
                     values[k] = x_arr[j, EXP_AB_IDX]
                     k += 1
 
@@ -119,13 +118,16 @@ def get_pmsm_median_intensity(
 
 @nb.njit(parallel=True, cache=True)
 def get_xic_array(
-    x_exp: np.ndarray, x_rank: np.ndarray, ms2_scale_arr: np.ndarray
+    x_exp: np.ndarray,
+    x_rank: np.ndarray,
+    ms2_scale_arr: np.ndarray,
+    rt_window_radius: int = RT_WINDOW_RADIUS,
 ) -> np.ndarray:
-    """Build a ``(QUANT_FRAGMENTS, RT_WINDOW_LEN)`` max-held fragment-intensity
+    """Build a ``(QUANT_FRAGMENTS, 2 * rt_window_radius + 1)`` fragment-intensity
     array per PmSM directly from ``x_exp``, channel-indexed by ``x_rank``
-    (each matched fragment peak's soft family-aware selection rank, as set by
-    `delpi.search.dia.peak_token._set_x_exp` -- 0 == the highest selection
-    score for this precursor; -1 == not ranked).
+    (each matched fragment peak's predicted-intensity rank, as set by
+    `delpi.search.dia.peak_token._set_x_exp` -- 0 == the highest predicted
+    intensity for this precursor; -1 == not ranked).
 
     Rank, not peak position, is required downstream: cross-run MaxLFQ
     (`perform_lfq`) selects fragment channels once per precursor group and
@@ -141,7 +143,8 @@ def get_xic_array(
     after the max-hold loop.
     """
     N, M = x_exp.shape[:2]
-    xic = np.zeros((N, QUANT_FRAGMENTS, RT_WINDOW_LEN), dtype=np.float32)
+    window_len = 2 * rt_window_radius + 1
+    xic = np.zeros((N, QUANT_FRAGMENTS, window_len), dtype=np.float32)
 
     for n in nb.prange(N):
         x_arr = x_exp[n]
@@ -151,13 +154,13 @@ def get_xic_array(
             if (
                 0 <= channel < QUANT_FRAGMENTS
                 and x_arr[j, EXP_ISOTOPE_INDEX_IDX] == 0
-                and x_arr[j, EXP_ION_TYPE_IDX] != 0
+                and x_arr[j, EXP_IS_PRECURSOR_IDX] == 0
                 and x_arr[j, EXP_MS_LEVEL_IDX] == 2
                 and np.isfinite(x_arr[j, EXP_AB_IDX])
                 and x_arr[j, EXP_AB_IDX] > 0
             ):
-                t = nb.int8(x_arr[j, EXP_TIME_INDEX_IDX])
-                if 0 <= t < RT_WINDOW_LEN:
+                t = int(x_arr[j, EXP_TIME_INDEX_IDX]) + rt_window_radius
+                if 0 <= t < window_len:
                     ab = x_arr[j, EXP_AB_IDX]
                     if xic[n, channel, t] < ab:
                         xic[n, channel, t] = ab
@@ -167,10 +170,15 @@ def get_xic_array(
 
 
 @nb.njit(parallel=True, cache=True)
-def get_ms1_area(x_exp: np.ndarray, ms1_scale_arr: np.ndarray):
+def get_ms1_area(
+    x_exp: np.ndarray,
+    ms1_scale_arr: np.ndarray,
+    rt_window_radius: int = RT_WINDOW_RADIUS,
+):
 
     N, M = x_exp.shape[:2]
     quant_arr = np.full(N, np.nan, dtype=np.float32)
+    window_len = 2 * rt_window_radius + 1
 
     for i in nb.prange(N):
         x_arr = x_exp[i]
@@ -178,13 +186,14 @@ def get_ms1_area(x_exp: np.ndarray, ms1_scale_arr: np.ndarray):
         if scale <= 0:
             continue
         has_ms1_peak = False
-        y = np.zeros(RT_WINDOW_LEN, dtype=np.float32)
+        y = np.zeros(window_len, dtype=np.float32)
         for j in range(M):
-            t = nb.int8(x_arr[j, EXP_TIME_INDEX_IDX])
+            t = int(x_arr[j, EXP_TIME_INDEX_IDX]) + rt_window_radius
             if (
-                (x_arr[j, EXP_ION_TYPE_IDX] == 0)
+                (x_arr[j, EXP_IS_PRECURSOR_IDX] != 0)
                 and (x_arr[j, EXP_MS_LEVEL_IDX] == 1)
                 and x_arr[j, EXP_ISOTOPE_INDEX_IDX] >= 0
+                and 0 <= t < window_len
             ):
                 # M-1 is matching evidence, not part of the isotope envelope.
                 y[t] += x_arr[j, EXP_AB_IDX]
@@ -199,9 +208,14 @@ def get_ms1_area(x_exp: np.ndarray, ms1_scale_arr: np.ndarray):
 
 
 @nb.njit(parallel=True, cache=True)
-def get_ms1_area_dda(x_exp: np.ndarray, ms1_scale_arr: np.ndarray):
+def get_ms1_area_dda(
+    x_exp: np.ndarray,
+    ms1_scale_arr: np.ndarray,
+    rt_window_radius: int = RT_WINDOW_RADIUS,
+):
     N, M = x_exp.shape[:2]
     quant_arr = np.full(N, np.nan, dtype=np.float32)
+    window_len = 2 * rt_window_radius + 1
 
     for i in nb.prange(x_exp.shape[0]):
         x_arr = x_exp[i]
@@ -210,14 +224,15 @@ def get_ms1_area_dda(x_exp: np.ndarray, ms1_scale_arr: np.ndarray):
             continue
         # frame_idx = frame_index_arr[i]
         has_ms1_peak = False
-        y = np.zeros(RT_WINDOW_LEN, dtype=np.float32)
+        y = np.zeros(window_len, dtype=np.float32)
 
         for j in range(M):
-            t = nb.int8(x_arr[j, EXP_TIME_INDEX_IDX])
+            t = int(x_arr[j, EXP_TIME_INDEX_IDX]) + rt_window_radius
             if (
-                (x_arr[j, EXP_ION_TYPE_IDX] == 0)
+                (x_arr[j, EXP_IS_PRECURSOR_IDX] != 0)
                 and (x_arr[j, EXP_MS_LEVEL_IDX] == 1)
                 and x_arr[j, EXP_ISOTOPE_INDEX_IDX] >= 0
+                and 0 <= t < window_len
             ):
                 # M-1 is matching evidence, not part of the isotope envelope.
                 y[t] += x_arr[j, EXP_AB_IDX]
