@@ -209,3 +209,26 @@ def find_bases(chrom: np.ndarray, peaks: np.ndarray):
         right_bases[idx] = j
 
     return left_bases, right_bases
+
+
+@nb.njit(nogil=True, cache=True)
+def nms_peaks(peaks: np.ndarray, weights: np.ndarray, dist: int = 2):
+    """Suppress peaks within `dist` of a stronger peak; return sorted positions.
+
+    Equal weights retain input order (scan order in peak-group detection).
+    """
+    n = peaks.shape[0]
+    if n < 2:
+        return peaks
+    order = np.argsort(-weights, kind="mergesort")
+    keep = np.zeros(n, dtype=np.bool_)
+    for a in range(n):
+        ia = order[a]
+        ok = True
+        for b in range(a):
+            ib = order[b]
+            if keep[ib] and abs(np.int64(peaks[ia]) - np.int64(peaks[ib])) <= dist:
+                ok = False
+                break
+        keep[ia] = ok
+    return np.sort(peaks[keep])

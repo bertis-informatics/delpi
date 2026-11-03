@@ -10,7 +10,7 @@ from delpi.database.numba.spec_lib_utils import (
     get_frame_index_range,
     get_theoretical_peaks,
 )
-from delpi.utils.signal import find_local_maxima, cluster_peaks_with_weights
+from delpi.utils.signal import find_local_maxima, nms_peaks
 from delpi.utils.peak import find_peak_index
 from delpi.constants import QUANT_FRAGMENTS
 
@@ -139,22 +139,37 @@ def make_xic_array(
 
 @nb.njit(nogil=True, fastmath=True, cache=True)
 def count_xic_peaks(dense_arr: np.ndarray):
+    """Count fragment XIC maxima at each scan (without scan tolerance)."""
+    exact_counts, _ = count_xic_peaks_tol(dense_arr, tol=0)
+    return exact_counts
 
-    num_xics = dense_arr.shape[0]
-    xic_peak_count_arr = np.zeros(dense_arr.shape[1], dtype=np.uint16)
 
-    detected_peaks = [np.empty(0, dtype=np.uint32)] * num_xics
-    for i in nb.prange(num_xics):
+@nb.njit(nogil=True, cache=True)
+def count_xic_peaks_tol(dense_arr: np.ndarray, tol: int = 1):
+    """Return exact and +/-tol scan counts from one maxima search per XIC.
+
+    Each fragment contributes at most once per scan to the tolerant count.
+    """
+    if tol < 0:
+        raise ValueError("tol must be non-negative")
+    num_xics, n_t = dense_arr.shape
+    exact_counts = np.zeros(n_t, dtype=np.uint16)
+    tolerant_counts = np.zeros(n_t, dtype=np.uint16)
+    for i in range(num_xics):
         xic = dense_arr[i]
-        if np.any(xic > 0):
-            peaks, left_edges, right_edges = find_local_maxima(xic)
-            detected_peaks[i] = peaks
-
-    for peaks in detected_peaks:
-        for j in peaks:
-            xic_peak_count_arr[j] += 1
-
-    return xic_peak_count_arr
+        if not np.any(xic > 0):
+            continue
+        peaks, _, _ = find_local_maxima(xic)
+        counted_stop = 0
+        for p in peaks:
+            exact_counts[p] += 1
+            # Maxima are sorted: skip overlap with the preceding peak's window.
+            lo = max(counted_stop, int(p) - tol)
+            hi = min(n_t, int(p) + tol + 1)
+            for t in range(lo, hi):
+                tolerant_counts[t] += 1
+            counted_stop = hi
+    return exact_counts, tolerant_counts
 
 
 @nb.njit(nogil=True, fastmath=True, cache=True)
@@ -218,7 +233,7 @@ def find_peak_groups(
     num_fragments = speclib_container.max_fragments
     num_precursors = speclib_container.precursor_mz_arr.shape[0]
     min_precursor_index = speclib_container.min_precursor_index
-    peak_group_results = [np.empty(0, dtype=np.uint32)] * num_precursors
+    peak_group_results = [np.empty(0, dtype=np.int32)] * num_precursors
     peak_count_results = [np.empty(0, dtype=np.uint16)] * num_precursors
     num_peak_groups = np.zeros(num_precursors, dtype=np.uint32)
     num_precursor_peaks = speclib_container.max_precursor_isotopes
@@ -292,34 +307,24 @@ def find_peak_groups(
         )
 
         ## count XIC peaks across fragments
-        xic_peak_count_arr = count_xic_peaks(xic_arr)
+        xic_peak_count_arr, xic_peak_count_tol_arr = count_xic_peaks_tol(xic_arr)
+
         ## count mono-isotopic peaks of fragments
         spec_peak_count_arr = (xic_arr > 0).sum(axis=0, dtype=np.uint16)
         quant_peak_count_arr = (xic_arr[-QUANT_FRAGMENTS:, :] > 0).sum(
             axis=0, dtype=np.uint16
         )
-        mask = (xic_peak_count_arr >= min_xic_peak_count) & (quant_peak_count_arr > 0)
-        peak_group_arr = np.flatnonzero(mask).astype(np.uint32)
+        mask = (xic_peak_count_tol_arr >= min_xic_peak_count) & (
+            quant_peak_count_arr > 0
+        )
+        # Tolerance can include endpoint scans, but scoring needs both neighbors.
+        peak_group_arr = (np.flatnonzero(mask[1:-1]) + 1).astype(np.int32)
+        # Only eligible candidates may suppress their neighbors.
+        mask = (peak_group_arr >= peak_lb) & (peak_group_arr <= peak_ub)
+        peak_group_arr = peak_group_arr[mask]
 
         if peak_group_arr.shape[0] < 1:
             continue
-
-        ## cluster peak groups with ad-hoc peak group scoring
-        comb_count_arr = xic_peak_count_arr + spec_peak_count_arr
-        peak_group_scores = (
-            comb_count_arr[peak_group_arr - 1]
-            + 2.0 * comb_count_arr[peak_group_arr]
-            + comb_count_arr[peak_group_arr + 1]
-        )
-        peak_group_arr = cluster_peaks_with_weights(
-            peak_group_arr,
-            peak_group_scores,
-            dist_cutoff=2,
-            min_cluster_size=1,
-            max_cluster_size=1024,
-        )
-        mask = (peak_group_arr >= peak_lb) & (peak_group_arr <= peak_ub)
-        peak_group_arr = peak_group_arr[mask]
 
         ## count the number of experimental peaks for each peak group
         sum_peak_count_arr = sum_neighborhood(
@@ -334,14 +339,23 @@ def find_peak_groups(
         if peak_group_arr.shape[0] < 1:
             continue
 
+        ## suppress nearby candidates by fragment co-elution score
+        comb_count_arr = xic_peak_count_arr + spec_peak_count_arr
+        peak_group_scores = (
+            comb_count_arr[peak_group_arr - 1]
+            + 2.0 * comb_count_arr[peak_group_arr]
+            + comb_count_arr[peak_group_arr + 1]
+        )
+        selected_peaks = nms_peaks(peak_group_arr, peak_group_scores, dist=2)
+        # Both arrays are scan-sorted; keep counts and scores aligned after NMS.
+        selected_indices = np.searchsorted(peak_group_arr, selected_peaks)
+        peak_group_arr = selected_peaks
+        sum_peak_count_arr = sum_peak_count_arr[selected_indices]
+        peak_group_scores = peak_group_scores[selected_indices]
+
         ## select Top K peak groups, ranked by fragment co-elution score
         if peak_group_arr.shape[0] > topk:
-            peak_group_scores = (
-                comb_count_arr[peak_group_arr - 1]
-                + 2.0 * comb_count_arr[peak_group_arr]
-                + comb_count_arr[peak_group_arr + 1]
-            )
-            ii = np.argsort(peak_group_scores)[::-1][:topk]
+            ii = np.argsort(-peak_group_scores, kind="mergesort")[:topk]
             peak_group_arr = peak_group_arr[ii]
             sum_peak_count_arr = sum_peak_count_arr[ii]
 
