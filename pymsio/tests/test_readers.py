@@ -1,3 +1,8 @@
+import os
+from pathlib import Path
+import subprocess
+import sys
+import textwrap
 from typing import List
 
 import numpy as np
@@ -33,19 +38,74 @@ class TestImports:
 
         assert ThermoRawReader is not None
 
-    def test_thermo_dll_loaded(self):
-        from pymsio.readers.thermo import LOADED_DLL
+    def test_thermo_dll_loaded(self, raw_path):
+        from pymsio.readers import thermo
 
-        assert LOADED_DLL, (
-            "Thermo DLLs not loaded. "
-            "Ensure DLLs are in pymsio/dlls/thermo_fisher/ or PYMSIO_THERMO_DLL_DIR is set."
-        )
+        thermo._load_thermo_dlls()
+        assert thermo.LOADED_DLL
 
     def test_reader_factory_supported_extensions(self):
         from pymsio.readers import ReaderFactory
 
         assert ".raw" in ReaderFactory.supported_file_extensions
         assert ".mzml" in ReaderFactory.supported_file_extensions
+
+
+def test_data_and_mzml_imports_do_not_load_dotnet():
+    script = textwrap.dedent(
+        """
+        import importlib.abc
+        import sys
+
+        attempts = []
+
+        class BlockDotNet(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in {'clr', 'pythonnet', 'System', 'ThermoFisher'}:
+                    attempts.append(fullname)
+                    raise ModuleNotFoundError('Blocked optional dependency: ' + fullname)
+
+        sys.meta_path.insert(0, BlockDotNet())
+        from pymsio import MassSpecData, MzmlFileReader, ThermoRawReader
+        from pymsio.readers.ms_data import PeakArray
+        from pymsio.readers.utils import DotNetArrayToNPArray, pin_dotnet_array
+        import numpy as np
+        import polars as pl
+
+        data = MassSpecData(
+            'test', pl.DataFrame({'frame_num': [1, 2]}),
+            PeakArray(np.array([100, 200], dtype=np.float32),
+                      np.array([10, 20], dtype=np.float32)),
+        )
+        np.testing.assert_array_equal(data.frame_num_to_index[[1, 2]], [0, 1])
+        assert DotNetArrayToNPArray(None).size == 0
+        assert pin_dotnet_array(None)[1] is None
+        assert attempts == [], attempts
+
+        try:
+            ThermoRawReader('test.raw')
+        except RuntimeError as exc:
+            assert 'Thermo RAW reading requires' in str(exc)
+            assert isinstance(exc.__cause__, ModuleNotFoundError)
+        else:
+            raise AssertionError('RAW reader must fail without its runtime')
+        assert attempts == ['clr'], attempts
+        """
+    )
+    env = os.environ.copy()
+    package_root = str(Path(__file__).resolve().parents[1])
+    env["PYTHONPATH"] = os.pathsep.join(
+        filter(None, [package_root, env.get("PYTHONPATH")])
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Traceback" not in result.stderr
 
 
 def _validate_meta_df(meta_df: pl.DataFrame) -> None:

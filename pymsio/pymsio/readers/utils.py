@@ -1,27 +1,27 @@
 import math
-import logging
+import ctypes
 from contextlib import contextmanager, ExitStack
+from functools import lru_cache
 from typing import Iterator, Tuple
 
 import numpy as np
 import numba as nb
 
-logger = logging.getLogger(__name__)
 
-try:
-    import clr
+@lru_cache(maxsize=1)
+def _get_dotnet_handles():
+    """Load pythonnet only when a .NET array is actually used."""
+    try:
+        import clr
 
-    clr.AddReference("System")
-
-    import ctypes
-
-    from System.Runtime.InteropServices import GCHandle, GCHandleType
-except Exception as e:
-    logger.exception(
-        "pythonnet/.NET runtime import failed. "
-        f"Optional dependency unavailable: pythonnet/.NET import failed ({type(e).__name__}: {e}). "
-        "Thermo RAW reader functionality will be disabled."
-    )
+        clr.AddReference("System")
+        from System.Runtime.InteropServices import GCHandle, GCHandleType
+    except Exception as exc:
+        raise RuntimeError(
+            "Reading .NET arrays requires pythonnet and a configured .NET runtime. "
+            "HDF and mzML readers do not require them."
+        ) from exc
+    return GCHandle, GCHandleType
 
 
 def DotNetArrayToNPArray(src, dtype=np.float64):
@@ -37,6 +37,7 @@ def DotNetArrayToNPArray(src, dtype=np.float64):
     """
     if src is None:
         return np.array([], dtype=dtype)
+    GCHandle, GCHandleType = _get_dotnet_handles()
     src_hndl = GCHandle.Alloc(src, GCHandleType.Pinned)
     try:
         src_ptr = src_hndl.AddrOfPinnedObject().ToInt64()
@@ -51,15 +52,10 @@ def DotNetArrayToNPArray(src, dtype=np.float64):
 
 # Maps a NumPy source dtype to (the expected .NET array element type name,
 # the equivalent ctypes scalar type) used by `pinned_dotnet_array_view`.
-try:
-    _DOTNET_ELEMENT_TYPES = {
-        np.dtype(np.float64): ("Double", ctypes.c_double),
-        np.dtype(np.float32): ("Single", ctypes.c_float),
-    }
-except NameError:
-    # pythonnet/.NET unavailable (see import guard above); Thermo-specific
-    # helpers below simply won't be usable in that case.
-    _DOTNET_ELEMENT_TYPES = {}
+_DOTNET_ELEMENT_TYPES = {
+    np.dtype(np.float64): ("Double", ctypes.c_double),
+    np.dtype(np.float32): ("Single", ctypes.c_float),
+}
 
 
 def pin_dotnet_array(
@@ -96,6 +92,7 @@ def pin_dotnet_array(
             )
 
     n = len(src)
+    GCHandle, GCHandleType = _get_dotnet_handles()
     src_hndl = GCHandle.Alloc(src, GCHandleType.Pinned)
     src_ptr = src_hndl.AddrOfPinnedObject().ToInt64()
     buf_type = ctypes_type * n

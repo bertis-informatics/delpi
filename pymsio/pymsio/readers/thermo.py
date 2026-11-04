@@ -9,6 +9,7 @@ import polars as pl
 
 from pymsio.readers.base import MassSpecFileReader
 from pymsio.readers.ms_data import MassSpecData, PeakArray
+from pymsio.readers.utils import pin_dotnet_array, unpin_dotnet_array
 
 logger = logging.getLogger(__name__)
 
@@ -47,28 +48,35 @@ def find_thermo_dll_dir() -> Path:
 
 
 LOADED_DLL = False
-_DLL_LOAD_ERROR: str = ""
 
-try:
-    import clr
 
-    clr.AddReference("System")
-    import System
+def _load_thermo_dlls():
+    """Initialize the optional .NET runtime and vendor DLLs on first RAW use."""
+    global LOADED_DLL, System, ThermoFisher, RawFileReaderAdapter, IScanEventBase
+    if LOADED_DLL:
+        return
 
-    from pymsio.readers.utils import pin_dotnet_array, unpin_dotnet_array
+    try:
+        import clr
 
-    dll_dir = find_thermo_dll_dir()
+        clr.AddReference("System")
+        import System
 
-    for filename in REQUIRED_DLLS:
-        clr.AddReference(os.path.join(dll_dir, filename))
+        dll_dir = find_thermo_dll_dir()
+        for filename in REQUIRED_DLLS:
+            clr.AddReference(os.path.join(dll_dir, filename))
 
-    import ThermoFisher
-    from ThermoFisher.CommonCore.RawFileReader import RawFileReaderAdapter
-    from ThermoFisher.CommonCore.Data.Interfaces import IScanEventBase
-
+        import ThermoFisher
+        from ThermoFisher.CommonCore.RawFileReader import RawFileReaderAdapter
+        from ThermoFisher.CommonCore.Data.Interfaces import IScanEventBase
+    except Exception as exc:
+        raise RuntimeError(
+            "Thermo RAW reading requires pythonnet, a configured .NET runtime, "
+            f"and Thermo DLLs (see {ENV_DLL_DIR}). "
+            "HDF and mzML readers do not require them. "
+            f"Initialization failed: {type(exc).__name__}: {exc}"
+        ) from exc
     LOADED_DLL = True
-except Exception as exc:
-    _DLL_LOAD_ERROR = f"{type(exc).__name__}: {exc}"
 
 
 class _PeakBufferBuilder:
@@ -198,8 +206,7 @@ class ThermoRawReader(MassSpecFileReader):
             the calling thread. Do not share ``self._raw`` across threads or
             processes.
         """
-        if not LOADED_DLL:
-            raise RuntimeError(f"Failed to load Thermo DLLs: {_DLL_LOAD_ERROR}")
+        _load_thermo_dlls()
 
         super().__init__(filepath, num_workers)
 
