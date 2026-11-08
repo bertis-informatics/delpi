@@ -126,7 +126,7 @@ def _allocate_dia_buffer(
         "X_precursor_index": np.empty(batch_size, dtype=np.uint32),
         "ms1_scale_arr": np.empty(batch_size, dtype=np.float32),
         "ms2_scale_arr": np.empty(batch_size, dtype=np.float32),
-        "X_indices": np.empty((batch_size, 128), dtype=np.int32),
+        "X_indices": np.empty((batch_size, 512), dtype=np.int32),
         "X_rank": np.empty((batch_size, max_exp_peaks), dtype=np.int16),
     }
 

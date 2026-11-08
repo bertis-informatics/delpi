@@ -43,7 +43,7 @@ from delpi.constants import DIA_MATCHED_PEAKS_CUTOFF
 
 logger = logging.getLogger(__name__)
 
-LOGIT_CUTOFF = 0.0
+LOGIT_CUTOFF = -1.0
 TOPK_PER_PRECURSOR = 5
 
 
@@ -293,8 +293,9 @@ class DIASearchEngine(BaseSearchEngine):
                 cluster_arr = cluster_matches(
                     frame_index_arr=dia_win.frame_num_to_index[merged["frame_num"]],
                     peak_index_arr=merged["peak_indices"],
-                    max_frame_diff=1,
-                    jaccard_thres=0.6,
+                    score_arr=merged["logit"].astype(np.float32, copy=False),
+                    max_frame_diff=4,
+                    containment_thres=0.6,
                 )
                 merged["cluster"] = cluster_arr + cluster_count
                 cluster_count += 1 + np.max(cluster_arr)

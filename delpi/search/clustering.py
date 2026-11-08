@@ -113,13 +113,13 @@ def cluster_psms(
 
 
 @nb.njit(cache=True)
-def cluster_matches(
+def cluster_matches_jaccard(
     frame_index_arr: np.ndarray,  # (N,)
-    peak_index_arr: np.ndarray,  # (N, 128)
+    peak_index_arr: np.ndarray,  # (N, peak_capacity)
     max_frame_diff: int,
     jaccard_thres: float = 0.6,
 ) -> np.ndarray:
-    """Assign each PmSM to a cluster using greedy single-link criterion.
+    """Legacy frame-ordered clustering, retained for replaying historical results.
 
     Two PmSMs are put in the *same* cluster if **both** conditions hold:
     1. ``abs(frame_num[i] - frame_num[rep]) ≤ 1``
@@ -184,3 +184,93 @@ def cluster_matches(
     # Trim rep_idx_arr to actual number of clusters and return
     # return cluster_id_arr, rep_idx_arr[:cluster_count]
     return cluster_id_arr
+
+
+@nb.njit(inline="always")
+def _count_shared_peaks(row_a, size_a, row_b, size_b):
+    """Intersection size of sorted, unique peak IDs, excluding padding."""
+    a, b, shared = 0, 0, 0
+    while a < size_a and b < size_b:
+        if row_a[a] == row_b[b]:
+            shared += 1
+            a += 1
+            b += 1
+        elif row_a[a] < row_b[b]:
+            a += 1
+        else:
+            b += 1
+    return shared
+
+
+@nb.njit(nogil=True, cache=True)
+def cluster_matches(
+    frame_index_arr: np.ndarray,
+    peak_index_arr: np.ndarray,
+    score_arr: np.ndarray,
+    max_frame_diff: int,
+    containment_thres: float = 0.8,
+) -> np.ndarray:
+    """Cluster PmSMs by score-ordered NMS using asymmetric peak containment.
+
+    Process higher scores first (input order breaks ties). Each candidate A
+    compares its unique nonnegative peak IDs with every retained representative
+    B within ``max_frame_diff``. If ``|A & B| / |A| >= containment_thres``, assign
+    A to the highest-scoring qualifying representative's cluster. Otherwise A
+    becomes a new representative. Empty peak sets never suppress or get suppressed.
+
+    Suppressed candidates cannot suppress another candidate. All input rows keep
+    a cluster ID for downstream rescoring/assignment; only representatives take
+    part in subsequent NMS comparisons. Cluster IDs are dense and run-local once
+    the caller applies its offset. Target/decoy labels are never used.
+    """
+    n = frame_index_arr.shape[0]
+    if peak_index_arr.shape[0] != n or score_arr.shape[0] != n:
+        raise ValueError("Frames, peak rows and scores must have equal lengths")
+    if max_frame_diff < 0:
+        raise ValueError("max_frame_diff must be nonnegative")
+    if not 0 < containment_thres <= 1:
+        raise ValueError("containment_thres must be in (0, 1]")
+    if not np.isfinite(score_arr).all():
+        raise ValueError("Clustering scores must be finite")
+
+    cluster_ids = np.empty(n, dtype=np.int32)
+    if n == 0:
+        return cluster_ids
+
+    # Deduplicate once per candidate, not once per pairwise comparison.
+    unique_peaks = np.empty_like(peak_index_arr)
+    peak_counts = np.empty(n, dtype=np.int32)
+    for i in range(n):
+        peaks = np.unique(peak_index_arr[i][peak_index_arr[i] >= 0])
+        peak_counts[i] = len(peaks)
+        unique_peaks[i, : len(peaks)] = peaks
+
+    score_order = np.argsort(-score_arr, kind="mergesort")
+    frame_order = np.argsort(frame_index_arr)
+    sorted_frames = frame_index_arr[frame_order]
+    # Unvisited and suppressed rows both have rank n and cannot represent a cluster.
+    representative_rank = np.full(n, n, dtype=np.int64)
+    cluster_count = 0
+    for rank, i in enumerate(score_order):
+        frame = np.int64(frame_index_arr[i])
+        start = np.searchsorted(sorted_frames, frame - max_frame_diff)
+        stop = np.searchsorted(sorted_frames, frame + max_frame_diff, side="right")
+        best, best_rank = -1, n
+        if peak_counts[i] > 0:
+            required = containment_thres * peak_counts[i]
+            for pos in range(start, stop):
+                j = frame_order[pos]
+                if representative_rank[j] >= best_rank or peak_counts[j] < required:
+                    continue
+                shared = _count_shared_peaks(
+                    unique_peaks[i], peak_counts[i], unique_peaks[j], peak_counts[j]
+                )
+                if shared / peak_counts[i] >= containment_thres:
+                    best, best_rank = j, representative_rank[j]
+        if best >= 0:
+            cluster_ids[i] = cluster_ids[best]
+        else:
+            cluster_ids[i] = cluster_count
+            representative_rank[i] = rank
+            cluster_count += 1
+    return cluster_ids

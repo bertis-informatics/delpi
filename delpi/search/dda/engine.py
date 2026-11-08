@@ -312,8 +312,9 @@ class DDASearchEngine(BaseSearchEngine):
                 cluster_arr = cluster_matches(
                     frame_index_arr=merged["frame_num"],
                     peak_index_arr=merged["peak_indices"],
+                    score_arr=merged["logit"].astype(np.float32, copy=False),
                     max_frame_diff=0,
-                    jaccard_thres=0.6,
+                    containment_thres=0.8,
                 )
                 merged["cluster"] = cluster_arr + cluster_count
                 cluster_count += 1 + np.max(cluster_arr)

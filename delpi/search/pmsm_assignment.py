@@ -140,10 +140,9 @@ def _is_strictly_better(
     count_b: int,
     tol: float,
 ) -> bool:
-    """Whether DP state A beats state B under (match count, then utility, then
-    raw score), each of utility/score compared with tolerance `tol` (count is
-    exact and compared first, so a valid match is never dropped merely
-    because its assignment utility is negative). Returns False on an exact
+    """Whether DP state A beats B under (utility, then raw score, then count).
+    Utility/score are compared with tolerance `tol`, and count is exact.
+    Returns False on an exact
     tie, so the caller's evaluation order decides the winner.
     """
     # if count_a != count_b:
@@ -181,8 +180,8 @@ def _dp_assign(
     (rows, ``predicted_rt`` order) and clusters (cols, representative
     ``frame_num`` order); `valid[i, j]` marks that a PmSM connects precursor
     `i` and cluster `j` (skipping a precursor or a cluster always has utility
-    and raw score 0). Maximizes the number of matches first, then total
-    `utility`, then total `raw_score`; remaining exact ties are broken
+    and raw score 0). Maximizes total `utility`, then total `raw_score`, then
+    the number of matches; remaining exact ties are broken
     deterministically by preferring, in order, a match over a precursor skip
     over a cluster skip.
 
@@ -299,7 +298,10 @@ def _dp_assign_groups(
     `group_start`/`group_end` delimit each group's rows in the (already
     sorted-by-group) `precursor_order`/`cluster_order`/`assignment_utility`/
     `raw_score`/`pmsm_index` arrays. Returns the selected `pmsm_index` values
-    (all groups concatenated).
+    (all groups concatenated). Several PmSMs may connect the same precursor
+    and cluster; keep the best utility/score in that cell, then the smallest
+    PmSM index for ties. Intensity normalization and cluster ordering have
+    already been computed from all candidates.
     """
     out = np.empty(precursor_order.shape[0], dtype=pmsm_index.dtype)
     out_cnt = 0
@@ -316,6 +318,22 @@ def _dp_assign_groups(
         pmsm_grid = np.zeros((m, n), dtype=pmsm_index.dtype)
         for k in range(s, e):
             i, j = p_local[k - s], c_local[k - s]
+            if valid[i, j]:
+                better = _is_strictly_better(
+                    assignment_utility[k],
+                    raw_score[k],
+                    1,
+                    utility[i, j],
+                    raw[i, j],
+                    1,
+                    tol,
+                )
+                tied = (
+                    abs(assignment_utility[k] - utility[i, j]) <= tol
+                    and abs(raw_score[k] - raw[i, j]) <= tol
+                )
+                if not (better or (tied and pmsm_index[k] < pmsm_grid[i, j])):
+                    continue
             utility[i, j] = assignment_utility[k]
             raw[i, j] = raw_score[k]
             valid[i, j] = True
@@ -567,17 +585,6 @@ def _validate_pmsm_df(pmsm_df: pl.DataFrame) -> None:
             f"found {invalid_intensity.height} invalid row(s)"
         )
 
-    duplicate_edges = (
-        pmsm_df.group_by(["precursor_index", "cluster"])
-        .agg(pl.len().alias("_n"))
-        .filter(pl.col("_n") > 1)
-    )
-    if duplicate_edges.height > 0:
-        raise ValueError(
-            "pmsm_df must have at most one PmSM per (precursor_index, cluster); "
-            f"found {duplicate_edges.height} duplicated combination(s)"
-        )
-
     inconsistent_rt = (
         pmsm_df.group_by("precursor_index")
         .agg(pl.col("predicted_rt").n_unique().alias("_n_rt"))
@@ -601,7 +608,10 @@ def assign_pmsms(
     Args:
         pmsm_df: PmSM table for a single run, with at least the columns in
             `REQUIRED_COLUMNS`. Each ``(precursor_index, cluster)``
-            combination must have at most one PmSM, each `precursor_index`
+            combination may contain multiple PmSMs at different centers.
+            Multi-precursor groups choose the best utility/score for each pair;
+            single-precursor groups retain the intensity-first selection rule.
+            Each `precursor_index`
             must have exactly one `predicted_rt` value, and `median_intensity`
             must be non-null, finite, and >= 0 for every row. Any
             ``run_index``, ``observed_rt`` or ``is_decoy`` column, if

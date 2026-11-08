@@ -151,10 +151,12 @@ def _set_x_exp(
                 if (x_rank is not None) and (is_precursor == False):
                     x_rank[counter] = num_fragments - theo_i - 1
 
-                # save matched peak indices at the RT center
+                # Peak-sharing clustering uses M and heavier isotopes across
+                # the RT window; M-1 remains available in the model tokens.
                 if (
                     (x_ind is not None)
-                    and (abs(time_index) <= 1)
+                    and (theo_isotope_index >= 0)
+                    and (abs(time_index) <= RT_WINDOW_RADIUS)
                     and (ind_count < x_ind.shape[0])
                 ):
                     x_ind[ind_count] = exp_i
