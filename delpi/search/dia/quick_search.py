@@ -65,7 +65,7 @@ def _quick_match(
             continue
 
         theo_peaks = get_theoretical_peaks(speclib_container, precursor_index0)
-        fragment_mz_arr = theo_peaks.fragment_mz_arr[1]
+        fragment_mz_arr = theo_peaks.fragment_mz_arr[0]
         fragment_intensity_arr = theo_peaks.fragment_intensity_arr
 
         ms2_st, ms2_ed = find_peak_index(

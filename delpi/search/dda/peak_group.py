@@ -304,8 +304,6 @@ def find_peak_groups(
         )
         if num_fragments < MIN_SEARCH_FRAGMENTS:
             continue
-        mono_start = num_fragments
-        mono_stop = 2 * num_fragments
         # rt_lb, rt_ub = frag_db.get_rt_range(precursor_index0)
         theo_peaks = get_theoretical_peaks(speclib_container, precursor_index0)
 
@@ -339,8 +337,8 @@ def find_peak_groups(
         peak_group_ii = _find_ms2_spectra(
             ms2_meta_df,
             ms2_peak_df,
-            ms2_st[mono_start:mono_stop],
-            ms2_ed[mono_start:mono_stop],
+            ms2_st[:num_fragments],
+            ms2_ed[:num_fragments],
             ms2_frame_indexes,
             min_matched,
             topk,

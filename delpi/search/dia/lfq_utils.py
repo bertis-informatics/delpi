@@ -195,7 +195,7 @@ def get_ms1_area(
                 and x_arr[j, EXP_ISOTOPE_INDEX_IDX] >= 0
                 and 0 <= t < window_len
             ):
-                # M-1 is matching evidence, not part of the isotope envelope.
+                # Sum the precursor isotope envelope (M/M+1/M+2).
                 y[t] += x_arr[j, EXP_AB_IDX]
                 has_ms1_peak = True
 
@@ -234,7 +234,7 @@ def get_ms1_area_dda(
                 and x_arr[j, EXP_ISOTOPE_INDEX_IDX] >= 0
                 and 0 <= t < window_len
             ):
-                # M-1 is matching evidence, not part of the isotope envelope.
+                # Sum the precursor isotope envelope (M/M+1/M+2).
                 y[t] += x_arr[j, EXP_AB_IDX]
                 has_ms1_peak = True
 

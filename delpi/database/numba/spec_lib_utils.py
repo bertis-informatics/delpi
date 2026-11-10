@@ -93,7 +93,7 @@ def get_theoretical_peaks(
     fragment_is_prefix_arr = speclib_container.speclib_is_prefix_arr[st:ed]
     fragment_charge_arr = speclib_container.speclib_charge_arr[st:ed]
 
-    fragment_isotope_index_arr = np.arange(-1, max_isotopes - 1, dtype=np.int8)
+    fragment_isotope_index_arr = np.arange(max_isotopes, dtype=np.int8)
     fragment_mz_arr = np.empty((max_isotopes, num_fragments), dtype=np.float32)
     for iso_row in range(max_isotopes):
         for i in range(num_fragments):

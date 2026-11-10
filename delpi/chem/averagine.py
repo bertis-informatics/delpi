@@ -9,10 +9,10 @@ averagine_df = pl.read_parquet(DATA_DIR / "averagine.parquet").with_columns(
 
 
 def get_isotope_indices(max_isotopes):
-    """Total isotope count, starting at M-1 and always including M."""
+    """Total isotope count, starting at the monoisotopic peak M."""
     if not 2 <= max_isotopes <= 8:
         raise ValueError("max_isotopes must be between 2 and 8")
-    return list(range(-1, max_isotopes - 1))
+    return list(range(max_isotopes))
 
 
 def get_precursor_lib_df(max_isotopes, min_mass=300, max_mass=7000):
@@ -24,13 +24,9 @@ def get_precursor_lib_df(max_isotopes, min_mass=300, max_mass=7000):
         averagine_df.filter(pl.col("mass").is_between(min_mass, max_mass))
         .join(isotopes, how="cross")
         .with_columns(
-            pl.when(pl.col("isotope_index") < 0)
-            .then(0.0)
-            .otherwise(
-                pl.col("envelope")
-                .list.get(pl.col("isotope_index").clip(lower_bound=0), null_on_oob=True)
-                .fill_null(0.0)
-            )
+            pl.col("envelope")
+            .list.get(pl.col("isotope_index"), null_on_oob=True)
+            .fill_null(0.0)
             .cast(pl.Float32)
             .alias("predicted_intensity")
         )

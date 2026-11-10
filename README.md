@@ -204,12 +204,13 @@ Create a YAML configuration file based on the [example template](data/example_pa
 this value is saved in library metadata and supplies `LIBRARY_NCE` during search.
 Isolation offsets retain their sign and are scaled with `asinh(offset / 5)`.
 
-The search model now uses input schema 2: categorical ion type and neutral loss,
-a separate acquisition context token, signed isotope indices, and explicit
+The search model uses input schema 4: boolean `IS_PRECURSOR`, `IS_PREFIX`, and
+`IS_MODLOSS` fields, a separate acquisition context token, signed isotope indices, and explicit
 theoretical-token validity masks. Checkpoints trained on the previous token
-layout require retraining. Default precursor isotopes are M−1 through M+2;
-fragment matching uses M−1, M, and M+1. Isotope counts must be at least two,
-with M always in the second row. RT calibration uses only that M row.
+layout require retraining. Default precursor isotopes are M, M+1, and M+2;
+fragment matching uses M and M+1. Isotope indices retain the `int8` type.
+Isotope counts must be at least two, with M in the first row.
+RT calibration uses only that M row.
 Precursors with fewer than five stored fragments are excluded.
 
 `protein_scoring` selects the score used by the protein picker and by global

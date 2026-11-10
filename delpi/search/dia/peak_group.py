@@ -257,8 +257,6 @@ def find_peak_groups(
         )
         if num_fragments < MIN_SEARCH_FRAGMENTS:
             continue
-        mono_start = num_fragments
-        mono_stop = 2 * num_fragments
 
         min_frame_index, max_frame_index = get_frame_index_range(
             speclib_container, frame_num_map.ms2_rt_arr, precursor_index0
@@ -313,8 +311,8 @@ def find_peak_groups(
         xic_arr = make_xic_array(
             ms2_peak_df,
             frame_num_map,
-            ms2_st[mono_start:mono_stop],
-            ms2_ed[mono_start:mono_stop],
+            ms2_st[:num_fragments],
+            ms2_ed[:num_fragments],
             min_frame_index,
             max_frame_index,
             num_fragments,

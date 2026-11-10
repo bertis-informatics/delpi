@@ -151,8 +151,7 @@ def _set_x_exp(
                 if (x_rank is not None) and (is_precursor == False):
                     x_rank[counter] = num_fragments - theo_i - 1
 
-                # Peak-sharing clustering uses M and heavier isotopes across
-                # the RT window; M-1 remains available in the model tokens.
+                # Peak-sharing clustering uses M/M+1 across the RT window.
                 if (
                     (x_ind is not None)
                     and (theo_isotope_index >= 0)
