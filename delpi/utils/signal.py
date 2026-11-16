@@ -216,19 +216,39 @@ def nms_peaks(peaks: np.ndarray, weights: np.ndarray, dist: int = 2):
     """Suppress peaks within `dist` of a stronger peak; return sorted positions.
 
     Equal weights retain input order (scan order in peak-group detection).
+    In position order, every peak within `dist` is an array neighbour, so each
+    peak checks only those: O(K log K + K * dist) instead of O(K^2).
     """
     n = peaks.shape[0]
     if n < 2:
         return peaks
     order = np.argsort(-weights, kind="mergesort")
+    is_sorted = True
+    for i in range(1, n):
+        if peaks[i] < peaks[i - 1]:
+            is_sorted = False
+            break
+    if is_sorted:  # scan-sorted in peak-group detection
+        pos = peaks.copy()
+    else:
+        by_pos = np.argsort(peaks, kind="mergesort")
+        pos = peaks[by_pos]
+        rank = np.empty(n, dtype=np.int64)
+        rank[by_pos] = np.arange(n)
+        order = rank[order]
     keep = np.zeros(n, dtype=np.bool_)
     for a in range(n):
         ia = order[a]
+        p = np.int64(pos[ia])
         ok = True
-        for b in range(a):
-            ib = order[b]
-            if keep[ib] and abs(np.int64(peaks[ia]) - np.int64(peaks[ib])) <= dist:
-                ok = False
-                break
+        # Neighbours not visited yet still have keep == False.
+        j = ia - 1
+        while ok and j >= 0 and p - np.int64(pos[j]) <= dist:
+            ok = not keep[j]
+            j -= 1
+        j = ia + 1
+        while ok and j < n and np.int64(pos[j]) - p <= dist:
+            ok = not keep[j]
+            j += 1
         keep[ia] = ok
-    return np.sort(peaks[keep])
+    return pos[keep]
