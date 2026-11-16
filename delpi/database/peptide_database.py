@@ -77,6 +77,7 @@ class PeptideDatabase:
         save_dir: Union[str, Path] = None,
         precursor_chunk_size: int = None,
         batch_size: int = 512,
+        min_intensity: float = 0.01,
         *args,
         **kwargs,
     ) -> Self:
@@ -148,17 +149,21 @@ class PeptideDatabase:
             min_fragment_mz=min_fragment_mz,
             max_fragment_mz=max_fragment_mz,
             apply_phospho=mod_handler.has_phospho,
+            min_intensity=min_intensity,
             device=device,
         )
-        speclib_df, modification_df = speclib_generator.generate_spectral_lib(
-            peptide_df,
-            modification_df,
-            precursor_df,
-            prefix_mass_container,
-            progress=progress,
-            precursor_chunk_size=precursor_chunk_size,
-            save_dir=save_dir,
-            batch_size=batch_size,
+        # precursor_df gains speclib_offset/speclib_rows (variable fragment rows).
+        speclib_df, modification_df, precursor_df = (
+            speclib_generator.generate_spectral_lib(
+                peptide_df,
+                modification_df,
+                precursor_df,
+                prefix_mass_container,
+                progress=progress,
+                precursor_chunk_size=precursor_chunk_size,
+                save_dir=save_dir,
+                batch_size=batch_size,
+            )
         )
 
         self.params.update(

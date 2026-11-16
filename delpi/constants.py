@@ -26,6 +26,8 @@ COMMON_NEUTRAL_LOSS_INDEX = {
 }
 
 MAX_FRAGMENTS = 16
+# Precursors with fewer stored (nonzero-intensity) fragments are not searched.
+MIN_SEARCH_FRAGMENTS = 5
 DEFAULT_Q_VALUE_CUTOFF = 0.01
 
 QUANT_FRAGMENTS = 12

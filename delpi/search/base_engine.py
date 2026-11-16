@@ -72,6 +72,17 @@ class BaseSearchEngine(ABC):
         model.transform = PeptideMultiSpectraMatchScaler()
         return model
 
+    def get_min_search_fragments(self, speclib_reader) -> int:
+        """Configured minimum fragment count, checked against the library cap."""
+        value = self.search_config.min_search_fragments
+        if value > speclib_reader.max_fragments:
+            raise ValueError(
+                f"fragment.min_fragments ({value}) exceeds the library's "
+                f"max_fragments ({speclib_reader.max_fragments}); no precursor "
+                "would be searched"
+            )
+        return value
+
     @staticmethod
     def _limit_numba_threads():
         """Limit numba thread count in the current (background) thread.

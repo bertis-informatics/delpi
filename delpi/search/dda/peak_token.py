@@ -152,7 +152,9 @@ def get_x_exp(
             ms2_peak_df.mz_arr, theo_peaks.fragment_mz_arr.flatten(), ms2_mass_tol
         )
     else:
-        ms2_st, ms2_ed = peak_index_container.fragment_ms2_indices[precursor_index0]
+        ms2_st, ms2_ed = peak_index_container.fragment_ms2_indices[
+            precursor_index0, :, : theo_peaks.fragment_mz_arr.size
+        ]
         pc_ms1_st, pc_ms1_ed = peak_index_container.precursor_ms1_indices[
             precursor_index0
         ]

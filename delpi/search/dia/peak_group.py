@@ -12,7 +12,7 @@ from delpi.database.numba.spec_lib_utils import (
 )
 from delpi.utils.signal import find_local_maxima, nms_peaks
 from delpi.utils.peak import find_peak_index
-from delpi.constants import QUANT_FRAGMENTS
+from delpi.constants import QUANT_FRAGMENTS, MIN_SEARCH_FRAGMENTS
 
 
 class PeakIndexContainer(NamedTuple):
@@ -228,9 +228,9 @@ def find_peak_groups(
     min_xic_peak_count: int = 3,
     min_peak_count: int = 12,
     topk: int = 10,
+    min_search_fragments: int = MIN_SEARCH_FRAGMENTS,
 ) -> Tuple[PeakGroupContainer, PeakIndexContainer]:
 
-    num_fragments = speclib_container.max_fragments
     num_precursors = speclib_container.precursor_mz_arr.shape[0]
     min_precursor_index = speclib_container.min_precursor_index
     peak_group_results = [np.empty(0, dtype=np.int32)] * num_precursors
@@ -241,17 +241,23 @@ def find_peak_groups(
         speclib_container.max_fragments * speclib_container.max_fragment_isotopes
     )
 
-    precursor_ms1_indices = np.empty(
+    # Fragment slots beyond a precursor's stored fragment count stay zero.
+    precursor_ms1_indices = np.zeros(
         (num_precursors, 2, num_precursor_peaks), dtype=np.uint32
     )
-    precursor_ms2_indices = np.empty(
+    precursor_ms2_indices = np.zeros(
         (num_precursors, 2, num_precursor_peaks), dtype=np.uint32
     )
-    fragment_ms2_indices = np.empty(
+    fragment_ms2_indices = np.zeros(
         (num_precursors, 2, num_fragment_peaks), dtype=np.uint32
     )
 
     for precursor_index0 in nb.prange(num_precursors):
+        num_fragments = int(
+            speclib_container.precursor_speclib_rows_arr[precursor_index0]
+        )
+        if num_fragments < min_search_fragments:
+            continue
 
         min_frame_index, max_frame_index = get_frame_index_range(
             speclib_container, frame_num_map.ms2_rt_arr, precursor_index0
@@ -274,8 +280,8 @@ def find_peak_groups(
         pc_ms2_st, pc_ms2_ed = find_peak_index(ms2_peak_df.mz_arr, mz_arr, ms2_mass_tol)
 
         # store matching results
-        fragment_ms2_indices[precursor_index0, 0] = ms2_st
-        fragment_ms2_indices[precursor_index0, 1] = ms2_ed
+        fragment_ms2_indices[precursor_index0, 0, : ms2_st.size] = ms2_st
+        fragment_ms2_indices[precursor_index0, 1, : ms2_ed.size] = ms2_ed
         precursor_ms1_indices[precursor_index0, 0] = pc_ms1_st
         precursor_ms1_indices[precursor_index0, 1] = pc_ms1_ed
         precursor_ms2_indices[precursor_index0, 0] = pc_ms2_st

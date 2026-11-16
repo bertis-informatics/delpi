@@ -109,6 +109,7 @@ class DDASearchEngine(BaseSearchEngine):
                 isolation_lower_tol_in_da=ISOLATION_LOWER_TOL,
                 isolation_upper_tol_in_da=ISOLATION_UPPER_TOL,
                 topk=peak_group_topk,
+                min_search_fragments=search_config.min_search_fragments,
             )
 
         total_batches = count_total_batches(
@@ -220,6 +221,7 @@ class DDASearchEngine(BaseSearchEngine):
         group_key = self.get_results_group_key()
 
         speclib_reader = SpectralLibReader(peptide_db_path=self.get_db_dir())
+        min_search_fragments = self.get_min_search_fragments(speclib_reader)
         if self.state > SearchState.FIRST_SEARCH:
             try:
                 lc_peak_width = result_manager.read_attr("lc_peak_width")
@@ -271,6 +273,7 @@ class DDASearchEngine(BaseSearchEngine):
                             isolation_lower_tol_in_da=ISOLATION_LOWER_TOL,
                             isolation_upper_tol_in_da=ISOLATION_UPPER_TOL,
                             topk=TOPK_PER_PRECURSOR,
+                            min_search_fragments=min_search_fragments,
                         )
                         yield ms2_map, sc, pgc, pic
 

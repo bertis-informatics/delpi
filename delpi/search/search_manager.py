@@ -48,6 +48,7 @@ from delpi.constants import (
     DEFAULT_Q_VALUE_CUTOFF,
     DEFAULT_REPORT_FORMAT,
     DEFAULT_TL_TOP_K,
+    MAX_FRAGMENTS,
 )
 
 SUPPORTED_DEVICES = ["cuda"]
@@ -486,6 +487,8 @@ class SearchManager:
         )
         spec_generator = RefinedSpectralLibGenerator(
             apply_phospho=self.search_config.is_phospho_search,
+            max_fragments=search_config["fragment"].get("max_fragments", MAX_FRAGMENTS),
+            min_intensity=search_config["fragment"].get("min_intensity", 0.01),
             min_precursor_charge=search_config["precursor"].get("min_charge", 2),
             max_precursor_charge=search_config["precursor"].get("max_charge", 4),
             min_precursor_mz=search_config["precursor"].get("min_mz", 300),
@@ -558,6 +561,7 @@ class SearchManager:
         spec_generator = RefinedSpectralLibGenerator(
             rt_predictor=None,
             ms2_predictor=None,
+            max_fragments=search_config["fragment"].get("max_fragments", MAX_FRAGMENTS),
             apply_phospho=self.search_config.is_phospho_search,
             min_precursor_charge=search_config["precursor"].get("min_charge", 2),
             max_precursor_charge=search_config["precursor"].get("max_charge", 4),
@@ -587,7 +591,7 @@ class SearchManager:
                 on="g_precursor_index",
                 how="inner",
             )
-            .sort("precursor_index")
+            .sort(["precursor_index", "rank"], descending=[False, True])
             .select(list(spec_generator.speclib_df_schema.keys()))
             .collect()
         )

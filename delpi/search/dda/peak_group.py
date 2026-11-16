@@ -8,7 +8,11 @@ from delpi.database.numba.spec_lib_container import SpectralLibContainer
 from delpi.search.dia.peak_group import PeakIndexContainer
 from delpi.database.numba.spec_lib_utils import get_theoretical_peaks
 from delpi.utils.peak import find_peak_index
-from delpi.constants import DDA_MATCHED_PEAKS_CUTOFF_LB, DDA_MATCHED_PEAKS_CUTOFF_UB
+from delpi.constants import (
+    DDA_MATCHED_PEAKS_CUTOFF_LB,
+    DDA_MATCHED_PEAKS_CUTOFF_UB,
+    MIN_SEARCH_FRAGMENTS,
+)
 
 
 class DdaPeakGroupContainer(NamedTuple):
@@ -262,11 +266,11 @@ def find_peak_groups(
     rt_window_radius: int = 4,
     min_peak_count: int = DDA_MATCHED_PEAKS_CUTOFF_LB,
     topk: int = 10,
+    min_search_fragments: int = MIN_SEARCH_FRAGMENTS,
 ) -> Tuple[DdaPeakGroupContainer, PeakIndexContainer]:
 
     rt_bin_count = rt_window_radius * 2 + 1
 
-    num_fragments = speclib_container.max_fragments
     num_precursors = speclib_container.precursor_mz_arr.shape[0]
     min_precursor_index = speclib_container.min_precursor_index
     num_precursor_peaks = speclib_container.max_precursor_isotopes
@@ -274,13 +278,14 @@ def find_peak_groups(
         speclib_container.max_fragments * speclib_container.max_fragment_isotopes
     )
 
-    precursor_ms1_indices = np.empty(
+    # Fragment slots beyond a precursor's stored fragment count stay zero.
+    precursor_ms1_indices = np.zeros(
         (num_precursors, 2, num_precursor_peaks), dtype=np.uint32
     )
-    precursor_ms2_indices = np.empty(
+    precursor_ms2_indices = np.zeros(
         (num_precursors, 2, num_precursor_peaks), dtype=np.uint32
     )
-    fragment_ms2_indices = np.empty(
+    fragment_ms2_indices = np.zeros(
         (num_precursors, 2, num_fragment_peaks),
         dtype=np.uint32,
     )
@@ -293,6 +298,11 @@ def find_peak_groups(
     time_index_val_results = [np.empty((0, 0, 0), dtype=np.int8)] * num_precursors
 
     for precursor_index0 in nb.prange(num_precursors):
+        num_fragments = int(
+            speclib_container.precursor_speclib_rows_arr[precursor_index0]
+        )
+        if num_fragments < min_search_fragments:
+            continue
         # rt_lb, rt_ub = frag_db.get_rt_range(precursor_index0)
         theo_peaks = get_theoretical_peaks(speclib_container, precursor_index0)
 
@@ -345,8 +355,8 @@ def find_peak_groups(
             ms2_peak_df.mz_arr, theo_peaks.precursor_mz_arr, ms2_mass_tol
         )
         # store matching results
-        fragment_ms2_indices[precursor_index0, 0] = ms2_st
-        fragment_ms2_indices[precursor_index0, 1] = ms2_ed
+        fragment_ms2_indices[precursor_index0, 0, : ms2_st.size] = ms2_st
+        fragment_ms2_indices[precursor_index0, 1, : ms2_ed.size] = ms2_ed
         precursor_ms1_indices[precursor_index0, 0] = pc_ms1_st
         precursor_ms1_indices[precursor_index0, 1] = pc_ms1_ed
         precursor_ms2_indices[precursor_index0, 0] = pc_ms2_st

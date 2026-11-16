@@ -7,14 +7,16 @@ from delpi.chem.modification_param import ModificationParam
 from delpi.search.result_manager import ResultManager
 from delpi.database.decoy_generator import DecoyGenerator
 from delpi.utils.yaml_file import load_yaml, save_yaml, resolve_input_files
-from delpi.constants import DEFAULT_Q_VALUE_CUTOFF
+from delpi.constants import DEFAULT_Q_VALUE_CUTOFF, MIN_SEARCH_FRAGMENTS
 from delpi.search.tda.protein_scoring import (
     DEFAULT_PROTEIN_SCORING,
     ProteinScoringMethod,
     validate_protein_scoring,
 )
 
-SUPPORTED_FILE_TYPES = (".raw", ".mzml", ".mzml.gz", "h5")
+# fragment.* keys applied at search time, not part of the library build.
+SEARCH_ONLY_FRAGMENT_KEYS = ("min_fragments",)
+SUPPORTED_FILE_TYPES =(".raw", ".mzml", ".mzml.gz", "h5")
 
 
 class SearchConfig:
@@ -118,6 +120,7 @@ class SearchConfig:
                 )
 
         validate_protein_scoring(self.protein_scoring)
+        _ = self.min_search_fragments  # validate early
 
         # Create output directory
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -168,7 +171,34 @@ class SearchConfig:
             if key in self.config:
                 db_params[key] = self.config[key]
 
+        # Search-time options inside DB sections do not affect the library.
+        if isinstance(db_params.get("fragment"), dict):
+            db_params["fragment"] = {
+                k: v
+                for k, v in db_params["fragment"].items()
+                if k not in SEARCH_ONLY_FRAGMENT_KEYS
+            }
+
         return db_params
+
+    @property
+    def min_search_fragments(self) -> int:
+        """Minimum stored library fragments for a precursor to be searched.
+
+        Set by ``fragment.min_fragments`` (default ``MIN_SEARCH_FRAGMENTS``);
+        must be an integer >= 3. ``fragment.max_fragments`` is the library's
+        upper bound. Unlike the other ``fragment`` keys, it is applied at
+        search time and excluded from the saved-library parameter check.
+        """
+        fragment = self.config.get("fragment") or {}
+        value = fragment.get("min_fragments")
+        if value is None:  # absent or left empty in YAML
+            value = MIN_SEARCH_FRAGMENTS
+        if isinstance(value, bool) or not isinstance(value, int) or value < 3:
+            raise ValueError(
+                f"fragment.min_fragments must be an integer >= 3, got {value!r}"
+            )
+        return value
 
     @property
     def enable_mbr(self) -> bool:

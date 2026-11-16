@@ -103,6 +103,7 @@ class DIASearchEngine(BaseSearchEngine):
                 ms2_mass_tol=ms2_tol,
                 min_peak_count=DIA_MATCHED_PEAKS_CUTOFF,
                 topk=peak_group_topk,
+                min_search_fragments=search_config.min_search_fragments,
             )
         total_batches = count_total_batches(
             peak_group_container.peak_count_arr, batch_size=batch_size
@@ -219,6 +220,7 @@ class DIASearchEngine(BaseSearchEngine):
         group_key = self.get_results_group_key()
 
         speclib_reader = SpectralLibReader(peptide_db_path=self.get_db_dir())
+        min_search_fragments = self.get_min_search_fragments(speclib_reader)
         speclib_reader.calibrate_rt(rt_calibrator)
 
         ms1_map = run.get_ms1_map()
@@ -254,6 +256,7 @@ class DIASearchEngine(BaseSearchEngine):
                             ms2_mass_tol=search_config["ms2_mass_tol_in_ppm"],
                             min_peak_count=DIA_MATCHED_PEAKS_CUTOFF,
                             topk=TOPK_PER_PRECURSOR,
+                            min_search_fragments=min_search_fragments,
                         )
                         yield dia_win, sc, pgc, pic
 
