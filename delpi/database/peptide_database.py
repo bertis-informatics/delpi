@@ -36,7 +36,7 @@ class PeptideDatabase:
     @staticmethod
     def extract_params(config_dict):
         param_dict = dict()
-        for key in ["fasta_file", "decoy"]:
+        for key in ["fasta_file", "decoy_method"]:
             if key in config_dict:
                 param_dict[key] = config_dict[key]
 
@@ -170,7 +170,7 @@ class PeptideDatabase:
             {
                 "fasta_file": str(parser.fasta_path),
                 "digest": enzyme_.param_dict,
-                "decoy": decoy_generator.method,
+                "decoy_method": decoy_generator.method,
                 "modification": mod_handler.param_dict,
                 "precursor": precursor_generator.param_dict,
                 "fragment": speclib_generator.param_dict,

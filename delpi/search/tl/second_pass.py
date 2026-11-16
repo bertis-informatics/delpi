@@ -22,7 +22,9 @@ logger = logging.getLogger(__name__)
 def get_decoy_method(db_dir: Path) -> Optional[str]:
     """Read the decoy generation method recorded when the database was built."""
     param_file = Path(db_dir) / "param.yaml"
-    return load_yaml(param_file).get("decoy")
+    params = load_yaml(param_file)
+    # Libraries built before the key rename store the method as "decoy".
+    return params.get("decoy_method", params.get("decoy"))
 
 
 def get_var_mod_names(db_dir: Path) -> list[str]:

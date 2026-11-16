@@ -14,6 +14,7 @@ from delpi.search.tda.protein_scoring import (
     validate_protein_scoring,
 )
 
+DEFAULT_DECOY_METHOD = "mutation"
 # fragment.* keys applied at search time, not part of the library build.
 SEARCH_ONLY_FRAGMENT_KEYS = ("min_fragments",)
 SUPPORTED_FILE_TYPES =(".raw", ".mzml", ".mzml.gz", "h5")
@@ -133,7 +134,7 @@ class SearchConfig:
             )
 
         # Validate decoy method
-        decoy_method = self.config.get("decoy") or "mutation"
+        decoy_method = self.decoy_method
         if decoy_method not in DecoyGenerator.supported_methods:
             raise ValueError(
                 f"Unsupported decoy method '{decoy_method}'. "
@@ -179,7 +180,16 @@ class SearchConfig:
                 if k not in SEARCH_ONLY_FRAGMENT_KEYS
             }
 
+        if "decoy_method" in db_params:
+            # Compare the method that is actually built (null -> default).
+            db_params["decoy_method"] = self.decoy_method
+
         return db_params
+
+    @property
+    def decoy_method(self) -> str:
+        """Decoy generation method from ``decoy_method`` (default: mutation)."""
+        return self.config.get("decoy_method") or DEFAULT_DECOY_METHOD
 
     @property
     def min_search_fragments(self) -> int:
@@ -299,6 +309,9 @@ class SearchConfig:
         param_file = db_dir / "param.yaml"
 
         saved_params = load_yaml(param_file)
+        # Libraries built before the key rename store the method as "decoy".
+        if "decoy" in saved_params and "decoy_method" not in saved_params:
+            saved_params["decoy_method"] = saved_params.pop("decoy")
         current_params = self.get_db_params()
 
         return self._find_diff_keys(saved_params, current_params)
