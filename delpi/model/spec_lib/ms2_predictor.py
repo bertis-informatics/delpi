@@ -9,9 +9,10 @@ from lightning.pytorch import LightningModule
 import torchmetrics
 from torch.utils.data import DataLoader, Dataset
 
+from delpi.lcms.neutral_loss import NeutralLoss
 from delpi.model.spec_lib.block import ResNet1D, BiLSTM, Transformer, Permute
 from delpi.model.pos_encoder import PositionalEncoding
-from delpi.utils.metric import SpectralAngle
+from delpi.utils.metric import SafePearsonCorrCoef, SpectralAngle
 from delpi.search.tl.lr_decay import param_groups_lrd
 from delpi.utils.scheduler import get_cosine_schedule_with_warmup
 from delpi.model.spec_lib.aa_encoder import MOD_FEATURE_MAP
@@ -27,6 +28,10 @@ FRAG_TYPE_LIST = [
     "y_modloss_z1",
     "y_modloss_z2",
 ]
+# FRAG_TYPE_LIST blocks of [b_z1, b_z2, y_z1, y_z2]: regular, then H3O4P mod loss.
+# Validation metrics are reported per block under these names.
+NEUTRAL_LOSS_BLOCKS = (NeutralLoss.NO_LOSS.symbol, NeutralLoss.H3O4P.symbol)
+CHANNELS_PER_LOSS = 4
 
 
 class Ms2SpectrumPredictor(LightningModule):
@@ -118,9 +123,24 @@ class Ms2SpectrumPredictor(LightningModule):
 
         # Metrics
         self.train_corr = torchmetrics.PearsonCorrCoef()
-        self.valid_corr = torchmetrics.PearsonCorrCoef()
         self.train_sa = SpectralAngle()
-        self.valid_sa = SpectralAngle()
+        # Per neutral-loss block. Pearson pools all values of the block;
+        # SA is per spectrum, over all spectra or only those with the loss.
+        self.valid_corr = nn.ModuleDict(
+            {loss: SafePearsonCorrCoef() for loss in NEUTRAL_LOSS_BLOCKS}
+        )
+        self.valid_sa = nn.ModuleDict(
+            {loss: SpectralAngle() for loss in NEUTRAL_LOSS_BLOCKS}
+        )
+        self.valid_sa_present = nn.ModuleDict(
+            {
+                loss: SpectralAngle(ignore_empty_targets=True)
+                for loss in NEUTRAL_LOSS_BLOCKS
+            }
+        )
+        self.valid_present_fraction = nn.ModuleDict(
+            {loss: torchmetrics.MeanMetric() for loss in NEUTRAL_LOSS_BLOCKS}
+        )
 
         self.max_lr = max_lr
         self.num_warmup_steps = num_warmup_steps
@@ -337,7 +357,14 @@ class Ms2SpectrumPredictor(LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        """Validation step for MS2 spectrum prediction."""
+        """Validation step for MS2 spectrum prediction.
+
+        Besides the overall `val_loss`, logs per neutral-loss block (NoLoss,
+        H3O4P): MSE on the raw outputs, and Pearson, spectral angle (all
+        spectra / spectra with that loss observed) and the observed fraction
+        on the clamped outputs. Four-channel (regular-only) targets report
+        the NoLoss block only.
+        """
         x_aa = batch["x_aa"]
         x_mod = batch["x_mod"]
         x_meta = batch["x_meta"]
@@ -345,13 +372,6 @@ class Ms2SpectrumPredictor(LightningModule):
         batch_size = len(y_true)
 
         loss, y_true, y_pred = self._compute_loss(x_aa, x_mod, x_meta, y_true)
-        y_pred = y_pred.clamp_min(0)  # metrics use the inference outputs
-
-        # Flatten for correlation calculation
-        y_true_flat = y_true.reshape(-1)
-        y_pred_flat = y_pred.reshape(-1)
-        self.valid_corr.update(y_pred_flat, y_true_flat)
-        self.valid_sa.update(y_pred_flat, y_true_flat)
 
         self.log(
             "val_loss",
@@ -361,21 +381,50 @@ class Ms2SpectrumPredictor(LightningModule):
             prog_bar=True,
             logger=True,
             batch_size=batch_size,
+            sync_dist=True,
         )
-        self.log(
-            "val_corr",
-            self.valid_corr,
-            on_step=False,
-            on_epoch=True,
-            batch_size=batch_size,
-        )
-        self.log(
-            "val_sa",
-            self.valid_sa,
-            on_step=False,
-            on_epoch=True,
-            batch_size=batch_size,
-        )
+
+        num_losses = y_true.size(-1) // CHANNELS_PER_LOSS
+        for loss_index, loss_name in enumerate(NEUTRAL_LOSS_BLOCKS[:num_losses]):
+            channels = slice(
+                CHANNELS_PER_LOSS * loss_index, CHANNELS_PER_LOSS * (loss_index + 1)
+            )
+            loss_true = y_true[..., channels]
+            loss_raw = y_pred[..., channels]
+            loss_pred = loss_raw.clamp_min(0)  # metrics use the inference outputs
+
+            self.valid_corr[loss_name].update(
+                loss_pred.reshape(-1), loss_true.reshape(-1)
+            )
+            spectrum_pred = loss_pred.reshape(batch_size, -1)
+            spectrum_true = loss_true.reshape(batch_size, -1)
+            self.valid_sa[loss_name].update(spectrum_pred, spectrum_true)
+            self.valid_sa_present[loss_name].update(spectrum_pred, spectrum_true)
+            self.valid_present_fraction[loss_name].update(
+                spectrum_true.ne(0).any(dim=-1).float()
+            )
+
+            self.log(
+                f"val_loss_{loss_name}",
+                nn.functional.mse_loss(loss_raw, loss_true),
+                on_step=False,
+                on_epoch=True,
+                batch_size=batch_size,
+                sync_dist=True,
+            )
+            for prefix, metric in (
+                ("val_corr", self.valid_corr),
+                ("val_sa", self.valid_sa),
+                ("val_sa_present", self.valid_sa_present),
+                ("val_present_fraction", self.valid_present_fraction),
+            ):
+                self.log(
+                    f"{prefix}_{loss_name}",
+                    metric[loss_name],
+                    on_step=False,
+                    on_epoch=True,
+                    batch_size=batch_size,
+                )
 
         return loss
 
