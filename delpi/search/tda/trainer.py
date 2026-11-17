@@ -9,7 +9,9 @@ from lightning.pytorch.trainer import Trainer
 from lightning.pytorch.loggers import CSVLogger
 from torch.utils.data import DataLoader, TensorDataset
 
+from delpi.constants import PMSM_EMBEDDING_DIM
 from delpi.search.tda.classfier import TargetDecoyClassifier
+from delpi.search.tda.features import FEATURE_DIM
 from delpi.utils.down_sampler import DownsampleSampler
 
 # Default training parameters
@@ -27,7 +29,9 @@ DEFAULT_TRAINING_PARAMS = {
 
 # Default model parameters
 DEFAULT_MODEL_PARAMS = {
-    "input_size": 193,
+    # PmSM embedding followed by the rescoring features (tda/features.py)
+    "input_size": FEATURE_DIM,
+    "embedding_dim": PMSM_EMBEDDING_DIM,
     "layers": [64, 32],
     "dropout": 0,
     "focal_loss_gamma_pos": 0.0,
@@ -128,6 +132,7 @@ class TargetDecoyTrainer:
         torch.manual_seed(self.training_params["random_seed"])
         return TargetDecoyClassifier(
             input_size=self.model_params["input_size"],
+            embedding_dim=self.model_params["embedding_dim"],
             layers=self.model_params["layers"],
             dropout=self.model_params["dropout"],
             focal_loss_gamma_pos=self.model_params["focal_loss_gamma_pos"],

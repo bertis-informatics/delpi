@@ -28,7 +28,7 @@ from delpi.search.progress.tracker import ProgressTracker
 from delpi.search.progress.dummy_tracker import DummyProgressTracker
 from delpi.search.dda.peak_group import find_peak_groups
 from delpi.search.dda.batch_generator import count_total_batches, generate_batches
-from delpi.search.clustering import cluster_matches
+from delpi.search.clustering import cluster_by_peak_sharing, compact_peak_indices
 from delpi.search.dia.lfq_utils import get_ms1_area_dda, get_pmsm_median_intensity
 from delpi.utils.device_ctx import make_inference_contexts
 from delpi.utils.prefetch import Prefetcher, pin_numpy_tuple
@@ -109,6 +109,7 @@ class DDASearchEngine(BaseSearchEngine):
                 isolation_lower_tol_in_da=ISOLATION_LOWER_TOL,
                 isolation_upper_tol_in_da=ISOLATION_UPPER_TOL,
                 topk=peak_group_topk,
+                min_search_fragments=search_config.min_search_fragments,
             )
 
         total_batches = count_total_batches(
@@ -175,7 +176,10 @@ class DDASearchEngine(BaseSearchEngine):
                 results["frame_num"].append(frame_num_arr)
                 results["logit"].append(logits)
                 results["features"].append(x_feature)
-                results["peak_indices"].append(x_ind)
+                # used only for clustering in _flush; not written to the result file
+                peak_count, peak_index = compact_peak_indices(x_ind)
+                results["fragment_peak_count"].append(peak_count)
+                results["fragment_peak_index"].append(peak_index)
                 results["observed_rt"].append(observed_rt)
 
                 x_exp = x_exp_t.numpy()[mask]
@@ -220,6 +224,7 @@ class DDASearchEngine(BaseSearchEngine):
         group_key = self.get_results_group_key()
 
         speclib_reader = SpectralLibReader(peptide_db_path=self.get_db_dir())
+        min_search_fragments = self.get_min_search_fragments(speclib_reader)
         if self.state > SearchState.FIRST_SEARCH:
             try:
                 lc_peak_width = result_manager.read_attr("lc_peak_width")
@@ -271,6 +276,7 @@ class DDASearchEngine(BaseSearchEngine):
                             isolation_lower_tol_in_da=ISOLATION_LOWER_TOL,
                             isolation_upper_tol_in_da=ISOLATION_UPPER_TOL,
                             topk=TOPK_PER_PRECURSOR,
+                            min_search_fragments=min_search_fragments,
                         )
                         yield ms2_map, sc, pgc, pic
 
@@ -279,11 +285,9 @@ class DDASearchEngine(BaseSearchEngine):
                     k: np.concatenate([r[k] for r in chunk_results])
                     for k in chunk_results[0]
                 }
-                cluster_arr = cluster_matches(
-                    frame_index_arr=merged["frame_num"],
-                    peak_index_arr=merged["peak_indices"],
-                    max_frame_diff=0,
-                    jaccard_thres=0.6,
+                cluster_arr = cluster_by_peak_sharing(
+                    merged.pop("fragment_peak_count"),
+                    merged.pop("fragment_peak_index"),
                 )
                 merged["cluster"] = cluster_arr + cluster_count
                 cluster_count += 1 + np.max(cluster_arr)

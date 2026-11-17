@@ -37,14 +37,18 @@ EXP_TIME_INDEX_IDX = ExpPeakInput.TIME_INDEX.index
 
 @nb.njit(nogil=True, cache=True)
 def get_x_theo(theo_peaks: TheoreticalPeakContainer, x_theo: np.ndarray = None):
-    num_theo_peaks = (
-        theo_peaks.precursor_mz_arr.shape[0] + theo_peaks.fragment_charge_arr.shape[0]
-    )
+    """Precursor isotope tokens, then one token per stored (monoisotopic) fragment.
+
+    With fewer stored fragments than buffer rows, the remaining rows are
+    all-zero padding tokens (no attention mask is applied to them).
+    """
+    m = theo_peaks.precursor_mz_arr.shape[0]
+    n = m + theo_peaks.fragment_charge_arr.shape[0]
 
     if x_theo is None:
-        x_theo = np.empty((num_theo_peaks, THEO_TOKEN_DIM), dtype=np.float32)
-
-    m = theo_peaks.precursor_mz_arr.shape[0]
+        x_theo = np.empty((n, THEO_TOKEN_DIM), dtype=np.float32)
+    if x_theo.shape[0] < n:
+        raise ValueError("Theoretical token buffer is too small")
 
     # precursor peaks
     x_theo[:m, THEO_PRED_INTENSITY_IDX] = theo_peaks.precursor_intensity_arr
@@ -61,14 +65,18 @@ def get_x_theo(theo_peaks: TheoreticalPeakContainer, x_theo: np.ndarray = None):
     seq_len = theo_peaks.sequence_length
     cleavage_index_arr = theo_peaks.fragment_cleavage_index_arr
 
-    x_theo[m:, THEO_PRED_INTENSITY_IDX] = theo_peaks.fragment_intensity_arr
-    x_theo[m:, THEO_MZ_IDX] = theo_peaks.fragment_mz_arr[0]  # only monoisotopic peaks
-    x_theo[m:, THEO_IS_PRECURSOR_IDX] = 0.0
-    x_theo[m:, THEO_IS_PREFIX_IDX] = theo_peaks.fragment_is_prefix_arr
-    x_theo[m:, THEO_CHARGE_IDX] = theo_peaks.fragment_charge_arr
-    x_theo[m:, THEO_ISOTOPE_INDEX_IDX] = 0.0
-    x_theo[m:, THEO_CLEAVAGE_INDEX_IDX] = cleavage_index_arr
-    x_theo[m:, THEO_REV_CLEAVAGE_INDEX_IDX] = seq_len - 2 - cleavage_index_arr
+    x_theo[m:n, THEO_PRED_INTENSITY_IDX] = theo_peaks.fragment_intensity_arr
+    # only monoisotopic peaks
+    x_theo[m:n, THEO_MZ_IDX] = theo_peaks.fragment_mz_arr[0]
+    x_theo[m:n, THEO_IS_PRECURSOR_IDX] = 0.0
+    x_theo[m:n, THEO_IS_PREFIX_IDX] = theo_peaks.fragment_is_prefix_arr
+    x_theo[m:n, THEO_CHARGE_IDX] = theo_peaks.fragment_charge_arr
+    x_theo[m:n, THEO_ISOTOPE_INDEX_IDX] = 0.0
+    x_theo[m:n, THEO_CLEAVAGE_INDEX_IDX] = cleavage_index_arr
+    x_theo[m:n, THEO_REV_CLEAVAGE_INDEX_IDX] = seq_len - 2 - cleavage_index_arr
+
+    # padding
+    x_theo[n:, :] = 0.0
 
     return x_theo
 
@@ -147,13 +155,9 @@ def _set_x_exp(
                 if (x_rank is not None) and (is_precursor == False):
                     x_rank[counter] = num_fragments - theo_i - 1
 
-                # save matched peak indices at the RT center
-                if (
-                    (x_ind is not None)
-                    and (fi > min_frame_index + 2)
-                    and (fi < max_frame_index - 2)
-                    and (ind_count < x_ind.shape[0])
-                ):
+                # matched peak indices over the whole RT window, for
+                # peak-sharing clustering (delpi.search.clustering)
+                if (x_ind is not None) and (ind_count < x_ind.shape[0]):
                     x_ind[ind_count] = exp_i
                     ind_count += 1
                 counter += 1
@@ -204,7 +208,9 @@ def get_x_exp(
         )
 
     else:
-        ms2_st, ms2_ed = peak_index_container.fragment_ms2_indices[precursor_index0]
+        ms2_st, ms2_ed = peak_index_container.fragment_ms2_indices[
+            precursor_index0, :, : theo_peaks.fragment_mz_arr.size
+        ]
         pc_ms1_st, pc_ms1_ed = peak_index_container.precursor_ms1_indices[
             precursor_index0
         ]

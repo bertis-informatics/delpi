@@ -50,14 +50,12 @@ def _make_batch_in_parallel(
     for i in nb.prange(cur_batch_size):
         k = batch_indices[i]
         precursor_index0 = precursor_index0_arr[k]
-        ms2_frame_num = peak_group_container.frame_num_arr[k]
 
         theo_peaks = get_theoretical_peaks(speclib_container, precursor_index0)
         _ = get_x_theo(theo_peaks, X_theo[i])
 
         _, ms1_scale, ms2_scale = get_x_exp(
             precursor_index0=precursor_index0,
-            ms2_frame_num=ms2_frame_num,
             theo_peaks=theo_peaks,
             ms1_meta_df=ms1_meta_df,
             ms2_meta_df=ms2_meta_df,
@@ -89,7 +87,8 @@ def _allocate_dda_buffer(batch_size: int, num_theoretical_peaks: int):
         "X_precursor_index": np.empty(batch_size, dtype=np.uint32),
         "ms1_scale_arr": np.empty(batch_size, dtype=np.float32),
         "ms2_scale_arr": np.empty(batch_size, dtype=np.float32),
-        "X_indices": np.empty((batch_size, 64), dtype=np.int32),
+        # fragment peak indices; a PmSM has at most as many fragment tokens as tokens
+        "X_indices": np.empty((batch_size, MAX_EXP_PEAK_TOKENS), dtype=np.int32),
         "X_rank": np.empty((batch_size, MAX_EXP_PEAK_TOKENS), dtype=np.int8),
     }
 
@@ -122,6 +121,8 @@ def generate_batches(
     for buf_idx, (num_peaks, batch_indices) in enumerate(batch_iter):
         buf = buffers[buf_idx % num_buffers]
         cur_batch_size = batch_indices.shape[0]
+        # like X_exp/X_rank, only the first num_peaks slots can be filled
+        x_ind = buf["X_indices"][:cur_batch_size, :num_peaks]
         _make_batch_in_parallel(
             batch_indices,
             speclib_container,
@@ -136,7 +137,7 @@ def generate_batches(
             buf["X_precursor_index"],
             buf["X_theo"],
             buf["X_exp"],
-            buf["X_indices"],
+            x_ind,
             buf["X_rank"],
             buf["ms1_scale_arr"],
             buf["ms2_scale_arr"],
@@ -147,7 +148,7 @@ def generate_batches(
             frame_num_arr[batch_indices],
             buf["X_theo"][:cur_batch_size, :, :],
             buf["X_exp"][:cur_batch_size, :num_peaks, :],
-            buf["X_indices"][:cur_batch_size, :],
+            x_ind,
             buf["X_rank"][:cur_batch_size, :num_peaks],
             buf["ms1_scale_arr"][:cur_batch_size],
             buf["ms2_scale_arr"][:cur_batch_size],

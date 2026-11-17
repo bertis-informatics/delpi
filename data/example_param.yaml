@@ -132,3 +132,8 @@ fragment:
   max_charge: 2
   min_mz: 200
   max_mz: 1800
+  # max_fragments: 16    # most intense fragments stored per precursor (upper bound)
+  # min_intensity: 0.01  # minimum predicted intensity relative to the strongest fragment
+  # min_fragments: 5     # search only precursors with at least this many stored
+  #                      # fragments (integer >= 3); applied at search time, so it
+  #                      # can change without rebuilding the library

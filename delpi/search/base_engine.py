@@ -72,6 +72,17 @@ class BaseSearchEngine(ABC):
         model.transform = PeptideMultiSpectraMatchScaler()
         return model
 
+    def get_min_search_fragments(self, speclib_reader) -> int:
+        """Configured minimum fragment count, checked against the library cap."""
+        value = self.search_config.min_search_fragments
+        if value > speclib_reader.max_fragments:
+            raise ValueError(
+                f"fragment.min_fragments ({value}) exceeds the library's "
+                f"max_fragments ({speclib_reader.max_fragments}); no precursor "
+                "would be searched"
+            )
+        return value
+
     @staticmethod
     def _limit_numba_threads():
         """Limit numba thread count in the current (background) thread.
@@ -340,7 +351,8 @@ class BaseSearchEngine(ABC):
                 results_dict = result_manager.read_dict(
                     group_key, data_keys=["precursor_index", "observed_rt", "logit"]
                 )
-                pmsm_df = pl.DataFrame(results_dict)
+                # row index of the stored results: joins below need not keep row order
+                pmsm_df = pl.DataFrame(results_dict).with_row_index("pmsm_index")
                 pmsm_df = PeptideDatabase.join(
                     db_dir,
                     pmsm_df,
@@ -411,7 +423,8 @@ class BaseSearchEngine(ABC):
             )
 
         if after_full_search:
-            # save RT predictions for the full search results
+            # save RT predictions for the full search results, in stored row order
+            pmsm_df = pmsm_df.sort("pmsm_index")
             rt_df = rt_calibrator.predict(pmsm_df["ref_rt"])
             result_manager.write_dict(
                 group_key, {"predicted_rt": rt_df["predicted_rt"].to_numpy()}

@@ -8,16 +8,75 @@ from delpi.lcms.base_ion_type import BaseIonType
 from delpi.chem.amino_acid import AminoAcid
 from delpi.chem.modification_param import ModificationParam
 from delpi.database.fasta_parser import FastaParser
-from delpi.database.enzyme import Enzyme
+from delpi.database.enzyme import (
+    Enzyme,
+    PEPTIDE_C_TERM,
+    PEPTIDE_N_TERM,
+    PROTEIN_C_TERM,
+    PROTEIN_N_TERM,
+)
 from delpi.database.decoy_generator import DecoyGenerator
 from delpi.database.modification_handler import ModificationHandler
 from delpi.database.precursor_generator import PrecursorGenerator
 from delpi.database.spec_lib_generator import SpectralLibGenerator
-from delpi.database.utils import create_peptidoform_df
+from delpi.database.utils import create_peptidoform_df, il_normalized_sequence_expr
 from delpi.search.progress import ProgressTracker
 from delpi.utils.yaml_file import load_yaml, save_yaml
 
 PEPTIDE_SEQ_REGEX = rf"^[{AminoAcid.peptide_n_term}{AminoAcid.protein_n_term}]?[{AminoAcid.standard_amino_acid_chars}]+[{AminoAcid.peptide_c_term}{AminoAcid.protein_c_term}]?$"
+
+
+def merge_il_variants(peptide_df: pl.DataFrame) -> pl.DataFrame:
+    """Merge peptides whose sequences differ only by I/L.
+
+    I and L have the same residue mass, so such peptides have identical
+    precursor and fragment masses and the search cannot tell them apart.
+    Each group keeps one sequence, the variant found in the most proteins
+    (then the alphabetically first), and the union of the group's
+    `protein_index`. A protein-terminal marker is kept if any variant is
+    protein-terminal (the same rule digestion uses). Groups keep the order of
+    their first peptide, so peptides without an I/L variant are unchanged.
+
+    `peptide_df` holds digested target peptides: ``peptide`` (one terminal
+    marker on each side), ``protein_index`` and ``sequence_length``.
+    """
+    core = pl.col("peptide").str.slice(1, pl.col("peptide").str.len_chars() - 2)
+    merged = (
+        peptide_df.with_row_index("_row")
+        .with_columns(
+            _core=core,
+            _protein_n_term=pl.col("peptide").str.starts_with(PROTEIN_N_TERM),
+            _protein_c_term=pl.col("peptide").str.ends_with(PROTEIN_C_TERM),
+            _n_proteins=pl.col("protein_index").list.len(),
+        )
+        .group_by(il_normalized_sequence_expr().alias("_key"))
+        .agg(
+            pl.col("_row").min(),
+            pl.col("_core")
+            .sort_by(["_n_proteins", "_core"], descending=[True, False])
+            .first(),
+            pl.col("protein_index").explode().unique().sort(),
+            pl.col("_protein_n_term").any(),
+            pl.col("_protein_c_term").any(),
+            pl.col("sequence_length").first(),
+        )
+        .sort("_row")
+    )
+    n_term = (
+        pl.when("_protein_n_term")
+        .then(pl.lit(PROTEIN_N_TERM))
+        .otherwise(pl.lit(PEPTIDE_N_TERM))
+    )
+    c_term = (
+        pl.when("_protein_c_term")
+        .then(pl.lit(PROTEIN_C_TERM))
+        .otherwise(pl.lit(PEPTIDE_C_TERM))
+    )
+    return merged.select(
+        (n_term + pl.col("_core") + c_term).alias("peptide"),
+        "protein_index",
+        "sequence_length",
+    )
 
 
 class PeptideDatabase:
@@ -36,7 +95,7 @@ class PeptideDatabase:
     @staticmethod
     def extract_params(config_dict):
         param_dict = dict()
-        for key in ["fasta_file", "decoy"]:
+        for key in ["fasta_file", "decoy_method"]:
             if key in config_dict:
                 param_dict[key] = config_dict[key]
 
@@ -77,6 +136,7 @@ class PeptideDatabase:
         save_dir: Union[str, Path] = None,
         precursor_chunk_size: int = None,
         batch_size: int = 512,
+        min_intensity: float = 0.01,
         *args,
         **kwargs,
     ) -> Self:
@@ -106,6 +166,9 @@ class PeptideDatabase:
         peptide_df = peptide_df.filter(
             pl.col("peptide").str.contains(PEPTIDE_SEQ_REGEX)
         )
+
+        # one target peptide per I/L-equivalent sequence (indistinguishable by mass)
+        peptide_df = merge_il_variants(peptide_df)
 
         # Parse modification params early (cheap/side-effect-free) so the
         # decoy generator can make variable-modification-aware mutation
@@ -148,24 +211,28 @@ class PeptideDatabase:
             min_fragment_mz=min_fragment_mz,
             max_fragment_mz=max_fragment_mz,
             apply_phospho=mod_handler.has_phospho,
+            min_intensity=min_intensity,
             device=device,
         )
-        speclib_df, modification_df = speclib_generator.generate_spectral_lib(
-            peptide_df,
-            modification_df,
-            precursor_df,
-            prefix_mass_container,
-            progress=progress,
-            precursor_chunk_size=precursor_chunk_size,
-            save_dir=save_dir,
-            batch_size=batch_size,
+        # precursor_df gains speclib_offset/speclib_rows (variable fragment rows).
+        speclib_df, modification_df, precursor_df = (
+            speclib_generator.generate_spectral_lib(
+                peptide_df,
+                modification_df,
+                precursor_df,
+                prefix_mass_container,
+                progress=progress,
+                precursor_chunk_size=precursor_chunk_size,
+                save_dir=save_dir,
+                batch_size=batch_size,
+            )
         )
 
         self.params.update(
             {
                 "fasta_file": str(parser.fasta_path),
                 "digest": enzyme_.param_dict,
-                "decoy": decoy_generator.method,
+                "decoy_method": decoy_generator.method,
                 "modification": mod_handler.param_dict,
                 "precursor": precursor_generator.param_dict,
                 "fragment": speclib_generator.param_dict,

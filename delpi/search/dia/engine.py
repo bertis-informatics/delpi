@@ -35,7 +35,7 @@ from delpi.search.dia.lfq_utils import (
     get_pmsm_median_intensity,
     get_xic_array,
 )
-from delpi.search.clustering import cluster_matches
+from delpi.search.clustering import cluster_by_peak_sharing, compact_peak_indices
 from delpi.utils.device_ctx import make_inference_contexts
 from delpi.utils.prefetch import Prefetcher, pin_numpy_tuple
 from delpi.model.input import THEORETICAL_PEAK, EXPERIMENTAL_PEAK
@@ -103,6 +103,7 @@ class DIASearchEngine(BaseSearchEngine):
                 ms2_mass_tol=ms2_tol,
                 min_peak_count=DIA_MATCHED_PEAKS_CUTOFF,
                 topk=peak_group_topk,
+                min_search_fragments=search_config.min_search_fragments,
             )
         total_batches = count_total_batches(
             peak_group_container.peak_count_arr, batch_size=batch_size
@@ -169,7 +170,10 @@ class DIASearchEngine(BaseSearchEngine):
                 results["logit"].append(logits)
                 results["features"].append(x_feature)
                 results["observed_rt"].append(observed_rt)
-                results["peak_indices"].append(x_ind)
+                # used only for clustering in _flush; not written to the result file
+                peak_count, peak_index = compact_peak_indices(x_ind)
+                results["fragment_peak_count"].append(peak_count)
+                results["fragment_peak_index"].append(peak_index)
 
                 x_exp = x_exp_t.numpy()[mask]
                 x_rank = x_rank_t.numpy()[mask]
@@ -219,6 +223,7 @@ class DIASearchEngine(BaseSearchEngine):
         group_key = self.get_results_group_key()
 
         speclib_reader = SpectralLibReader(peptide_db_path=self.get_db_dir())
+        min_search_fragments = self.get_min_search_fragments(speclib_reader)
         speclib_reader.calibrate_rt(rt_calibrator)
 
         ms1_map = run.get_ms1_map()
@@ -254,6 +259,7 @@ class DIASearchEngine(BaseSearchEngine):
                             ms2_mass_tol=search_config["ms2_mass_tol_in_ppm"],
                             min_peak_count=DIA_MATCHED_PEAKS_CUTOFF,
                             topk=TOPK_PER_PRECURSOR,
+                            min_search_fragments=min_search_fragments,
                         )
                         yield dia_win, sc, pgc, pic
 
@@ -262,11 +268,9 @@ class DIASearchEngine(BaseSearchEngine):
                     k: np.concatenate([r[k] for r in chunk_results])
                     for k in chunk_results[0]
                 }
-                cluster_arr = cluster_matches(
-                    frame_index_arr=dia_win.frame_num_to_index[merged["frame_num"]],
-                    peak_index_arr=merged["peak_indices"],
-                    max_frame_diff=1,
-                    jaccard_thres=0.6,
+                cluster_arr = cluster_by_peak_sharing(
+                    merged.pop("fragment_peak_count"),
+                    merged.pop("fragment_peak_index"),
                 )
                 merged["cluster"] = cluster_arr + cluster_count
                 cluster_count += 1 + np.max(cluster_arr)

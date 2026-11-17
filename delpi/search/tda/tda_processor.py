@@ -19,11 +19,13 @@ GroupingType = Literal["lead_only", "parsimonious_grouping"]
 import numpy as np
 import polars as pl
 import torch
+from sklearn.preprocessing import StandardScaler
 from torch.utils.data import TensorDataset
 
 from delpi.database.peptide_database import PeptideDatabase
 from delpi.search.result_aggregator import ResultsAggregator
 from delpi.search.result_manager import ResultManager
+from delpi.search.tda.features import FEATURE_DIM, compute_rescoring_features
 from delpi.search.tda.trainer import DEFAULT_TRAINING_PARAMS, TargetDecoyTrainer
 from delpi.constants import (
     DEFAULT_Q_VALUE_CUTOFF,
@@ -33,8 +35,8 @@ from delpi.constants import (
 
 logger = logging.getLogger(__name__)
 
-FEATURE_DIM = PMSM_EMBEDDING_DIM + 1  # embedding + RT difference
-RT_SCALE = 1000.0
+# Library columns joined only to compute rescoring features; not returned.
+_FEATURE_INPUT_COLUMNS = ("precursor_mz", "sequence_length")
 
 # Type alias: given a DataFrame subset, return (n, FEATURE_DIM) numpy array
 FeatureLoader = Callable[[pl.DataFrame], np.ndarray]
@@ -102,7 +104,9 @@ class TDAProcessor:
         :meth:`~delpi.search.search_manager.SearchManager._infer_proteins_and_analyze_fdr`.
         """
         pmsm_df = self._load_multi_run(result_aggregator, group_key)
-        feature_fn = self._make_aggregator_feature_fn(result_aggregator, group_key)
+        feature_fn = self._make_aggregator_feature_fn(
+            result_aggregator, group_key, pmsm_df
+        )
 
         fold_a, fold_b = self._split_pmsm_df(pmsm_df, level=self.split_level)
         full_pmsm_df = pmsm_df  # keep reference for join-back after scoring
@@ -147,7 +151,9 @@ class TDAProcessor:
         # observed_rt, is_decoy, ...) so the returned DataFrame is
         # self-contained for the assignment/FDR steps that follow.
         scored_df = scored_df.join(
-            full_pmsm_df.select(pl.exclude("cluster", "score")),
+            full_pmsm_df.select(
+                pl.exclude("cluster", "score", *_FEATURE_INPUT_COLUMNS)
+            ),
             on=["run_index", "pmsm_index"],
             how="left",
         )
@@ -210,14 +216,15 @@ class TDAProcessor:
         result_aggregator: ResultsAggregator,
         group_key: str,
     ) -> pl.DataFrame:
-        """Load PmSM data (without features) for all runs, attach is_decoy."""
+        """Load PmSM data (without embeddings) for all runs, attach is_decoy
+        and the library columns used by the rescoring features."""
         pmsm_df = result_aggregator.load_pmsm_df(group_key=group_key)
         pmsm_df = PeptideDatabase.join(
             result_aggregator.db_dir,
             pmsm_df,
-            precursor_columns=[],
+            precursor_columns=["precursor_mz"],
             modification_columns=[],
-            peptide_columns=["is_decoy"],
+            peptide_columns=["is_decoy", "sequence_length"],
         )
         return pmsm_df
 
@@ -229,17 +236,58 @@ class TDAProcessor:
     def _make_aggregator_feature_fn(
         result_aggregator: ResultsAggregator,
         group_key: str,
+        pmsm_df: pl.DataFrame,
     ) -> FeatureLoader:
-        """Feature loader that reads from HDF files via ResultsAggregator."""
+        """Feature loader: PmSM embedding (from HDF files) followed by the
+        rescoring features, z-scored with statistics of all PmSMs in `pmsm_df`.
+
+        The statistics use no labels, so fitting them on every PmSM (both CV
+        folds, targets and decoys) does not leak information between folds.
+        """
+        gradient_lengths = TDAProcessor._gradient_lengths(result_aggregator, pmsm_df)
+        scaler = StandardScaler().fit(
+            compute_rescoring_features(pmsm_df, gradient_lengths)
+        )
+        logger.debug(
+            "Rescoring feature mean %s, scale %s", scaler.mean_, scaler.scale_
+        )
 
         def _load(df: pl.DataFrame) -> np.ndarray:
             arr = result_aggregator.load_features(
                 df, group_key=group_key, feature_dim=FEATURE_DIM
             )
-            arr[:, -1] = (df["observed_rt"] - df["predicted_rt"]).to_numpy() / RT_SCALE
+            arr[:, PMSM_EMBEDDING_DIM:] = scaler.transform(
+                compute_rescoring_features(df, gradient_lengths)
+            )
             return arr
 
         return _load
+
+    @staticmethod
+    def _gradient_lengths(
+        result_aggregator: ResultsAggregator, pmsm_df: pl.DataFrame
+    ) -> dict[int, float]:
+        """Gradient length (seconds) of every run in `pmsm_df`, from the
+        result file; falls back to the run's latest observed RT."""
+        lengths = {}
+        for run_index in pmsm_df["run_index"].unique().sort().to_list():
+            try:
+                value = float(
+                    result_aggregator.get_result_manager(run_index).read_attr(
+                        "gradient_length_in_seconds"
+                    )
+                )
+            except KeyError:
+                value = 0.0
+            if not value > 0:
+                run_df = pmsm_df.filter(pl.col("run_index") == run_index)
+                value = float(run_df["observed_rt"].max())
+                logger.warning(
+                    f"Run {run_index}: no gradient length in the result file; "
+                    f"using the latest observed RT ({value:.1f} s)"
+                )
+            lengths[run_index] = value
+        return lengths
 
     # ==================================================================
     # Shared pipeline steps

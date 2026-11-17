@@ -22,6 +22,7 @@ from delpi.database.numba.spec_lib_utils import (
     get_frame_index_range,
     get_theoretical_peaks,
 )
+from delpi.constants import MIN_SEARCH_FRAGMENTS
 
 
 @nb.njit(parallel=True, fastmath=True, cache=True)
@@ -43,7 +44,6 @@ def _quick_match(
     filter by ``valid_arr`` before using ``frame_index_arr``/``score_arr``.
     """
 
-    num_fragments = speclib_container.max_fragments
     n_ms2_frames = frame_num_map.ms2_rt_arr.shape[0]
     n_sel = precursor_index0_arr.shape[0]
     frame_index_arr = np.full(n_sel, -1, dtype=np.int32)
@@ -52,6 +52,11 @@ def _quick_match(
 
     for i in nb.prange(n_sel):
         precursor_index0 = precursor_index0_arr[i]
+        num_fragments = int(
+            speclib_container.precursor_speclib_rows_arr[precursor_index0]
+        )
+        if num_fragments < MIN_SEARCH_FRAGMENTS:
+            continue
         min_frame_index, max_frame_index = get_frame_index_range(
             speclib_container, frame_num_map.ms2_rt_arr, precursor_index0
         )

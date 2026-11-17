@@ -107,12 +107,13 @@ class Ms2SpectrumPredictor(LightningModule):
 
         # Output layer for fragment intensities
         # Input: (B, L-2, encoder_output_dim) -> Output: (B, L-2, 8)
+        # No final ReLU: forward() clamps at 0 for inference, while the loss uses
+        # the raw outputs so negative predictions keep their gradients.
         self.fragment_predictor = nn.Sequential(
             nn.Linear(encoder_output_dim, 64),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(64, 8),
-            nn.ReLU(),  # Ensure non-negative intensities
         )
 
         # Metrics
@@ -150,16 +151,17 @@ class Ms2SpectrumPredictor(LightningModule):
 
         save_model(self, save_path, model_version=model_version)
 
-    def forward(self, x_aa, x_mod, x_meta):
+    def forward(self, x_aa, x_mod, x_meta, *, return_raw: bool = False):
         """
         Forward pass for MS2 spectrum prediction.
 
         Args:
             x_aa: Amino acid sequence tensor (B, L+2) where L is peptide length
             x_mod: Modification tensor (B, max_mod_count, 2) with modification tuples
+            return_raw: Return the unclamped outputs (used by the training loss).
 
         Returns:
-            Fragment intensities tensor (B, L-2, 8)
+            Fragment intensities tensor (B, L-2, 8), clamped at 0 unless `return_raw`
         """
         # Pass through AA and Mod embedding layers
         x_aa_emb = self.aa_embedding(x_aa.to(torch.int32))
@@ -179,7 +181,7 @@ class Ms2SpectrumPredictor(LightningModule):
         # Predict fragment intensities
         y_pred = self.fragment_predictor(x_emb)
 
-        return y_pred
+        return y_pred if return_raw else y_pred.clamp_min(0)
 
     # def predict_batch(self, batch: Dict[str, torch.Tensor]) -> np.ndarray:
     #     """_summary_
@@ -276,17 +278,16 @@ class Ms2SpectrumPredictor(LightningModule):
             y_true: True fragment intensities (B, L-2, 8)
 
         Returns:
-            loss, y_true, y_pred
+            loss, y_true, raw (unclamped) y_pred
         """
-        y_pred = self(x_aa, x_mod, x_meta)
+        y_pred = self(x_aa, x_mod, x_meta, return_raw=True)
         # if y_true.size(-1) < y_pred.size(-1):
         #     y_true = F.pad(
         #         y_true, (0, y_pred.size(-1) - y_true.size(-1)), "constant", 0
         #     )
         y_pred = y_pred[..., : y_true.size(-1)]
 
-        # Use L1 loss for intensity prediction (matches Carafe / AlphaPeptDeep
-        # fine-tuning recipe; more robust than MSE for sparse non-negative targets)
+        # MSE on the raw outputs, so predictions below 0 still get gradients
         loss = nn.functional.mse_loss(y_pred, y_true)
 
         return loss, y_true, y_pred
@@ -301,6 +302,7 @@ class Ms2SpectrumPredictor(LightningModule):
         batch_size = len(y_true)
 
         loss, y_true, y_pred = self._compute_loss(x_aa, x_mod, x_meta, y_true)
+        y_pred = y_pred.clamp_min(0)  # metrics use the inference outputs
 
         # Flatten for correlation calculation
         y_true_flat = y_true.reshape(-1)
@@ -343,6 +345,7 @@ class Ms2SpectrumPredictor(LightningModule):
         batch_size = len(y_true)
 
         loss, y_true, y_pred = self._compute_loss(x_aa, x_mod, x_meta, y_true)
+        y_pred = y_pred.clamp_min(0)  # metrics use the inference outputs
 
         # Flatten for correlation calculation
         y_true_flat = y_true.reshape(-1)

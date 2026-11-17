@@ -55,7 +55,7 @@ def build_database(
             n_term_methionine_excision=search_config["digest"][
                 "n_term_methionine_excision"
             ],
-            decoy=search_config.config.get("decoy_method", "mutation"),
+            decoy=search_config.decoy_method,
             mod_param_set=search_config["modification"]["mod_param_set"],
             max_mods=search_config["modification"]["max_mods"],
             min_precursor_charge=search_config["precursor"].get("min_charge", 2),
@@ -68,7 +68,8 @@ def build_database(
             max_fragment_mz=search_config["fragment"].get("max_mz", 1800),
             prefix_ion_type=BaseIonType.B,
             suffix_ion_type=BaseIonType.Y,
-            max_fragments=MAX_FRAGMENTS,
+            max_fragments=search_config["fragment"].get("max_fragments", MAX_FRAGMENTS),
+            min_intensity=search_config["fragment"].get("min_intensity", 0.01),
             device=device,
             use_multiprocessing=True,
             precursor_chunk_size=65_536,

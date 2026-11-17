@@ -10,6 +10,7 @@ from delpi.lcms.base_ion_type import BaseIonType
 from delpi.model.spec_lib import Ms2SpectrumPredictor
 
 from delpi.database.peptide_database import PeptideDatabase
+from delpi.database.spec_lib_schema import with_speclib_index
 from delpi.database.spec_lib_generator import SpectralLibGenerator
 from delpi.database.precursor_generator import PrecursorGenerator
 from delpi.model.spec_lib.rt_predictor import RetentionTimePredictor
@@ -165,7 +166,7 @@ class RefinedSpectralLibGenerator(SpectralLibGenerator):
             batch_size=512,
         )
 
-        ms2_df = self.predict_ms2_spectra(
+        ms2_df, self.precursor_df = self.predict_ms2_spectra(
             peptide_df=self.peptide_df,
             modification_df=self.modification_df,
             precursor_df=self.precursor_df,
@@ -182,6 +183,18 @@ class RefinedSpectralLibGenerator(SpectralLibGenerator):
     def save(self, save_dir: Path):
         """Save spectral library to parquet files."""
         save_dir.mkdir(parents=True, exist_ok=True)
+        # Keep each precursor's rows contiguous in increasing intensity order
+        # (rank 1 last) and rebuild offsets/counts, also after copying a
+        # subset of the original library.
+        self.speclib_df = self.speclib_df.filter(
+            pl.col("predicted_intensity").is_finite()
+            & (pl.col("predicted_intensity") > 0)
+        ).sort(["precursor_index", "rank"], descending=[False, True])
+        counts = np.bincount(
+            self.speclib_df["precursor_index"].to_numpy(),
+            minlength=self.precursor_df.height,
+        )
+        self.precursor_df = with_speclib_index(self.precursor_df, counts)
         self.sequence_df.write_parquet(save_dir / "sequence_df.parquet")
         self.peptide_df.write_parquet(save_dir / "peptide_df.parquet")
         self.modification_df.write_parquet(save_dir / "modification_df.parquet")
