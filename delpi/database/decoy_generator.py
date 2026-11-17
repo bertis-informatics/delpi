@@ -8,6 +8,7 @@ import polars as pl
 
 from delpi.chem.amino_acid import AminoAcid
 from delpi.chem.modification_param import ModificationLocation
+from delpi.database.utils import il_normalized_sequence, il_normalized_sequence_expr
 
 MUTATION_MAP = dict(zip("GAVLIFMPWSCTYHKRQEND", "LLLVVLLLLTSSSSLLNDQE"))
 
@@ -127,20 +128,6 @@ def get_shuffled_decoy(peptide):
 # Peptide strings always carry terminal markers at peptide[0] and peptide[-1].
 # --------------------------------------------------------------------------
 ResidueMasses = Dict[str, Tuple[float, ...]]
-
-
-def residue_key(peptide: str) -> str:
-    """Collision key: residues without terminal markers, I == L."""
-    return peptide[1:-1].replace("I", "L")
-
-
-def _residue_key_expr() -> pl.Expr:
-    """Polars equivalent of :func:`residue_key`."""
-    return (
-        pl.col("peptide")
-        .str.slice(1, pl.col("sequence_length"))
-        .str.replace_all("I", "L", literal=True)
-    )
 
 
 def build_residue_masses(mod_param_set: Optional[Sequence] = None) -> ResidueMasses:
@@ -285,10 +272,10 @@ class DecoyGenerator:
     def _swap_decoy(
         self, peptide: str, forbidden: Set[str]
     ) -> Tuple[Optional[str], str]:
-        """First candidate whose residue key is not in ``forbidden`` (the key is
-        then added to it). ``(None, "failed")`` if none, e.g. n <= 2."""
+        """First candidate whose I/L-normalized sequence is not in ``forbidden``
+        (it is then added to it). ``(None, "failed")`` if none, e.g. n <= 2."""
         for decoy, decoy_type in self._swap_candidates(peptide):
-            key = decoy[1:-1].replace("I", "L")
+            key = il_normalized_sequence(decoy)
             if key not in forbidden:
                 forbidden.add(key)
                 return decoy, decoy_type
@@ -301,7 +288,7 @@ class DecoyGenerator:
         depend on row order. Targets and accepted decoys are blocked, so decoys
         are unique and never equal a target (I == L, markers ignored).
         """
-        forbidden = {p[1:-1].replace("I", "L") for p in peptides}
+        forbidden = {il_normalized_sequence(p) for p in peptides}
         decoys, decoy_types = [None] * len(peptides), ["failed"] * len(peptides)
         for i in sorted(range(len(peptides)), key=peptides.__getitem__):
             decoys[i], decoy_types[i] = self._swap_decoy(peptides[i], forbidden)
@@ -426,9 +413,9 @@ class DecoyGenerator:
         )
         # remove decoys spectrally identical to a target (markers ignored, I == L)
         decoy_peptide_df = (
-            decoy_peptide_df.with_columns(_residue_key_expr().alias("_key"))
+            decoy_peptide_df.with_columns(il_normalized_sequence_expr().alias("_key"))
             .join(
-                target_peptide_df.select(_residue_key_expr().alias("_key")),
+                target_peptide_df.select(il_normalized_sequence_expr().alias("_key")),
                 on="_key",
                 how="anti",
             )

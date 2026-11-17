@@ -19,6 +19,24 @@ from delpi.chem.modification_param import (
 
 TERM_CHARS = [PROT_N_TERM_AA, PROT_C_TERM_AA, PEPT_N_TERM_AA, PEPT_C_TERM_AA]
 
+
+# Peptide strings carry one terminal marker on each side (peptide[0], peptide[-1]).
+def il_normalized_sequence(peptide: str) -> str:
+    """A peptide string's residues without the terminal markers, with I
+    written as L. Peptides with the same I/L-normalized sequence have
+    identical precursor and fragment masses."""
+    return peptide[1:-1].replace("I", "L")
+
+
+def il_normalized_sequence_expr(column: str = "peptide") -> pl.Expr:
+    """Polars equivalent of :func:`il_normalized_sequence` for a column of
+    peptide strings."""
+    peptide = pl.col(column)
+    return peptide.str.slice(1, peptide.str.len_chars() - 2).str.replace_all(
+        "I", "L", literal=True
+    )
+
+
 max_mod_id = Modification.get_max_accession_num()
 mod_name_array = [None] * (max_mod_id + 1)
 for mod in Modification.name_to_mod_map.values():
