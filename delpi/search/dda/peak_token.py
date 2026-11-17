@@ -38,7 +38,6 @@ def _set_x_exp(
     mz_tol: float,
     x_exp: np.ndarray,
     counter: int,
-    ms2_frame_num: int,
     x_ind: np.ndarray = None,
     x_rank: np.ndarray = None,
 ):
@@ -97,12 +96,9 @@ def _set_x_exp(
                 if (x_rank is not None) and (is_precursor == False):
                     x_rank[counter] = num_fragments - theo_i - 1
 
-                # save matched peak indices at the RT center
-                if (
-                    (x_ind is not None)
-                    and (fn == ms2_frame_num)
-                    and (ind_count < x_ind.shape[0])
-                ):
+                # matched peak indices over the whole RT window, for
+                # peak-sharing clustering (delpi.search.clustering)
+                if (x_ind is not None) and (ind_count < x_ind.shape[0]):
                     x_ind[ind_count] = exp_i
                     ind_count += 1
 
@@ -121,7 +117,6 @@ def _set_x_exp(
 @nb.njit(nogil=True, fastmath=True, cache=True)
 def get_x_exp(
     precursor_index0: int,
-    ms2_frame_num: int,
     theo_peaks: TheoreticalPeakContainer,
     ms1_meta_df: MetaContainer,
     ms2_meta_df: MetaContainer,
@@ -175,7 +170,6 @@ def get_x_exp(
         mz_tol=ms1_mass_tol,
         x_exp=x_exp,
         counter=0,
-        ms2_frame_num=ms2_frame_num,
     )
     counter, _ = _set_x_exp(
         theo_peaks,
@@ -190,7 +184,6 @@ def get_x_exp(
         mz_tol=ms2_mass_tol,
         x_exp=x_exp,
         counter=counter,
-        ms2_frame_num=ms2_frame_num,
     )
     counter, ms2_scale = _set_x_exp(
         theo_peaks,
@@ -205,7 +198,6 @@ def get_x_exp(
         mz_tol=ms2_mass_tol,
         x_exp=x_exp,
         counter=counter,
-        ms2_frame_num=ms2_frame_num,
         x_ind=x_ind,
         x_rank=x_rank,
     )

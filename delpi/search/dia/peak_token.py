@@ -155,13 +155,9 @@ def _set_x_exp(
                 if (x_rank is not None) and (is_precursor == False):
                     x_rank[counter] = num_fragments - theo_i - 1
 
-                # save matched peak indices at the RT center
-                if (
-                    (x_ind is not None)
-                    and (fi > min_frame_index + 2)
-                    and (fi < max_frame_index - 2)
-                    and (ind_count < x_ind.shape[0])
-                ):
+                # matched peak indices over the whole RT window, for
+                # peak-sharing clustering (delpi.search.clustering)
+                if (x_ind is not None) and (ind_count < x_ind.shape[0]):
                     x_ind[ind_count] = exp_i
                     ind_count += 1
                 counter += 1

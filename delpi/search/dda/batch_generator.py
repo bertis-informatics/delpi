@@ -50,14 +50,12 @@ def _make_batch_in_parallel(
     for i in nb.prange(cur_batch_size):
         k = batch_indices[i]
         precursor_index0 = precursor_index0_arr[k]
-        ms2_frame_num = peak_group_container.frame_num_arr[k]
 
         theo_peaks = get_theoretical_peaks(speclib_container, precursor_index0)
         _ = get_x_theo(theo_peaks, X_theo[i])
 
         _, ms1_scale, ms2_scale = get_x_exp(
             precursor_index0=precursor_index0,
-            ms2_frame_num=ms2_frame_num,
             theo_peaks=theo_peaks,
             ms1_meta_df=ms1_meta_df,
             ms2_meta_df=ms2_meta_df,
@@ -89,7 +87,8 @@ def _allocate_dda_buffer(batch_size: int, num_theoretical_peaks: int):
         "X_precursor_index": np.empty(batch_size, dtype=np.uint32),
         "ms1_scale_arr": np.empty(batch_size, dtype=np.float32),
         "ms2_scale_arr": np.empty(batch_size, dtype=np.float32),
-        "X_indices": np.empty((batch_size, 64), dtype=np.int32),
+        # one slot per experimental token, so fragment peak indices never truncate
+        "X_indices": np.empty((batch_size, MAX_EXP_PEAK_TOKENS), dtype=np.int32),
         "X_rank": np.empty((batch_size, MAX_EXP_PEAK_TOKENS), dtype=np.int8),
     }
 

@@ -118,7 +118,8 @@ def _allocate_dia_buffer(batch_size: int, num_theoretical_peaks: int):
         "X_precursor_index": np.empty(batch_size, dtype=np.uint32),
         "ms1_scale_arr": np.empty(batch_size, dtype=np.float32),
         "ms2_scale_arr": np.empty(batch_size, dtype=np.float32),
-        "X_indices": np.empty((batch_size, 128), dtype=np.int32),
+        # one slot per experimental token, so fragment peak indices never truncate
+        "X_indices": np.empty((batch_size, MAX_EXP_PEAK_TOKENS), dtype=np.int32),
         "X_rank": np.empty((batch_size, MAX_EXP_PEAK_TOKENS), dtype=np.int8),
     }
 
