@@ -22,15 +22,17 @@ def get_frame_index_range(
     rt_lb = speclib_container.mod_rt_lb_arr[peptidoform_index]
     rt_ub = speclib_container.mod_rt_ub_arr[peptidoform_index]
 
-    if np.isnan(rt_lb) or np.isnan(rt_lb):
-        return np.uint32(0), np.uint32(ms2_rt_arr.shape[0] - 1)
+    if np.isnan(rt_lb) or np.isnan(rt_ub):
+        return 0, ms2_rt_arr.shape[0] - 1
 
+    # inclusive frame range with rt_lb <= RT <= rt_ub; signed, so a window
+    # outside the run comes back empty (max < min) instead of wrapping around
     min_frame_index = np.searchsorted(ms2_rt_arr, rt_lb, side="left")
     max_frame_index = min(
-        np.searchsorted(ms2_rt_arr, rt_ub, side="right"), ms2_rt_arr.shape[0] - 1
+        np.searchsorted(ms2_rt_arr, rt_ub, side="right") - 1, ms2_rt_arr.shape[0] - 1
     )
 
-    return np.uint32(min_frame_index), np.uint32(max_frame_index)
+    return min_frame_index, max_frame_index
 
 
 @nb.njit(inline="always")

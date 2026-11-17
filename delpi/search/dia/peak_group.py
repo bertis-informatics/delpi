@@ -263,7 +263,15 @@ def find_peak_groups(
             speclib_container, frame_num_map.ms2_rt_arr, precursor_index0
         )
 
-        xic_len = max_frame_index - min_frame_index + 1
+        # skip an empty RT window, or one too short for a full peak-group window
+        if (
+            min_frame_index >= frame_num_map.ms2_rt_arr.size
+            or max_frame_index < min_frame_index
+        ):
+            continue
+        xic_len = int(max_frame_index) - int(min_frame_index) + 1
+        if xic_len < 2 * rt_window_radius + 1:
+            continue
         peak_lb = rt_window_radius  # inclusive
         peak_ub = xic_len - rt_window_radius - 1  # inclusive
 
