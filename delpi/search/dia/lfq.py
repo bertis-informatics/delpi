@@ -48,15 +48,18 @@ class LabelFreeQuantifier:
 
         Returns:
             A minimal DataFrame keyed by ``(run_index, precursor_index)`` with
-            `ms1_quantity`/`ms2_quantity` (and, for DIA, `ms2_quantity_normalized`
-            plus normalization QC columns) -- the caller is responsible for
-            joining this back onto its own (typically larger) pmsm_df.
+            only the columns computed here: `ms1_quantity`/`ms2_quantity` (and,
+            for DIA, `ms2_quantity_normalized` plus normalization QC columns).
+            No input column is passed through, so the caller can join every
+            non-key column back onto its own (typically larger) pmsm_df.
         """
         logger.debug("Starting label-free quantification")
 
         if self.acq_method == "DIA":
             quant_df = self._quantify_dia(pmsm_df)
             quant_df = self._normalize_ms2_quantity(quant_df)
+            # observed_rt is an input column, carried only for the normalization
+            quant_df = quant_df.drop("observed_rt")
         elif self.acq_method == "DDA":
             quant_df = self._quantify_dda(pmsm_df)
             # TODO: RT-dependent normalization for DDA still needs validation

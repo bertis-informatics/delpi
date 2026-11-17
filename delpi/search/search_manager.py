@@ -852,18 +852,17 @@ class SearchManager:
             acq_method=self.search_config.acquisition_method,
         )
 
-        # LabelFreeQuantifier returns a minimal DataFrame keyed by
-        # (run_index, precursor_index) with just the new quant columns; only
-        # rows passing the FDR filter above were quantified, so this must be
-        # joined back onto the full pmsm_df (per-run assignment upstream
-        # already guarantees at most one PmSM per (run_index, precursor_index),
-        # so a plain left join is all that's needed -- no re-selection).
+        # LabelFreeQuantifier returns only the columns it computes, keyed by
+        # (run_index, precursor_index), for the quantified rows. Replace those
+        # columns on every PmSM (null where not quantified, e.g. rows excluded by
+        # the FDR filter above); all other metadata is left untouched. Per-run
+        # assignment upstream guarantees at most one PmSM per (run_index,
+        # precursor_index), so a left join is enough.
         quant_df = lfq.perform_quantification(target_pmsm_df)
-        value_columns = [
-            c for c in quant_df.columns if c not in ("run_index", "precursor_index")
-        ]
+        quant_keys = ["run_index", "precursor_index"]
+        value_columns = [c for c in quant_df.columns if c not in quant_keys]
         pmsm_df = pmsm_df.select(pl.exclude(value_columns)).join(
-            quant_df, on=["run_index", "precursor_index"], how="left"
+            quant_df, on=quant_keys, how="left", maintain_order="left"
         )
 
         ## run MaxLFQ
