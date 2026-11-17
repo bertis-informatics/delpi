@@ -118,7 +118,7 @@ def _allocate_dia_buffer(batch_size: int, num_theoretical_peaks: int):
         "X_precursor_index": np.empty(batch_size, dtype=np.uint32),
         "ms1_scale_arr": np.empty(batch_size, dtype=np.float32),
         "ms2_scale_arr": np.empty(batch_size, dtype=np.float32),
-        # one slot per experimental token, so fragment peak indices never truncate
+        # fragment peak indices; a PmSM has at most as many fragment tokens as tokens
         "X_indices": np.empty((batch_size, MAX_EXP_PEAK_TOKENS), dtype=np.int32),
         "X_rank": np.empty((batch_size, MAX_EXP_PEAK_TOKENS), dtype=np.int8),
     }
@@ -152,6 +152,8 @@ def generate_batches(
     for buf_idx, (num_peaks, batch_indices) in enumerate(batch_iter):
         buf = buffers[buf_idx % num_buffers]
         cur_batch_size = batch_indices.shape[0]
+        # like X_exp/X_rank, only the first num_peaks slots can be filled
+        x_ind = buf["X_indices"][:cur_batch_size, :num_peaks]
         _make_batch_in_parallel(
             batch_indices,
             speclib_container,
@@ -163,7 +165,7 @@ def generate_batches(
             buf["X_precursor_index"],
             buf["X_theo"],
             buf["X_exp"],
-            buf["X_indices"],
+            x_ind,
             buf["X_rank"],
             ms1_mass_tol,
             ms2_mass_tol,
@@ -176,7 +178,7 @@ def generate_batches(
             frame_num_arr[batch_indices],
             buf["X_theo"][:cur_batch_size, :, :],
             buf["X_exp"][:cur_batch_size, :num_peaks, :],
-            buf["X_indices"][:cur_batch_size, :],
+            x_ind,
             buf["X_rank"][:cur_batch_size, :num_peaks],
             buf["ms1_scale_arr"][:cur_batch_size],
             buf["ms2_scale_arr"][:cur_batch_size],
