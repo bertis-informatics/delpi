@@ -46,6 +46,13 @@ def _assign_spectra_to_bins(rt_window_center, rt_window_half, rt_bin_count, rt_a
     if n_spec == 0 or rt_bin_count <= 0:
         return assigned
 
+    # a single bin has no spacing: take the spectrum closest to the center
+    if rt_bin_count == 1:
+        i = np.argmin(np.abs(rt_array - rt_window_center))
+        if abs(rt_array[i] - rt_window_center) <= rt_window_half:
+            assigned[0] = i
+        return assigned
+
     # Bin spacing so the last bin's centre hits max(rt_array)
     # max_rt = rt_array[n_spec - 1]
     bin_size = (rt_window_half * 2) / (rt_bin_count - 1)
@@ -215,7 +222,7 @@ def _find_ms2_spectra(
 
     ms2_frame_num_to_index = ms2_meta_df.frame_num_to_index_arr
     min_idx, max_idx = ms2_frame_indexes[0], ms2_frame_indexes[-1]
-    mono_frag_pk_count = np.full(max_idx - min_idx + 1, -1, dtype=np.int8)
+    mono_frag_pk_count = np.full(max_idx - min_idx + 1, -1, dtype=np.int32)
     for i in ms2_frame_indexes:
         mono_frag_pk_count[i - min_idx] = 0
 
@@ -231,7 +238,7 @@ def _find_ms2_spectra(
                 mono_frag_pk_count[ms2_frame_idx - min_idx] += 1
 
     ms2_ii = np.empty(ms2_frame_indexes.shape[0], dtype=np.uint32)
-    ms2_score = np.empty(ms2_frame_indexes.shape[0], dtype=np.int8)
+    ms2_score = np.empty(ms2_frame_indexes.shape[0], dtype=np.int32)
 
     ms2_ii_cnt = 0
     for ii, idx in enumerate(ms2_frame_indexes):
@@ -260,7 +267,7 @@ def find_peak_groups(
     ms2_peak_df: PeakContainer,
     rt_window_half: float,
     isolation_lower_tol_in_da: float = 3.5,
-    isolation_upper_tol_in_da: float = 1.25,
+    isolation_upper_tol_in_da: float = 0.25,
     ms1_mass_tol: float = 10,
     ms2_mass_tol: float = 10,
     rt_window_radius: int = 4,
