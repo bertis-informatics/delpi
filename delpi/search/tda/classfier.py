@@ -12,7 +12,28 @@ from delpi.utils.metric import RecallAtFDR
 from delpi.utils.scheduler import get_cosine_schedule_with_warmup
 
 
+class EmbeddingLayerNorm(nn.Module):
+    """LayerNorm over the leading `embedding_dim` inputs (the PmSM embedding);
+    the remaining inputs (already standardized features) pass through."""
+
+    def __init__(self, embedding_dim: int, eps: float = 1e-8):
+        super().__init__()
+        self.embedding_dim = embedding_dim
+        self.norm = nn.LayerNorm(embedding_dim, eps=eps)
+
+    def forward(self, x):
+        e = self.embedding_dim
+        return torch.cat([self.norm(x[:, :e]), x[:, e:]], dim=1)
+
+
 class TargetDecoyClassifier(pl.LightningModule):
+    """MLP rescoring classifier.
+
+    The input starts with the PmSM embedding. With `embedding_dim` set (and
+    smaller than `input_size`), the leading LayerNorm covers only the
+    embedding, so the extra features keep their own scale; otherwise it covers
+    the whole input.
+    """
 
     def __init__(
         self,
@@ -26,12 +47,22 @@ class TargetDecoyClassifier(pl.LightningModule):
         focal_loss_gamma_neg=0.0,
         focal_loss_clip=0.05,
         weight_decay=0.05,
+        embedding_dim=None,
         *args,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
 
-        fc_layers = [nn.LayerNorm(input_size, eps=1e-8)]
+        if embedding_dim is None or embedding_dim == input_size:
+            input_norm = nn.LayerNorm(input_size, eps=1e-8)
+        elif 0 < embedding_dim < input_size:
+            input_norm = EmbeddingLayerNorm(embedding_dim, eps=1e-8)
+        else:
+            raise ValueError(
+                f"embedding_dim must be in (0, input_size={input_size}], "
+                f"got {embedding_dim}"
+            )
+        fc_layers = [input_norm]
         num_neurons = [input_size] + layers
         for i in range(len(num_neurons) - 1):
             fc_layers.append(nn.Linear(num_neurons[i], num_neurons[i + 1]))
