@@ -66,7 +66,7 @@ def get_pmsm_median_intensity(
     ``QUANT_FRAGMENTS``-ranked fragment ion peaks, computed directly from
     ``x_exp``'s peak annotations -- no separate XIC array needed. Shared by
     DIA and DDA, since both build ``x_exp``/``x_rank`` with the same
-    conventions (center == ``RT_WINDOW_RADIUS``; ``x_rank`` only set, and
+    conventions (time_index == 0 at the center; ``x_rank`` only set, and
     always >= 0, for fragment peaks -- see `_set_x_exp`).
 
     Restricting to ``0 <= x_rank < QUANT_FRAGMENTS`` keeps this consistent
@@ -89,8 +89,8 @@ def get_pmsm_median_intensity(
         for j in range(M):
             rank = rank_arr[j]
             if 0 <= rank < top_k and x_arr[j, EXP_ISOTOPE_INDEX_IDX] == 0:
-                t = nb.int8(x_arr[j, EXP_TIME_INDEX_IDX])
-                if abs(t - RT_WINDOW_RADIUS) <= neighbor_window:
+                t = nb.int8(x_arr[j, EXP_TIME_INDEX_IDX])  # offset from center
+                if abs(t) <= neighbor_window:
                     values[k] = x_arr[j, EXP_AB_IDX]
                     k += 1
 
@@ -142,7 +142,7 @@ def get_xic_array(
         for j in range(M):
             channel = rank_arr[j]
             if 0 <= channel < QUANT_FRAGMENTS and x_arr[j, EXP_ISOTOPE_INDEX_IDX] == 0:
-                t = nb.int8(x_arr[j, EXP_TIME_INDEX_IDX])
+                t = int(x_arr[j, EXP_TIME_INDEX_IDX]) + RT_WINDOW_RADIUS
                 if 0 <= t < RT_WINDOW_LEN:
                     ab = x_arr[j, EXP_AB_IDX]
                     if xic[n, channel, t] < ab:
@@ -166,7 +166,7 @@ def get_ms1_area(x_exp: np.ndarray, ms1_scale_arr: np.ndarray):
         has_ms1_peak = False
         y = np.zeros(RT_WINDOW_LEN, dtype=np.float32)
         for j in range(M):
-            t = nb.int8(x_arr[j, EXP_TIME_INDEX_IDX])
+            t = int(x_arr[j, EXP_TIME_INDEX_IDX]) + RT_WINDOW_RADIUS
             # precursor MS1 isotopes M, M+1, M+2 (M-1 is not this precursor's)
             if (
                 (x_arr[j, EXP_IS_PRECURSOR_IDX] > 0)
@@ -199,7 +199,7 @@ def get_ms1_area_dda(x_exp: np.ndarray, ms1_scale_arr: np.ndarray):
         y = np.zeros(RT_WINDOW_LEN, dtype=np.float32)
 
         for j in range(M):
-            t = nb.int8(x_arr[j, EXP_TIME_INDEX_IDX])
+            t = int(x_arr[j, EXP_TIME_INDEX_IDX]) + RT_WINDOW_RADIUS
             # precursor MS1 isotopes M, M+1, M+2 (M-1 is not this precursor's)
             if (
                 (x_arr[j, EXP_IS_PRECURSOR_IDX] > 0)

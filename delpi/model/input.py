@@ -51,7 +51,8 @@ class ExpPeakInput(InputEnum):
     ISOTOPE_INDEX = "isotope_index", 8, "int8"
 
     # 1D positional encoding
-    TIME_INDEX = "time_index", 9, "uint8"
+    # scan offset from the RT-window center (-radius..radius; 0 = candidate)
+    TIME_INDEX = "time_index", 9, "int8"
 
     # 2D positional encoding
     CLEAVAGE_INDEX = "cleavage_index", 10, "uint8"

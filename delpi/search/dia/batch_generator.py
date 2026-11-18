@@ -19,6 +19,11 @@ from delpi.search.dia.peak_token import (
 )
 from delpi.constants import RT_WINDOW_RADIUS
 
+# numba's cache=True does not track callees in other modules: the cached
+# _make_batch_in_parallel keeps the get_x_exp it was compiled with. After
+# changing peak_token.py, also change this file (e.g. this note) or clear
+# __pycache__. Last such change: signed time_index (input schema m1-2).
+
 
 def count_total_batches(peak_counts_arr: np.ndarray, batch_size: int = 512) -> int:
     unique, counts = np.unique(peak_counts_arr, return_counts=True)

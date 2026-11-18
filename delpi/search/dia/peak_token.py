@@ -111,6 +111,8 @@ def _set_x_exp(
     ind_count = 0
     # quant_peak_count = 0
     max_ab = 0.0
+    # the candidate frame; time_index is the signed scan offset from it
+    center_frame_index = (min_frame_index + max_frame_index) // 2
     for theo_i_, (st, ed) in enumerate(zip(st_indices, ed_indices)):
         theo_mz = mz_arr[theo_i_]
         if is_precursor:
@@ -143,7 +145,7 @@ def _set_x_exp(
                 mz = peak_df.mz_arr[exp_i]
                 ab = peak_df.ab_arr[exp_i]
                 z_score = peak_df.z_score_arr[exp_i]
-                time_index = fi - min_frame_index
+                time_index = fi - center_frame_index
                 max_ab = max(ab, max_ab)
                 x_exp[counter, EXP_MZ_ERROR_IDX] = (
                     (mz - theo_mz) / theo_mz * (1e6 / mz_tol)

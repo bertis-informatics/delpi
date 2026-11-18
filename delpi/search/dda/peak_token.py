@@ -98,7 +98,11 @@ def _set_x_exp(
                 x_exp[counter, EXP_MS_LEVEL_IDX] = ms_level
                 x_exp[counter, EXP_CLEAVAGE_INDEX_IDX] = theo_cleavage_index
                 x_exp[counter, EXP_REV_CLEAVAGE_INDEX_IDX] = theo_rev_cleavage_index
-                x_exp[counter, EXP_TIME_INDEX_IDX] = time_idx
+                # lookup bins are 0..rt_bin_count-1 (-1 = no match), centered
+                # on the candidate; store the signed offset from the center bin
+                x_exp[counter, EXP_TIME_INDEX_IDX] = (
+                    time_idx - time_index_val_arr.shape[0] // 2
+                )
 
                 # theoretical-intensity rank of this fragment (0 = library's most
                 # intense predicted fragment for this precursor), for any

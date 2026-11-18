@@ -17,6 +17,11 @@ from delpi.search.dda.peak_token import (
     THEO_TOKEN_DIM,
 )
 
+# numba's cache=True does not track callees in other modules: the cached
+# _make_batch_in_parallel keeps the get_x_exp it was compiled with. After
+# changing peak_token.py, also change this file (e.g. this note) or clear
+# __pycache__. Last such change: signed time_index (input schema m1-2).
+
 
 @nb.njit(parallel=True, cache=True)
 def _make_batch_in_parallel(
