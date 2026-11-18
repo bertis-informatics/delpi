@@ -11,6 +11,7 @@ from delpi.utils.peak import find_peak_index
 from delpi.constants import (
     DDA_MATCHED_PEAKS_CUTOFF_LB,
     DDA_MATCHED_PEAKS_CUTOFF_UB,
+    MAX_EXP_PEAK_TOKENS,
     MIN_SEARCH_FRAGMENTS,
 )
 
@@ -400,7 +401,10 @@ def find_peak_groups(
                 ms2_fg_st_indices=ms2_st,
                 ms2_fg_ed_indices=ms2_ed,
             )
-            peak_count_arr[k] = precursor_pk_cnt + fragment_pk_cnt
+            # experimental token count (incl. M-1), capped like get_x_exp
+            peak_count_arr[k] = min(
+                precursor_pk_cnt + fragment_pk_cnt, MAX_EXP_PEAK_TOKENS
+            )
 
         frame_num_results[precursor_index0] = frame_num_arr
         peak_count_results[precursor_index0] = peak_count_arr

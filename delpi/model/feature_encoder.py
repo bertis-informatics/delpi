@@ -9,6 +9,7 @@ PE_2D_DIM = 24  # 2*2*log2(64)
 PE_1D_DIM = 8  # 2*log2(16)
 
 THEO_IS_PRECURSOR_IDX = TheoPeakInput.IS_PRECURSOR.index - len(TheoPeakInput)
+THEO_CHARGE_IDX = TheoPeakInput.CHARGE.index - len(TheoPeakInput)
 EXP_IS_PRECURSOR_IDX = ExpPeakInput.IS_PRECURSOR.index - len(ExpPeakInput)
 
 
@@ -29,10 +30,12 @@ class TheoPeakEncoder(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
 
-        # PE for (cleavage_index, rev_cleavage_index)
+        # PE for (cleavage_index, rev_cleavage_index); none for precursor
+        # tokens and zero-padding tokens (charge 0), whose (0, 0) would
+        # otherwise share PE halves with real fragments at index 0
         pe_embed = self.pe_2d(x[..., -2], x[..., -1])
-        precursor_peak_mask = x[..., THEO_IS_PRECURSOR_IDX] > 0
-        pe_embed[precursor_peak_mask, :] = 0
+        no_pe_mask = (x[..., THEO_IS_PRECURSOR_IDX] > 0) | (x[..., THEO_CHARGE_IDX] == 0)
+        pe_embed[no_pe_mask, :] = 0
         x_cat = torch.cat([x[..., :-2], pe_embed], dim=-1)
         x_out = self.proj(x_cat)
 

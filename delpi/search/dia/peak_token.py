@@ -6,9 +6,7 @@ from delpi.database.numba.spec_lib_container import TheoreticalPeakContainer
 from delpi.model.input import TheoPeakInput, ExpPeakInput
 from delpi.search.dia.peak_group import PeakIndexContainer
 from delpi.utils.peak import find_peak_index
-from delpi.constants import RT_WINDOW_RADIUS
-
-MAX_EXP_PEAK_TOKENS = 512
+from delpi.constants import MAX_EXP_PEAK_TOKENS, RT_WINDOW_RADIUS
 
 THEO_TOKEN_DIM = len(TheoPeakInput)
 EXP_TOKEN_DIM = len(ExpPeakInput)
@@ -17,6 +15,7 @@ THEO_PRED_INTENSITY_IDX = TheoPeakInput.PRED_INTENSITY.index
 THEO_MZ_IDX = TheoPeakInput.MZ.index
 THEO_IS_PRECURSOR_IDX = TheoPeakInput.IS_PRECURSOR.index
 THEO_IS_PREFIX_IDX = TheoPeakInput.IS_PREFIX.index
+THEO_IS_MODLOSS_IDX = TheoPeakInput.IS_MODLOSS.index
 THEO_CHARGE_IDX = TheoPeakInput.CHARGE.index
 THEO_ISOTOPE_INDEX_IDX = TheoPeakInput.ISOTOPE_INDEX.index
 THEO_CLEAVAGE_INDEX_IDX = TheoPeakInput.CLEAVAGE_INDEX.index
@@ -27,6 +26,7 @@ EXP_AB_IDX = ExpPeakInput.AB.index
 EXP_Z_SCORE_IDX = ExpPeakInput.Z_SCORE.index
 EXP_IS_PRECURSOR_IDX = ExpPeakInput.IS_PRECURSOR.index
 EXP_IS_PREFIX_IDX = ExpPeakInput.IS_PREFIX.index
+EXP_IS_MODLOSS_IDX = ExpPeakInput.IS_MODLOSS.index
 EXP_CHARGE_IDX = ExpPeakInput.CHARGE.index
 EXP_ISOTOPE_INDEX_IDX = ExpPeakInput.ISOTOPE_INDEX.index
 EXP_MS_LEVEL_IDX = ExpPeakInput.MS_LEVEL.index
@@ -55,6 +55,7 @@ def get_x_theo(theo_peaks: TheoreticalPeakContainer, x_theo: np.ndarray = None):
     x_theo[:m, THEO_MZ_IDX] = theo_peaks.precursor_mz_arr
     x_theo[:m, THEO_IS_PRECURSOR_IDX] = 1.0
     x_theo[:m, THEO_IS_PREFIX_IDX] = 0.0
+    x_theo[:m, THEO_IS_MODLOSS_IDX] = 0.0
     x_theo[:m, THEO_CHARGE_IDX] = nb.float32(theo_peaks.precursor_charge)
     x_theo[:m, THEO_ISOTOPE_INDEX_IDX] = theo_peaks.precursor_isotope_index_arr
     x_theo[:m, THEO_CLEAVAGE_INDEX_IDX] = 0.0
@@ -66,10 +67,11 @@ def get_x_theo(theo_peaks: TheoreticalPeakContainer, x_theo: np.ndarray = None):
     cleavage_index_arr = theo_peaks.fragment_cleavage_index_arr
 
     x_theo[m:n, THEO_PRED_INTENSITY_IDX] = theo_peaks.fragment_intensity_arr
-    # only monoisotopic peaks
+    # only monoisotopic peaks (fragment_mz_arr row 0 is M)
     x_theo[m:n, THEO_MZ_IDX] = theo_peaks.fragment_mz_arr[0]
     x_theo[m:n, THEO_IS_PRECURSOR_IDX] = 0.0
     x_theo[m:n, THEO_IS_PREFIX_IDX] = theo_peaks.fragment_is_prefix_arr
+    x_theo[m:n, THEO_IS_MODLOSS_IDX] = theo_peaks.fragment_is_modloss_arr
     x_theo[m:n, THEO_CHARGE_IDX] = theo_peaks.fragment_charge_arr
     x_theo[m:n, THEO_ISOTOPE_INDEX_IDX] = 0.0
     x_theo[m:n, THEO_CLEAVAGE_INDEX_IDX] = cleavage_index_arr
@@ -116,13 +118,17 @@ def _set_x_exp(
             theo_charge = theo_peaks.precursor_charge
             theo_isotope_index = theo_peaks.precursor_isotope_index_arr[theo_i]
             theo_is_prefix = False
+            theo_is_modloss = False
             theo_cleavage_index = 0.0
             theo_rev_cleavage_index = 0.0
         else:
             theo_i = theo_i_ % num_fragments
-            theo_isotope_index = theo_i_ // num_fragments
+            theo_isotope_index = theo_peaks.fragment_isotope_index_arr[
+                theo_i_ // num_fragments
+            ]
             theo_charge = theo_peaks.fragment_charge_arr[theo_i]
             theo_is_prefix = theo_peaks.fragment_is_prefix_arr[theo_i]
+            theo_is_modloss = theo_peaks.fragment_is_modloss_arr[theo_i]
             theo_cleavage_index = theo_peaks.fragment_cleavage_index_arr[theo_i]
             theo_rev_cleavage_index = seq_len - 2 - theo_cleavage_index
 
@@ -130,6 +136,10 @@ def _set_x_exp(
             fn = peak_df.frame_num_arr[exp_i]
             fi = frame_num_map.frame_num_to_index_arr[fn]
             if (fi >= min_frame_index) and (fi <= max_frame_index):
+                # Tokens past the buffer are dropped; find_peak_groups caps
+                # the token count the same way, and M-1 tokens come last.
+                if counter >= x_exp.shape[0]:
+                    break
                 mz = peak_df.mz_arr[exp_i]
                 ab = peak_df.ab_arr[exp_i]
                 z_score = peak_df.z_score_arr[exp_i]
@@ -142,6 +152,7 @@ def _set_x_exp(
                 x_exp[counter, EXP_Z_SCORE_IDX] = z_score
                 x_exp[counter, EXP_IS_PRECURSOR_IDX] = is_precursor
                 x_exp[counter, EXP_IS_PREFIX_IDX] = theo_is_prefix
+                x_exp[counter, EXP_IS_MODLOSS_IDX] = theo_is_modloss
                 x_exp[counter, EXP_CHARGE_IDX] = theo_charge
                 x_exp[counter, EXP_ISOTOPE_INDEX_IDX] = theo_isotope_index
                 x_exp[counter, EXP_MS_LEVEL_IDX] = ms_level
@@ -155,9 +166,14 @@ def _set_x_exp(
                 if (x_rank is not None) and (is_precursor == False):
                     x_rank[counter] = num_fragments - theo_i - 1
 
-                # matched peak indices over the whole RT window, for
-                # peak-sharing clustering (delpi.search.clustering)
-                if (x_ind is not None) and (ind_count < x_ind.shape[0]):
+                # matched M/M+1 peak indices over the whole RT window, for
+                # peak-sharing clustering (delpi.search.clustering); M-1
+                # peaks are other ions' evidence, not this PmSM's
+                if (
+                    (x_ind is not None)
+                    and (theo_isotope_index >= 0)
+                    and (ind_count < x_ind.shape[0])
+                ):
                     x_ind[ind_count] = exp_i
                     ind_count += 1
                 counter += 1
@@ -192,7 +208,7 @@ def get_x_exp(
 
     if x_exp is None:
         x_exp = np.empty(
-            (512, EXP_TOKEN_DIM),
+            (MAX_EXP_PEAK_TOKENS, EXP_TOKEN_DIM),
             dtype=np.float32,
         )
 

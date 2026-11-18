@@ -167,8 +167,11 @@ def get_ms1_area(x_exp: np.ndarray, ms1_scale_arr: np.ndarray):
         y = np.zeros(RT_WINDOW_LEN, dtype=np.float32)
         for j in range(M):
             t = nb.int8(x_arr[j, EXP_TIME_INDEX_IDX])
-            if (x_arr[j, EXP_IS_PRECURSOR_IDX] > 0) and (
-                x_arr[j, EXP_MS_LEVEL_IDX] == 1
+            # precursor MS1 isotopes M, M+1, M+2 (M-1 is not this precursor's)
+            if (
+                (x_arr[j, EXP_IS_PRECURSOR_IDX] > 0)
+                and (x_arr[j, EXP_MS_LEVEL_IDX] == 1)
+                and (x_arr[j, EXP_ISOTOPE_INDEX_IDX] >= 0)
             ):
                 y[t] += x_arr[j, EXP_AB_IDX]
                 has_ms1_peak = True
@@ -197,8 +200,11 @@ def get_ms1_area_dda(x_exp: np.ndarray, ms1_scale_arr: np.ndarray):
 
         for j in range(M):
             t = nb.int8(x_arr[j, EXP_TIME_INDEX_IDX])
-            if (x_arr[j, EXP_IS_PRECURSOR_IDX] > 0) and (
-                x_arr[j, EXP_MS_LEVEL_IDX] == 1
+            # precursor MS1 isotopes M, M+1, M+2 (M-1 is not this precursor's)
+            if (
+                (x_arr[j, EXP_IS_PRECURSOR_IDX] > 0)
+                and (x_arr[j, EXP_MS_LEVEL_IDX] == 1)
+                and (x_arr[j, EXP_ISOTOPE_INDEX_IDX] >= 0)
             ):
                 y[t] += x_arr[j, EXP_AB_IDX]
                 has_ms1_peak = True

@@ -7,7 +7,9 @@ from delpi.database.numba.spec_lib_container import (
     SpectralLibContainer,
     TheoreticalPeakContainer,
 )
-from delpi.constants import PROTON_MASS, C13C12_MASS_DIFF
+from delpi.constants import PROTON_MASS, C13C12_MASS_DIFF, FRAGMENT_ISOTOPE_INDICES
+
+_FRAGMENT_ISOTOPE_INDEX_ARR = np.array(FRAGMENT_ISOTOPE_INDICES, dtype=np.int8)
 
 
 @nb.njit(nogil=True, cache=True)
@@ -95,15 +97,16 @@ def get_theoretical_peaks(
     fragment_is_prefix_arr = speclib_container.speclib_is_prefix_arr[st:ed]
     fragment_charge_arr = speclib_container.speclib_charge_arr[st:ed]
 
+    # rows follow FRAGMENT_ISOTOPE_INDICES: M, M+1, then M-1
+    fragment_isotope_index_arr = _FRAGMENT_ISOTOPE_INDEX_ARR[:max_isotopes]
     fragment_mz_arr = np.empty((max_isotopes, num_fragments), dtype=np.float32)
-    for i in range(max_isotopes):
-        fragment_mz_arr[i, :] = speclib_container.speclib_mz_arr[st:ed]
-
-    for iso_index in range(1, max_isotopes):
+    for iso_row in range(max_isotopes):
+        iso_index = fragment_isotope_index_arr[iso_row]
         for i in range(num_fragments):
-            fragment_mz_arr[iso_index, i] += (
-                C13C12_MASS_DIFF * iso_index
-            ) / fragment_charge_arr[i]
+            fragment_mz_arr[iso_row, i] = (
+                speclib_container.speclib_mz_arr[st + i]
+                + (C13C12_MASS_DIFF * iso_index) / fragment_charge_arr[i]
+            )
 
     return TheoreticalPeakContainer(
         sequence_length=seq_len,
@@ -117,6 +120,7 @@ def get_theoretical_peaks(
         fragment_cleavage_index_arr=fragment_cleavage_index_arr,
         fragment_intensity_arr=fragment_intensity_arr,
         fragment_is_modloss_arr=speclib_container.speclib_is_modloss_arr[st:ed],
+        fragment_isotope_index_arr=fragment_isotope_index_arr,
     )
 
 

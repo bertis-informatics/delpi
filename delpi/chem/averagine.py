@@ -1,7 +1,7 @@
 import polars as pl
 
 from delpi import DATA_DIR
-from delpi.constants import C13C12_MASS_DIFF
+from delpi.constants import C13C12_MASS_DIFF, PRECURSOR_ISOTOPE_INDICES
 
 averagine_df = pl.read_parquet(DATA_DIR / "averagine.parquet").with_columns(
     pl.col("mass").cast(pl.UInt32).alias("nominal_mass"), pl.col("envelope")
@@ -9,6 +9,18 @@ averagine_df = pl.read_parquet(DATA_DIR / "averagine.parquet").with_columns(
 
 
 def get_precursor_lib_df(max_isotopes, min_mass=300, max_mass=7000):
+    """Averagine isotopes PRECURSOR_ISOTOPE_INDICES[:max_isotopes] per mass.
+
+    Each mass has max_isotopes rows: the non-negative isotopes in
+    predicted-intensity rank order, then M-1 (predicted intensity 0), if
+    selected, last.
+    """
+    isotopes = PRECURSOR_ISOTOPE_INDICES[:max_isotopes]
+    if len(isotopes) != max_isotopes or max_isotopes < 1:
+        raise ValueError(
+            f"max_isotopes must be in [1, {len(PRECURSOR_ISOTOPE_INDICES)}]"
+        )
+    max_isotope_index = max(isotopes)
 
     get_offset_mass = (
         (pl.col("isotope_index") * C13C12_MASS_DIFF)
@@ -26,16 +38,27 @@ def get_precursor_lib_df(max_isotopes, min_mass=300, max_mass=7000):
             pl.col("envelope")
             .list.eval(pl.element().rank(descending=True).cast(pl.UInt8))
             .alias("rank"),
-            pl.int_ranges(pl.col("envelope").list.len(), dtype=pl.UInt8).alias(
+            pl.int_ranges(pl.col("envelope").list.len(), dtype=pl.Int8).alias(
                 "isotope_index"
             ),
         )
         .explode(["isotope_index", "envelope", "rank"], empty_as_null=True)
-        .filter(pl.col("isotope_index") < max_isotopes)
+        .filter(pl.col("isotope_index") <= max_isotope_index)
         .rename({"envelope": "predicted_intensity"})
-        .sort(["mass", "rank"])
-        .with_columns(get_offset_mass, get_normalized_intensity)
     )
+    if -1 in isotopes:
+        m1_df = avg_df.unique("mass").with_columns(
+            pl.lit(-1, dtype=pl.Int8).alias("isotope_index"),
+            pl.lit(0.0, dtype=avg_df.schema["predicted_intensity"]).alias(
+                "predicted_intensity"
+            ),
+            pl.lit(255, dtype=pl.UInt8).alias("rank"),
+        )
+        avg_df = pl.concat([avg_df, m1_df.select(avg_df.columns)])
+
+    avg_df = avg_df.sort(
+        ["mass", pl.col("isotope_index") < 0, "rank"]
+    ).with_columns(get_offset_mass, get_normalized_intensity)
 
     return avg_df
 

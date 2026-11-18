@@ -9,7 +9,13 @@ from delpi.database.utils import create_peptidoform_df
 from delpi.chem.averagine import get_precursor_lib_df
 from delpi.lcms.base_spectra import _readonly
 from delpi.utils.yaml_file import load_yaml
-from delpi.constants import MAX_FRAGMENTS
+from delpi.constants import (
+    DEFAULT_FRAGMENT_ISOTOPES,
+    DEFAULT_PRECURSOR_ISOTOPES,
+    FRAGMENT_ISOTOPE_INDICES,
+    MAX_FRAGMENTS,
+    PRECURSOR_ISOTOPE_INDICES,
+)
 from delpi.database.spec_lib_schema import (
     SPECLIB_SCHEMA,
     fragment_offsets,
@@ -22,9 +28,18 @@ class SpectralLibReader:
         self,
         peptide_db_path: str,
         max_fragments: int | None = None,
-        max_precursor_isotopes: int = 3,
-        max_fragment_isotopes: int = 2,
+        max_precursor_isotopes: int = DEFAULT_PRECURSOR_ISOTOPES,
+        max_fragment_isotopes: int = DEFAULT_FRAGMENT_ISOTOPES,
     ) -> None:
+        # Isotope rows are the first entries of PRECURSOR/FRAGMENT_ISOTOPE_INDICES.
+        if not 1 <= max_precursor_isotopes <= len(PRECURSOR_ISOTOPE_INDICES):
+            raise ValueError(
+                f"max_precursor_isotopes must be in [1, {len(PRECURSOR_ISOTOPE_INDICES)}]"
+            )
+        if not 1 <= max_fragment_isotopes <= len(FRAGMENT_ISOTOPE_INDICES):
+            raise ValueError(
+                f"max_fragment_isotopes must be in [1, {len(FRAGMENT_ISOTOPE_INDICES)}]"
+            )
 
         self.peptide_db_path = Path(peptide_db_path)
         self.max_fragment_isotopes = max_fragment_isotopes

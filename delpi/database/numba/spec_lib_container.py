@@ -59,3 +59,5 @@ class TheoreticalPeakContainer(NamedTuple):
     fragment_cleavage_index_arr: np.ndarray
     fragment_intensity_arr: np.ndarray
     fragment_is_modloss_arr: np.ndarray
+    # isotope index of each fragment_mz_arr row (FRAGMENT_ISOTOPE_INDICES order)
+    fragment_isotope_index_arr: np.ndarray

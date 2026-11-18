@@ -27,12 +27,14 @@ class TheoPeakInput(InputEnum):
 
     IS_PRECURSOR = "is_precursor", 2, "bool"
     IS_PREFIX = "is_prefix", 3, "bool"
-    CHARGE = "charge", 4, "uint8"
-    ISOTOPE_INDEX = "isotope_index", 5, "uint8"
+    IS_MODLOSS = "is_modloss", 4, "bool"  # H3O4P loss fragment
+    CHARGE = "charge", 5, "uint8"  # 0 only for zero-padding tokens
+    # precursors M-1, M, M+1, M+2 (-1..2); fragments monoisotopic (0)
+    ISOTOPE_INDEX = "isotope_index", 6, "int8"
 
     # 2D positional encoding
-    CLEAVAGE_INDEX = "cleavage_index", 6, "uint8"
-    REV_CLEAVAGE_INDEX = "reverse_cleavage_index", 7, "uint8"
+    CLEAVAGE_INDEX = "cleavage_index", 7, "uint8"
+    REV_CLEAVAGE_INDEX = "reverse_cleavage_index", 8, "uint8"
 
 
 class ExpPeakInput(InputEnum):
@@ -43,15 +45,17 @@ class ExpPeakInput(InputEnum):
     MS_LEVEL = "ms_level", 3, "uint8"
     IS_PRECURSOR = "is_precursor", 4, "bool"
     IS_PREFIX = "is_prefix", 5, "bool"
-    CHARGE = "charge", 6, "uint8"
-    ISOTOPE_INDEX = "isotope_index", 7, "uint8"
+    IS_MODLOSS = "is_modloss", 6, "bool"  # H3O4P loss fragment
+    CHARGE = "charge", 7, "uint8"
+    # precursors M-1, M, M+1, M+2 (-1..2); fragments M-1, M, M+1 (-1..1)
+    ISOTOPE_INDEX = "isotope_index", 8, "int8"
 
     # 1D positional encoding
-    TIME_INDEX = "time_index", 8, "uint8"
+    TIME_INDEX = "time_index", 9, "uint8"
 
     # 2D positional encoding
-    CLEAVAGE_INDEX = "cleavage_index", 9, "uint8"
-    REV_CLEAVAGE_INDEX = "reverse_cleavage_index", 10, "uint8"
+    CLEAVAGE_INDEX = "cleavage_index", 10, "uint8"
+    REV_CLEAVAGE_INDEX = "reverse_cleavage_index", 11, "uint8"
 
 
 THEORETICAL_PEAK = TheoPeakInput.field_names()

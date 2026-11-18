@@ -15,6 +15,7 @@ from delpi.search.dia.peak_token import (
     EXP_Z_SCORE_IDX,
     EXP_IS_PRECURSOR_IDX,
     EXP_IS_PREFIX_IDX,
+    EXP_IS_MODLOSS_IDX,
     EXP_CHARGE_IDX,
     EXP_ISOTOPE_INDEX_IDX,
     EXP_MS_LEVEL_IDX,
@@ -57,13 +58,17 @@ def _set_x_exp(
             theo_charge = theo_peaks.precursor_charge
             theo_isotope_index = theo_peaks.precursor_isotope_index_arr[theo_i_]
             theo_is_prefix = False
+            theo_is_modloss = False
             theo_cleavage_index = 0.0
             theo_rev_cleavage_index = 0.0
         else:
             theo_i = theo_i_ % num_fragments
-            theo_isotope_index = theo_i_ // num_fragments
+            theo_isotope_index = theo_peaks.fragment_isotope_index_arr[
+                theo_i_ // num_fragments
+            ]
             theo_charge = theo_peaks.fragment_charge_arr[theo_i]
             theo_is_prefix = theo_peaks.fragment_is_prefix_arr[theo_i]
+            theo_is_modloss = theo_peaks.fragment_is_modloss_arr[theo_i]
             theo_cleavage_index = theo_peaks.fragment_cleavage_index_arr[theo_i]
             theo_rev_cleavage_index = seq_len - 2 - theo_cleavage_index
 
@@ -72,6 +77,10 @@ def _set_x_exp(
             time_idx = lookup_time_index(frame_num_key_arr, time_index_val_arr, fn)
 
             if time_idx >= 0:
+                # Tokens past the buffer are dropped; find_peak_groups caps
+                # the token count the same way, and M-1 tokens come last.
+                if counter >= x_exp.shape[0]:
+                    break
                 mz = peak_df.mz_arr[exp_i]
                 ab = peak_df.ab_arr[exp_i]
                 z_score = peak_df.z_score_arr[exp_i]
@@ -83,6 +92,7 @@ def _set_x_exp(
                 x_exp[counter, EXP_Z_SCORE_IDX] = z_score
                 x_exp[counter, EXP_IS_PRECURSOR_IDX] = is_precursor
                 x_exp[counter, EXP_IS_PREFIX_IDX] = theo_is_prefix
+                x_exp[counter, EXP_IS_MODLOSS_IDX] = theo_is_modloss
                 x_exp[counter, EXP_CHARGE_IDX] = theo_charge
                 x_exp[counter, EXP_ISOTOPE_INDEX_IDX] = theo_isotope_index
                 x_exp[counter, EXP_MS_LEVEL_IDX] = ms_level
@@ -96,16 +106,18 @@ def _set_x_exp(
                 if (x_rank is not None) and (is_precursor == False):
                     x_rank[counter] = num_fragments - theo_i - 1
 
-                # matched peak indices over the whole RT window, for
-                # peak-sharing clustering (delpi.search.clustering)
-                if (x_ind is not None) and (ind_count < x_ind.shape[0]):
+                # matched M/M+1 peak indices over the whole RT window, for
+                # peak-sharing clustering (delpi.search.clustering); M-1
+                # peaks are other ions' evidence, not this PmSM's
+                if (
+                    (x_ind is not None)
+                    and (theo_isotope_index >= 0)
+                    and (ind_count < x_ind.shape[0])
+                ):
                     x_ind[ind_count] = exp_i
                     ind_count += 1
 
                 counter += 1
-                if counter >= x_exp.shape[0]:
-                    print("Warning: MAX_EXP_PEAK_TOKENS exceeded.")
-                    break
 
     # abundance scaling
     if max_ab > 0:

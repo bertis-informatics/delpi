@@ -12,7 +12,7 @@ from delpi.database.numba.spec_lib_utils import (
 )
 from delpi.utils.signal import find_local_maxima, nms_peaks
 from delpi.utils.peak import find_peak_index
-from delpi.constants import QUANT_FRAGMENTS, MIN_SEARCH_FRAGMENTS
+from delpi.constants import MAX_EXP_PEAK_TOKENS, QUANT_FRAGMENTS, MIN_SEARCH_FRAGMENTS
 
 
 class PeakIndexContainer(NamedTuple):
@@ -295,16 +295,34 @@ def find_peak_groups(
         precursor_ms2_indices[precursor_index0, 0] = pc_ms2_st
         precursor_ms2_indices[precursor_index0, 1] = pc_ms2_ed
 
+        # Candidate filtering counts precursor and fragment peaks without M-1.
+        # M-1 rows (last) only add model tokens; they are counted separately
+        # so that peak_count_arr equals each PmSM's token count.
+        n_pc = np.sum(theo_peaks.precursor_isotope_index_arr >= 0)
+        n_fg = num_fragments * np.sum(theo_peaks.fragment_isotope_index_arr >= 0)
         all_peak_count_arr = count_peaks(
             ms1_peak_df,
             ms2_peak_df,
             frame_num_map,
-            ms1_pc_st_indices=pc_ms1_st,
-            ms1_pc_ed_indices=pc_ms1_ed,
-            ms2_pc_st_indices=pc_ms2_st,
-            ms2_pc_ed_indices=pc_ms2_ed,
-            ms2_fg_st_indices=ms2_st,
-            ms2_fg_ed_indices=ms2_ed,
+            ms1_pc_st_indices=pc_ms1_st[:n_pc],
+            ms1_pc_ed_indices=pc_ms1_ed[:n_pc],
+            ms2_pc_st_indices=pc_ms2_st[:n_pc],
+            ms2_pc_ed_indices=pc_ms2_ed[:n_pc],
+            ms2_fg_st_indices=ms2_st[:n_fg],
+            ms2_fg_ed_indices=ms2_ed[:n_fg],
+            min_frame_index=min_frame_index,
+            max_frame_index=max_frame_index,
+        )
+        m1_peak_count_arr = count_peaks(
+            ms1_peak_df,
+            ms2_peak_df,
+            frame_num_map,
+            ms1_pc_st_indices=pc_ms1_st[n_pc:],
+            ms1_pc_ed_indices=pc_ms1_ed[n_pc:],
+            ms2_pc_st_indices=pc_ms2_st[n_pc:],
+            ms2_pc_ed_indices=pc_ms2_ed[n_pc:],
+            ms2_fg_st_indices=ms2_st[n_fg:],
+            ms2_fg_ed_indices=ms2_ed[n_fg:],
             min_frame_index=min_frame_index,
             max_frame_index=max_frame_index,
         )
@@ -373,13 +391,22 @@ def find_peak_groups(
             peak_group_arr = peak_group_arr[ii]
             sum_peak_count_arr = sum_peak_count_arr[ii]
 
+        ## experimental token count per peak group (batching); capped like
+        ## the token writer (get_x_exp)
+        token_count_arr = sum_peak_count_arr + sum_neighborhood(
+            m1_peak_count_arr, rt_window_radius, peak_group_arr
+        )
+        token_count_arr = np.minimum(token_count_arr, MAX_EXP_PEAK_TOKENS).astype(
+            np.uint16
+        )
+
         ## save results
         # peak_group_arr += min_frame_index
         n_groups = peak_group_arr.shape[0]
         for k in range(n_groups):
             peak_group_arr[k] += min_frame_index
         peak_group_results[precursor_index0] = peak_group_arr
-        peak_count_results[precursor_index0] = sum_peak_count_arr
+        peak_count_results[precursor_index0] = token_count_arr
         num_peak_groups[precursor_index0] = n_groups
 
     num_peak_groups = np.cumsum(num_peak_groups)

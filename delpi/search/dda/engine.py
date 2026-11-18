@@ -32,7 +32,7 @@ from delpi.search.clustering import cluster_by_peak_sharing, compact_peak_indice
 from delpi.search.dia.lfq_utils import get_ms1_area_dda, get_pmsm_median_intensity
 from delpi.utils.device_ctx import make_inference_contexts
 from delpi.utils.prefetch import Prefetcher, pin_numpy_tuple
-from delpi.constants import ISOLATION_LOWER_TOL, ISOLATION_UPPER_TOL
+from delpi.constants import ISOLATION_LOWER_TOL, ISOLATION_UPPER_TOL, MAX_EXP_PEAK_TOKENS
 from delpi.model.input import THEORETICAL_PEAK, EXPERIMENTAL_PEAK
 
 logger = logging.getLogger(__name__)
@@ -240,12 +240,16 @@ class DDASearchEngine(BaseSearchEngine):
         ms1_peak_df = run.ms1_map.get_peak_container()
 
         X_theo_tensor = torch.empty(
-            (batch_size, 19, len(THEORETICAL_PEAK)),
+            (
+                batch_size,
+                speclib_reader.max_fragments + speclib_reader.max_precursor_isotopes,
+                len(THEORETICAL_PEAK),
+            ),
             dtype=torch.float16,
             device=self.device,
         )
         X_exp_tensor = torch.rand(
-            (batch_size, 512, len(EXPERIMENTAL_PEAK)),
+            (batch_size, MAX_EXP_PEAK_TOKENS, len(EXPERIMENTAL_PEAK)),
             dtype=torch.float16,
             device=self.device,
         )

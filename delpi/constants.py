@@ -27,6 +27,22 @@ COMMON_NEUTRAL_LOSS_INDEX = {
 }
 
 MAX_FRAGMENTS = 16
+
+# Isotopes of theoretical peaks (precursor: averagine rows, fragment:
+# TheoreticalPeakContainer.fragment_mz_arr rows); a library reader keeps the
+# first max_{precursor,fragment}_isotopes entries. Non-negative isotopes come
+# first so the leading rows keep their previous layout (fragment row 0 is M;
+# quick search and RT bootstrap read only the first row). M-1 is last: its
+# peaks are model input tokens only, not counted for candidate filtering,
+# clustering or quantification. Precursor M..M+2 rows are ordered by
+# predicted averagine intensity; fragment rows follow the tuple order.
+PRECURSOR_ISOTOPE_INDICES = (0, 1, 2, -1)
+FRAGMENT_ISOTOPE_INDICES = (0, 1, -1)
+DEFAULT_PRECURSOR_ISOTOPES = len(PRECURSOR_ISOTOPE_INDICES)
+DEFAULT_FRAGMENT_ISOTOPES = len(FRAGMENT_ISOTOPE_INDICES)
+
+# Experimental token buffer per PmSM; tokens beyond it are dropped (M-1 last).
+MAX_EXP_PEAK_TOKENS = 512
 # Precursors with fewer stored (nonzero-intensity) fragments are not searched.
 MIN_SEARCH_FRAGMENTS = 5
 DEFAULT_Q_VALUE_CUTOFF = 0.01
