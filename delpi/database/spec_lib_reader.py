@@ -1,3 +1,4 @@
+from functools import cached_property
 from pathlib import Path
 
 import polars as pl
@@ -229,20 +230,34 @@ class SpectralLibReader:
 
         return speclib_container
 
+    @cached_property
+    def _precursor_mz_arr(self) -> np.ndarray:
+        # precursor_df is sorted by precursor_mz; precursor_index is the row.
+        df = self.all_precursor_df.select("precursor_mz").collect()
+        return df.to_series().to_numpy()
+
     def _get_index_range_by_mz(
         self, min_precursor_mz: float, max_precursor_mz: float
     ) -> tuple:
-        return (
-            self.all_precursor_df.filter(
-                pl.col("precursor_mz").is_between(min_precursor_mz, max_precursor_mz)
-            )
-            .select(
-                min_idx=pl.col("precursor_index").min(),
-                max_idx=pl.col("precursor_index").max(),
-            )
-            .collect()
-            .row(0)
-        )
+        """Precursors with min <= precursor_mz <= max, by binary search.
+
+        Filtering every precursor took ~0.14 s per window for human_global and
+        ~1.1 s for human_phospho. Bounds are converted to the column dtype
+        (a mixed-dtype searchsorted copies the column), rounded inward so the
+        result matches a float64 comparison.
+        """
+        mz = self._precursor_mz_arr
+        lower = mz.dtype.type(min_precursor_mz)
+        if lower < min_precursor_mz:
+            lower = np.nextafter(lower, mz.dtype.type(np.inf))
+        upper = mz.dtype.type(max_precursor_mz)
+        if upper > max_precursor_mz:
+            upper = np.nextafter(upper, mz.dtype.type(-np.inf))
+        start = int(np.searchsorted(mz, lower, side="left"))
+        stop = int(np.searchsorted(mz, upper, side="right"))
+        if start >= stop:
+            return None, None
+        return start, stop - 1
 
     def read_by_mz_range(
         self, min_precursor_mz: float, max_precursor_mz: float
