@@ -1,27 +1,26 @@
 import math
-import logging
+import ctypes
 from contextlib import contextmanager, ExitStack
+from functools import lru_cache
 from typing import Iterator, Tuple
 
 import numpy as np
 import numba as nb
 
-logger = logging.getLogger(__name__)
 
-try:
-    import clr
+@lru_cache(maxsize=1)
+def _dotnet_handles():
+    """Load optional .NET bindings only when a .NET array needs to be pinned."""
+    try:
+        import clr
 
-    clr.AddReference("System")
-
-    import ctypes
-
-    from System.Runtime.InteropServices import GCHandle, GCHandleType
-except Exception as e:
-    logger.exception(
-        "pythonnet/.NET runtime import failed. "
-        f"Optional dependency unavailable: pythonnet/.NET import failed ({type(e).__name__}: {e}). "
-        "Thermo RAW reader functionality will be disabled."
-    )
+        clr.AddReference("System")
+        from System.Runtime.InteropServices import GCHandle, GCHandleType
+    except Exception as error:
+        raise ImportError(
+            "Converting .NET arrays requires pythonnet and a working .NET runtime"
+        ) from error
+    return GCHandle, GCHandleType
 
 
 def DotNetArrayToNPArray(src, dtype=np.float64):
@@ -37,6 +36,7 @@ def DotNetArrayToNPArray(src, dtype=np.float64):
     """
     if src is None:
         return np.array([], dtype=dtype)
+    GCHandle, GCHandleType = _dotnet_handles()
     src_hndl = GCHandle.Alloc(src, GCHandleType.Pinned)
     try:
         src_ptr = src_hndl.AddrOfPinnedObject().ToInt64()
@@ -51,15 +51,10 @@ def DotNetArrayToNPArray(src, dtype=np.float64):
 
 # Maps a NumPy source dtype to (the expected .NET array element type name,
 # the equivalent ctypes scalar type) used by `pinned_dotnet_array_view`.
-try:
-    _DOTNET_ELEMENT_TYPES = {
-        np.dtype(np.float64): ("Double", ctypes.c_double),
-        np.dtype(np.float32): ("Single", ctypes.c_float),
-    }
-except NameError:
-    # pythonnet/.NET unavailable (see import guard above); Thermo-specific
-    # helpers below simply won't be usable in that case.
-    _DOTNET_ELEMENT_TYPES = {}
+_DOTNET_ELEMENT_TYPES = {
+    np.dtype(np.float64): ("Double", ctypes.c_double),
+    np.dtype(np.float32): ("Single", ctypes.c_float),
+}
 
 
 def pin_dotnet_array(
@@ -87,6 +82,7 @@ def pin_dotnet_array(
     if ctypes_type is None:
         raise TypeError(f"Unsupported source_dtype for pinned view: {source_dtype!r}")
 
+    GCHandle, GCHandleType = _dotnet_handles()
     if validate:
         element_type_name = src.GetType().GetElementType().Name
         if expected_name is not None and element_type_name != expected_name:

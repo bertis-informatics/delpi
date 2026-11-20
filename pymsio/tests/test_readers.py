@@ -1,7 +1,13 @@
+import os
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
 from typing import List
 
 import numpy as np
 import polars as pl
+import pytest
 
 from pymsio.readers.ms_data import PeakArray
 
@@ -423,3 +429,112 @@ class TestThermoReaderOptimizations:
         assert (peak_stop >= peak_start).all()
         assert (peak_start[1:] >= peak_stop[:-1]).all()
         assert peak_stop[-1] == len(ms_data.peaks.mz)
+
+
+# Optional .NET import and array-conversion regressions.
+
+
+def run_without_dotnet(code):
+    root = Path(__file__).resolve().parents[1]
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(root) + os.pathsep + env.get("PYTHONPATH", "")
+    prefix = """
+import importlib.abc
+import sys
+
+attempted = []
+class NoDotNet(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in {'clr', 'pythonnet', 'System'}:
+            attempted.append(fullname)
+            raise ImportError('Simulated missing .NET runtime')
+sys.meta_path.insert(0, NoDotNet())
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(prefix) + textwrap.dedent(code)],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_common_imports_and_empty_array_helpers_never_load_dotnet():
+    run_without_dotnet("""
+import numpy as np
+from pymsio import MassSpecData, MassSpecFileReader, MzmlFileReader, ReaderFactory
+from pymsio.readers import get_reader
+from pymsio.readers.utils import (
+    get_frame_num_to_index_arr, DotNetArrayToNPArray,
+    pin_dotnet_array, pinned_dotnet_array_view,
+)
+np.testing.assert_array_equal(get_frame_num_to_index_arr(np.array([1, 3])), [0, 0, 0, 1])
+assert DotNetArrayToNPArray(None).size == 0
+view, handle = pin_dotnet_array([])
+assert view.size == 0 and handle is None
+with pinned_dotnet_array_view(None) as view:
+    assert view.size == 0
+import pymsio
+from pymsio import *
+assert 'ThermoRawReader' not in globals()
+assert 'ThermoRawReader' in dir(pymsio)
+assert attempted == [], attempted
+assert 'pymsio.readers.thermo' not in sys.modules
+""")
+
+
+def test_explicit_thermo_access_preserves_api_and_reports_missing_runtime():
+    run_without_dotnet("""
+import pymsio
+assert attempted == []
+from pymsio import ThermoRawReader
+from pymsio.readers.thermo import ThermoRawReader as DirectReader
+assert ThermoRawReader is DirectReader
+assert 'clr' in attempted, attempted
+try:
+    pymsio.ReaderFactory.get_reader('unavailable.raw')
+except RuntimeError as error:
+    assert 'Failed to load Thermo DLLs' in str(error)
+else:
+    raise AssertionError('Thermo reading must require the runtime')
+""")
+
+
+def test_nonempty_dotnet_conversion_requires_runtime_only_when_called():
+    run_without_dotnet("""
+import numpy as np
+from pymsio.readers.utils import pin_dotnet_array, DotNetArrayToNPArray
+assert attempted == []
+for convert in (pin_dotnet_array, DotNetArrayToNPArray):
+    try:
+        convert(np.array([1.0]))
+    except ImportError as error:
+        assert 'working .NET runtime' in str(error)
+    else:
+        raise AssertionError('Nonempty .NET conversion must require the runtime')
+assert 'clr' in attempted, attempted
+""")
+
+
+def test_dotnet_array_conversion_when_runtime_is_available():
+    try:
+        import clr
+
+        clr.AddReference("System")
+        from System import Array, Double, Single
+    except Exception as error:
+        pytest.skip(f"Optional .NET runtime unavailable: {error}")
+
+    from pymsio.readers.utils import DotNetArrayToNPArray, pinned_dotnet_array_view
+
+    source = Array[Double]([1.25, -2.5, 3.0])
+    copied = DotNetArrayToNPArray(source, dtype=np.float32)
+    assert copied.dtype == np.float32
+    source[0] = 9.0
+    np.testing.assert_array_equal(copied, [1.25, -2.5, 3.0])
+    for element_type, dtype in ((Double, np.float64), (Single, np.float32)):
+        source = Array[element_type]([1.25, -2.5, 3.0])
+        with pinned_dotnet_array_view(source, source_dtype=dtype) as view:
+            assert view.dtype == dtype and not view.flags.writeable
+            np.testing.assert_array_equal(view, [1.25, -2.5, 3.0])

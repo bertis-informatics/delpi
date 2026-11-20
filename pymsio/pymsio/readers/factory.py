@@ -2,7 +2,6 @@ from pathlib import Path
 from typing import Union
 
 from .base import MassSpecFileReader
-from .thermo import ThermoRawReader
 from .mzml import MzmlFileReader
 
 
@@ -33,6 +32,8 @@ class ReaderFactory:
             )
 
         if ext == ".raw":
+            from .thermo import ThermoRawReader
+
             reader = ThermoRawReader(filepath)
         elif ext in (".mzml", ".mzml.gz"):
             reader = MzmlFileReader(filepath)
