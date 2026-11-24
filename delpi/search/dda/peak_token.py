@@ -110,12 +110,13 @@ def _set_x_exp(
                 if (x_rank is not None) and (is_precursor == False):
                     x_rank[counter] = num_fragments - theo_i - 1
 
-                # matched M/M+1 peak indices over the whole RT window, for
-                # peak-sharing clustering (delpi.search.clustering); M-1
-                # peaks are other ions' evidence, not this PmSM's
+                # M/M+1 peak indices of the center spectrum, for peak NMS.
+                # Other bins are sampled per precursor, so only the center
+                # spectrum is shared by competing PmSMs.
                 if (
                     (x_ind is not None)
                     and (theo_isotope_index >= 0)
+                    and (time_idx == time_index_val_arr.shape[0] // 2)
                     and (ind_count < x_ind.shape[0])
                 ):
                     x_ind[ind_count] = exp_i

@@ -39,6 +39,10 @@ from delpi.search.tl.second_pass import (
     select_paired_decoys,
 )
 from delpi.search.pmsm_assignment import assign_pmsms_across_runs
+from delpi.search.peak_nms import (
+    DEFAULT_EXPLAINED_FRACTION,
+    select_pmsms_by_peak_nms,
+)
 from delpi.search.dia.max_lfq import maxlfq
 from delpi.utils.mp import get_multiprocessing_context
 from delpi.database.utils import get_modified_sequence
@@ -793,14 +797,27 @@ class SearchManager:
         )
         result_aggregator.write_back_scores(group_key, scored_df)
 
-        # 2) Filter out low-scoring PmSMs before assignment
-        max_score = pl.col("score").max().over(["precursor_index", "run_index"])
-        cutoff = pl.min_horizontal(max_score - 1.0, max_score * 0.5)
-        scored_df = scored_df.filter(pl.col("score") > cutoff)
+        if search_config.acquisition_method == "DDA":
+            # 2-3) DDA: peak NMS (alignment groups get too large for the DP)
+            pmsm_df = select_pmsms_by_peak_nms(
+                scored_df,
+                result_aggregator,
+                group_key,
+                threshold=search_config.config.get(
+                    "peak_nms_threshold", DEFAULT_EXPLAINED_FRACTION
+                ),
+            )
+        else:
+            # 2) DIA: filter out low-scoring PmSMs before assignment
+            max_score = pl.col("score").max().over(["precursor_index", "run_index"])
+            cutoff = pl.min_horizontal(max_score - 1.0, max_score * 0.5)
+            scored_df = scored_df.filter(pl.col("score") > cutoff)
 
-        # 3) assign one PmSM per run/precursor (score + median intensity + alignment-group DP)
-        intensity_weight = self.search_config.config.get("intensity_weight", 4.0)
-        pmsm_df = assign_pmsms_across_runs(scored_df, intensity_weight=intensity_weight)
+            # 3) assign one PmSM per run/precursor (score + median intensity + alignment-group DP)
+            intensity_weight = self.search_config.config.get("intensity_weight", 4.0)
+            pmsm_df = assign_pmsms_across_runs(
+                scored_df, intensity_weight=intensity_weight
+            )
         pmsm_df = PeptideDatabase.join_with_protein_annotations(
             result_aggregator.db_dir, pmsm_df
         )

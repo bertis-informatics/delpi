@@ -43,6 +43,8 @@ DEFAULT_FRAGMENT_ISOTOPES = len(FRAGMENT_ISOTOPE_INDICES)
 
 # Experimental token buffer per PmSM; tokens beyond it are dropped (M-1 last).
 MAX_EXP_PEAK_TOKENS = 512
+# DDA: center-spectrum peak indices kept per PmSM for peak NMS
+MAX_CENTER_PEAKS = 64
 # Precursors with fewer stored (nonzero-intensity) fragments are not searched.
 MIN_SEARCH_FRAGMENTS = 5
 DEFAULT_Q_VALUE_CUTOFF = 0.01

@@ -11,6 +11,7 @@ from delpi.search.dia.peak_group import PeakIndexContainer
 from delpi.search.dia.batch_generator import count_total_batches, iter_batch_indices
 from delpi.database.numba.spec_lib_utils import get_theoretical_peaks
 from delpi.search.dia.peak_token import get_x_theo, MAX_EXP_PEAK_TOKENS
+from delpi.constants import MAX_CENTER_PEAKS
 from delpi.search.dda.peak_token import (
     get_x_exp,
     EXP_TOKEN_DIM,
@@ -92,8 +93,8 @@ def _allocate_dda_buffer(batch_size: int, num_theoretical_peaks: int):
         "X_precursor_index": np.empty(batch_size, dtype=np.uint32),
         "ms1_scale_arr": np.empty(batch_size, dtype=np.float32),
         "ms2_scale_arr": np.empty(batch_size, dtype=np.float32),
-        # fragment peak indices; a PmSM has at most as many fragment tokens as tokens
-        "X_indices": np.empty((batch_size, MAX_EXP_PEAK_TOKENS), dtype=np.int32),
+        # center-spectrum peak indices for peak NMS (-1 padded)
+        "X_indices": np.empty((batch_size, MAX_CENTER_PEAKS), dtype=np.int32),
         "X_rank": np.empty((batch_size, MAX_EXP_PEAK_TOKENS), dtype=np.int8),
     }
 
@@ -126,8 +127,8 @@ def generate_batches(
     for buf_idx, (num_peaks, batch_indices) in enumerate(batch_iter):
         buf = buffers[buf_idx % num_buffers]
         cur_batch_size = batch_indices.shape[0]
-        # like X_exp/X_rank, only the first num_peaks slots can be filled
-        x_ind = buf["X_indices"][:cur_batch_size, :num_peaks]
+        # full width: rows are stored as is
+        x_ind = buf["X_indices"][:cur_batch_size]
         _make_batch_in_parallel(
             batch_indices,
             speclib_container,

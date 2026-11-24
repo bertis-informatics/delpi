@@ -176,10 +176,8 @@ class DDASearchEngine(BaseSearchEngine):
                 results["frame_num"].append(frame_num_arr)
                 results["logit"].append(logits)
                 results["features"].append(x_feature)
-                # used only for clustering in _flush; not written to the result file
-                peak_count, peak_index = compact_peak_indices(x_ind)
-                results["fragment_peak_count"].append(peak_count)
-                results["fragment_peak_index"].append(peak_index)
+                # center-spectrum peak indices, stored for peak NMS
+                results["center_peak_index"].append(x_ind)
                 results["observed_rt"].append(observed_rt)
 
                 x_exp = x_exp_t.numpy()[mask]
@@ -289,9 +287,9 @@ class DDASearchEngine(BaseSearchEngine):
                     k: np.concatenate([r[k] for r in chunk_results])
                     for k in chunk_results[0]
                 }
+                # not used for DDA selection (peak NMS); kept for the result schema
                 cluster_arr = cluster_by_peak_sharing(
-                    merged.pop("fragment_peak_count"),
-                    merged.pop("fragment_peak_index"),
+                    *compact_peak_indices(merged["center_peak_index"])
                 )
                 merged["cluster"] = cluster_arr + cluster_count
                 cluster_count += 1 + np.max(cluster_arr)
