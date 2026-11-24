@@ -28,7 +28,7 @@ from delpi.search.progress.tracker import ProgressTracker
 from delpi.search.progress.dummy_tracker import DummyProgressTracker
 from delpi.search.dda.peak_group import find_peak_groups
 from delpi.search.dda.batch_generator import count_total_batches, generate_batches
-from delpi.search.clustering import cluster_by_peak_sharing, compact_peak_indices
+from delpi.search.peak_nms import peak_nms_clusters
 from delpi.search.dia.lfq_utils import get_ms1_area_dda, get_pmsm_median_intensity
 from delpi.utils.device_ctx import make_inference_contexts
 from delpi.utils.prefetch import Prefetcher, pin_numpy_tuple
@@ -287,9 +287,10 @@ class DDASearchEngine(BaseSearchEngine):
                     k: np.concatenate([r[k] for r in chunk_results])
                     for k in chunk_results[0]
                 }
-                # not used for DDA selection (peak NMS); kept for the result schema
-                cluster_arr = cluster_by_peak_sharing(
-                    *compact_peak_indices(merged["center_peak_index"])
+                # pairwise peak NMS over the pre-trained logits: a head and the
+                # PmSMs sharing >= 50% of their center peaks with it (cluster_gap)
+                cluster_arr = peak_nms_clusters(
+                    merged["logit"], merged["center_peak_index"]
                 )
                 merged["cluster"] = cluster_arr + cluster_count
                 cluster_count += 1 + np.max(cluster_arr)
