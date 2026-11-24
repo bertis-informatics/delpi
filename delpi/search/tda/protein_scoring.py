@@ -5,7 +5,7 @@ from typing import Literal, get_args
 import polars as pl
 
 ProteinScoringMethod = Literal["best_peptide_per_protein", "top_two_combined"]
-DEFAULT_PROTEIN_SCORING: ProteinScoringMethod = "best_peptide_per_protein"
+DEFAULT_PROTEIN_SCORING: ProteinScoringMethod = "top_two_combined"
 _TOP_N = {"best_peptide_per_protein": 1, "top_two_combined": 2}
 
 

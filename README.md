@@ -204,8 +204,8 @@ and run-specific protein-group FDR:
 
 | Value | Scoring method |
 |-------|----------------|
-| `best_peptide_per_protein` (default) | Highest stripped-peptide score for each protein or group. |
-| `top_two_combined` | Sum of the best two distinct stripped-peptide scores; a singleton keeps its one score. |
+| `best_peptide_per_protein` | Highest stripped-peptide score for each protein or group. |
+| `top_two_combined` (default) | Sum of the best two distinct stripped-peptide scores; a singleton keeps its one score. |
 
 The search workflow calculates global precursor confidence, assigns protein
 groups, and attaches `global_protein_group_score` and per-run
