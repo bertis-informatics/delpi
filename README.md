@@ -204,15 +204,8 @@ and run-specific protein-group FDR:
 
 | Value | Scoring method |
 |-------|----------------|
-| `best_peptide_per_protein` | Highest peptide score for each protein or group. |
-| `top_two_combined` (default) | Sum of the best two distinct stripped-peptide scores; a singleton keeps its one score. |
-| `discriminative_rescoring` | Two-fold out-of-fold logistic regression using run, precursor and peptide counts plus PmSM score statistics. |
-
-For example, set `protein_scoring: discriminative_rescoring` to try ML scoring.
-The ML method fits feature scaling on each training fold and returns target
-probabilities. It uses all run-level observations for global scoring and fits
-separately for each run's FDR. If fewer than two targets or two decoys are
-available, it logs a warning and falls back to `top_two_combined`.
+| `best_peptide_per_protein` (default) | Highest stripped-peptide score for each protein or group. |
+| `top_two_combined` | Sum of the best two distinct stripped-peptide scores; a singleton keeps its one score. |
 
 The search workflow calculates global precursor confidence, assigns protein
 groups, and attaches `global_protein_group_score` and per-run

@@ -40,9 +40,8 @@ q_value_cutoff: 0.01
 grouping_type: parsimonious_grouping
 
 # Scoring used for both protein picking and protein-group FDR.
-# Options: "best_peptide_per_protein", "top_two_combined" (default),
-# or "discriminative_rescoring" (out-of-fold logistic regression).
-protein_scoring: top_two_combined
+# Options: "best_peptide_per_protein" (default) or "top_two_combined".
+protein_scoring: best_peptide_per_protein
 
 # Use peptides identified across runs to guide a second search,
 # helping recover signals missed in individual runs (Match Between Runs, MBR).
