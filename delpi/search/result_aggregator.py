@@ -163,34 +163,6 @@ class ResultsAggregator:
         # )
         return pmsm_df
 
-    def load_features(
-        self,
-        pmsm_df: pl.DataFrame,
-        group_key: str = "second_results",
-        feature_dim: int = 193,
-    ) -> np.ndarray:
-
-        feature_arr = np.empty((pmsm_df.shape[0], feature_dim), dtype=np.float32)
-
-        pmsm_df = pmsm_df.with_row_index("index_")
-        for run_index, result_manager in self._results_dict.items():
-            sub_df = pmsm_df.filter(pl.col("run_index") == run_index)
-            if sub_df.shape[0] == 0:
-                continue
-
-            # NOTE: feature_arr[sub_df["index_"]] uses advanced indexing and returns
-            # a copy, so writing into it does not update feature_arr in-place.
-            # Load per-run features and assign back explicitly to preserve row order.
-            run_feature_arr = result_manager.load_features(
-                group_key,
-                feature_dim=feature_dim,
-            )
-            out_idx = sub_df["index_"].to_numpy()
-            row_idx = sub_df["pmsm_index"].to_numpy()
-            feature_arr[out_idx] = run_feature_arr[row_idx]
-
-        return feature_arr
-
     def get_search_results(
         self,
         group_key: str,

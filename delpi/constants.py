@@ -60,6 +60,8 @@ DDA_MATCHED_PEAKS_CUTOFF_UB = 6
 PMSM_EMBEDDING_DIM = 192
 # Number of PmSMs for training the TDA classifier
 TDA_MAX_TRAIN_SIZE = 8 * 1024 * 1024
+# Max bytes of TDA classifier inputs held in memory; beyond it they are read per run
+TDA_MAX_FEATURE_MEMORY = 16 * 1024**3
 
 DEFAULT_REPORT_FORMAT = "parquet"  # tsv or parquet
 

@@ -72,11 +72,12 @@ class TargetDecoyClassifier(pl.LightningModule):
 
         self.classifier = nn.Sequential(*fc_layers)
 
-        self.train_auc = torchmetrics.AUROC(task="binary")
-        self.valid_auc = torchmetrics.AUROC(task="binary")
-        self.train_ap = torchmetrics.AveragePrecision(task="binary")
-        self.valid_ap = torchmetrics.AveragePrecision(task="binary")
-        self.valid_rc = RecallAtFDR(fdr_cutoff=0.01)
+        # metrics other than the loss are disabled (slow per-step updates)
+        # self.train_auc = torchmetrics.AUROC(task="binary")
+        # self.valid_auc = torchmetrics.AUROC(task="binary")
+        # self.train_ap = torchmetrics.AveragePrecision(task="binary")
+        # self.valid_ap = torchmetrics.AveragePrecision(task="binary")
+        # self.valid_rc = RecallAtFDR(fdr_cutoff=0.01)
         if focal_loss_gamma_pos == 0.0 and focal_loss_gamma_neg == 0.0:
             self.criterion = nn.BCEWithLogitsLoss()
         else:
@@ -110,8 +111,8 @@ class TargetDecoyClassifier(pl.LightningModule):
         loss, y_true, y_pred = self._compute_loss(X, y_true, batch_idx)
 
         # batch_size = len(y_pred)
-        self.train_auc.update(y_pred, y_true)
-        self.train_ap.update(y_pred, y_true.to(torch.int32))
+        # self.train_auc.update(y_pred, y_true)
+        # self.train_ap.update(y_pred, y_true.to(torch.int32))
 
         self.log(
             "train_loss",
@@ -122,20 +123,20 @@ class TargetDecoyClassifier(pl.LightningModule):
             logger=True,
             batch_size=batch_size,
         )
-        self.log(
-            "train_auc",
-            self.train_auc,
-            on_step=False,
-            on_epoch=True,
-            batch_size=batch_size,
-        )
-        self.log(
-            "train_ap",
-            self.train_ap,
-            on_step=False,
-            on_epoch=True,
-            batch_size=batch_size,
-        )
+        # self.log(
+        #     "train_auc",
+        #     self.train_auc,
+        #     on_step=False,
+        #     on_epoch=True,
+        #     batch_size=batch_size,
+        # )
+        # self.log(
+        #     "train_ap",
+        #     self.train_ap,
+        #     on_step=False,
+        #     on_epoch=True,
+        #     batch_size=batch_size,
+        # )
 
         return loss
 
@@ -146,9 +147,9 @@ class TargetDecoyClassifier(pl.LightningModule):
         loss, y_true, y_pred = self._compute_loss(X, y_true, batch_idx)
 
         batch_size = len(y_pred)
-        self.valid_auc.update(y_pred, y_true)
-        self.valid_ap.update(y_pred, y_true.to(torch.int32))
-        self.valid_rc.update(y_pred, y_true)
+        # self.valid_auc.update(y_pred, y_true)
+        # self.valid_ap.update(y_pred, y_true.to(torch.int32))
+        # self.valid_rc.update(y_pred, y_true)
 
         self.log(
             "val_loss",
@@ -159,23 +160,23 @@ class TargetDecoyClassifier(pl.LightningModule):
             logger=True,
             batch_size=batch_size,
         )
-        self.log(
-            "val_auc",
-            self.valid_auc,
-            on_step=False,
-            on_epoch=True,
-            batch_size=batch_size,
-        )
-        self.log(
-            "val_ap", self.valid_ap, on_step=False, on_epoch=True, batch_size=batch_size
-        )
-        self.log(
-            "val_recall",
-            self.valid_rc,
-            on_step=False,
-            on_epoch=True,
-            batch_size=batch_size,
-        )
+        # self.log(
+        #     "val_auc",
+        #     self.valid_auc,
+        #     on_step=False,
+        #     on_epoch=True,
+        #     batch_size=batch_size,
+        # )
+        # self.log(
+        #     "val_ap", self.valid_ap, on_step=False, on_epoch=True, batch_size=batch_size
+        # )
+        # self.log(
+        #     "val_recall",
+        #     self.valid_rc,
+        #     on_step=False,
+        #     on_epoch=True,
+        #     batch_size=batch_size,
+        # )
 
         return loss
 

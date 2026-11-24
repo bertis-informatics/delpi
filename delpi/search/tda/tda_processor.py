@@ -11,7 +11,7 @@ DataFrame returned by :meth:`TDAProcessor.run_global`.
 
 import logging
 from pathlib import Path
-from typing import Callable, Literal, Tuple
+from typing import Literal, Tuple
 
 SplitLevel = Literal["pmsm", "precursor", "peptide"]
 GroupingType = Literal["lead_only", "parsimonious_grouping"]
@@ -26,20 +26,18 @@ from delpi.database.peptide_database import PeptideDatabase
 from delpi.search.result_aggregator import ResultsAggregator
 from delpi.search.result_manager import ResultManager
 from delpi.search.tda.features import FEATURE_DIM, compute_rescoring_features
+from delpi.search.tda.pmsm_features import FEATURE_ROW, PmsmFeatures
 from delpi.search.tda.trainer import DEFAULT_TRAINING_PARAMS, TargetDecoyTrainer
 from delpi.constants import (
     DEFAULT_Q_VALUE_CUTOFF,
+    TDA_MAX_FEATURE_MEMORY,
     TDA_MAX_TRAIN_SIZE,
-    PMSM_EMBEDDING_DIM,
 )
 
 logger = logging.getLogger(__name__)
 
 # Library columns joined only to compute rescoring features; not returned.
 _FEATURE_INPUT_COLUMNS = ("precursor_mz", "sequence_length")
-
-# Type alias: given a DataFrame subset, return (n, FEATURE_DIM) numpy array
-FeatureLoader = Callable[[pl.DataFrame], np.ndarray]
 
 
 class TDAProcessor:
@@ -83,9 +81,10 @@ class TDAProcessor:
     ) -> pl.DataFrame:
         """Cross-run TDA across multiple LC-MS runs (2-fold CV).
 
-        Split granularity is controlled by ``self.split_level``.
-        Features are loaded on-demand per subset.  Training data in each
-        fold is subsampled when it exceeds ``TDA_MAX_TRAIN_SIZE``.
+        Split granularity is controlled by ``self.split_level``.  Training
+        data in each fold is subsampled when it exceeds ``TDA_MAX_TRAIN_SIZE``.
+        Both fold models are trained first; then each run is scored, every
+        PmSM by the model(s) of the other fold.
 
         When ``n_ensemble > 1``, each fold trains K models via bootstrap
         sampling (each of size ``ensemble_train_ratio`` × N_fold) with
@@ -104,108 +103,124 @@ class TDAProcessor:
         :meth:`~delpi.search.search_manager.SearchManager._infer_proteins_and_analyze_fdr`.
         """
         pmsm_df = self._load_multi_run(result_aggregator, group_key)
-        feature_fn = self._make_aggregator_feature_fn(
-            result_aggregator, group_key, pmsm_df
-        )
-
         fold_a, fold_b = self._split_pmsm_df(pmsm_df, level=self.split_level)
-        full_pmsm_df = pmsm_df  # keep reference for join-back after scoring
-
-        model_version_prefix = f"{pass_label}_tda"
-
-        # Fold A trains → score Fold B
-        scores_b = self._train_and_score_fold(
-            fold_a,
-            fold_b,
-            feature_fn,
-            fold_label="f0",
-            training_params=training_params,
-            model_params=model_params,
-            model_version_prefix=model_version_prefix,
-        )
-        # Fold B trains → score Fold A
-        scores_a = self._train_and_score_fold(
-            fold_b,
-            fold_a,
-            feature_fn,
-            fold_label="f1",
-            training_params=training_params,
-            model_params=model_params,
-            model_version_prefix=model_version_prefix,
+        features = PmsmFeatures(
+            result_aggregator,
+            group_key,
+            pmsm_df,
+            self._scaled_rescoring_features(result_aggregator, pmsm_df),
+            in_memory=self._features_fit_in_memory(pmsm_df, fold_a, fold_b),
         )
 
-        # Merge scored folds
-        scored_a = fold_a.with_columns(pl.Series(values=scores_a, name="score")).select(
-            "run_index", "pmsm_index", "cluster", "score"
-        )
-        scored_b = fold_b.with_columns(pl.Series(values=scores_b, name="score")).select(
-            "run_index", "pmsm_index", "cluster", "score"
-        )
-        scored_df = pl.concat([scored_a, scored_b], how="vertical")
+        models = [
+            self._train_fold_models(
+                fold,
+                features,
+                fold_label=f"f{k}",
+                training_params=training_params,
+                model_params=model_params,
+                model_version_prefix=f"{pass_label}_tda",
+            )
+            for k, fold in enumerate((fold_a, fold_b))
+        ]
+        in_fold_b = np.zeros(pmsm_df.height, dtype=bool)
+        in_fold_b[fold_b[FEATURE_ROW].to_numpy()] = True
+        scores = self._score_out_of_fold(features, in_fold_b, models)
 
-        # for debugging: save all scored PmSMs before selection
-        # scored_df.write_parquet(self.output_dir / "pmsm_scores.parquet")
-        # scored_df = pl.read_parquet(self.output_dir / "pmsm_scores.parquet")
-
-        # Bring in the rest of each PmSM's columns (frame_num, predicted_rt,
-        # observed_rt, is_decoy, ...) so the returned DataFrame is
-        # self-contained for the assignment/FDR steps that follow.
-        scored_df = scored_df.join(
-            full_pmsm_df.select(
-                pl.exclude("cluster", "score", *_FEATURE_INPUT_COLUMNS)
+        return pmsm_df.with_columns(pl.Series("score", scores)).select(
+            "run_index",
+            "pmsm_index",
+            "cluster",
+            "score",
+            pl.exclude(
+                "run_index",
+                "pmsm_index",
+                "cluster",
+                "score",
+                FEATURE_ROW,
+                *_FEATURE_INPUT_COLUMNS,
             ),
-            on=["run_index", "pmsm_index"],
-            how="left",
         )
-        return scored_df
 
-    def _train_and_score_fold(
+    def _train_fold_models(
         self,
         train_fold: pl.DataFrame,
-        test_fold: pl.DataFrame,
-        feature_fn: FeatureLoader,
+        features: PmsmFeatures,
         fold_label: str,
         training_params: dict = None,
         model_version_prefix: str = "global_tda",
         model_params: dict = None,
-    ) -> np.ndarray:
-        """Train on *train_fold*, score *test_fold*.
-
-        When ``n_ensemble > 1``, bootstraps K models from *train_fold*
-        (after subsampling) and averages their logits.
-        """
+    ) -> list[torch.nn.Module]:
+        """Train the model(s) of one fold. With ``n_ensemble > 1``, K models
+        on bootstrap subsets of *train_fold* (after subsampling)."""
         train_df = self._subsample_train(train_fold, level=self.split_level)
 
         if self.n_ensemble <= 1:
+            # (subset, split seed, model version, trainer seed)
+            runs = [
+                (
+                    train_df,
+                    self._training_param(training_params, "random_seed"),
+                    f"{model_version_prefix}_{fold_label}",
+                    None,
+                )
+            ]
+        else:
+            subset_size = int(len(train_df) * self.ensemble_train_ratio)
+            runs = []
+            for k in range(self.n_ensemble):
+                seed = 42 + k
+                indices = np.random.RandomState(seed).choice(
+                    len(train_df), size=subset_size, replace=False
+                )
+                runs.append(
+                    (
+                        train_df[indices.tolist()],
+                        seed,
+                        f"{model_version_prefix}_{fold_label}_e{k}",
+                        seed,
+                    )
+                )
+
+        models = []
+        for subset_df, split_seed, model_version, seed in runs:
             fit_df, val_df = self._split_train_val(
-                train_df,
+                subset_df,
                 level=self.split_level,
                 train_frac=self._training_param(training_params, "train_split"),
                 max_val_samples=self._training_param(
                     training_params, "max_val_samples"
                 ),
-                seed=self._training_param(training_params, "random_seed"),
+                seed=split_seed,
             )
-            train_dataset = self._build_tensor_dataset(fit_df, feature_fn)
-            val_dataset = self._build_tensor_dataset(val_df, feature_fn)
-            model = self._train_model(
-                train_dataset=train_dataset,
-                val_dataset=val_dataset,
-                model_version=f"{model_version_prefix}_{fold_label}",
-                training_params=training_params,
-                model_params=model_params,
+            models.append(
+                self._train_model(
+                    train_dataset=self._build_tensor_dataset(fit_df, features),
+                    val_dataset=self._build_tensor_dataset(val_df, features),
+                    model_version=model_version,
+                    training_params=training_params,
+                    model_params=model_params,
+                    seed=seed,
+                )
             )
-            return self._score(test_fold, model, feature_fn)
+        return models
 
-        return self._ensemble_score(
-            train_df,
-            test_fold,
-            feature_fn,
-            fold_label=fold_label,
-            training_params=training_params,
-            model_params=model_params,
-            model_version_prefix=model_version_prefix,
-        )
+    def _score_out_of_fold(
+        self,
+        features: PmsmFeatures,
+        in_fold_b: np.ndarray,
+        models: list[list[torch.nn.Module]],
+    ) -> np.ndarray:
+        """Score each PmSM with the models of the other fold (`models[0]`:
+        fold A, `models[1]`: fold B), averaging ensemble logits."""
+        models_a, models_b = models
+        scores = np.empty(len(in_fold_b), dtype=np.float32)
+        for start, end, inputs in features.run_blocks():
+            logits = self._batched_inference(models_a + models_b, inputs, self.batch_size)
+            by_models_a = logits[: len(models_a)].mean(axis=0)
+            by_models_b = logits[len(models_a) :].mean(axis=0)
+            scores[start:end] = np.where(in_fold_b[start:end], by_models_a, by_models_b)
+        return scores
 
     # ==================================================================
     # Data loading
@@ -217,7 +232,9 @@ class TDAProcessor:
         group_key: str,
     ) -> pl.DataFrame:
         """Load PmSM data (without embeddings) for all runs, attach is_decoy
-        and the library columns used by the rescoring features."""
+        and the library columns used by the rescoring features. Rows are
+        sorted by (run_index, pmsm_index); ``FEATURE_ROW`` is the row number.
+        """
         pmsm_df = result_aggregator.load_pmsm_df(group_key=group_key)
         pmsm_df = PeptideDatabase.join(
             result_aggregator.db_dir,
@@ -226,42 +243,39 @@ class TDAProcessor:
             modification_columns=[],
             peptide_columns=["is_decoy", "sequence_length"],
         )
-        return pmsm_df
-
-    # ==================================================================
-    # Feature loading strategies
-    # ==================================================================
+        return pmsm_df.sort(["run_index", "pmsm_index"]).with_row_index(FEATURE_ROW)
 
     @staticmethod
-    def _make_aggregator_feature_fn(
-        result_aggregator: ResultsAggregator,
-        group_key: str,
-        pmsm_df: pl.DataFrame,
-    ) -> FeatureLoader:
-        """Feature loader: PmSM embedding (from HDF files) followed by the
-        rescoring features, z-scored with statistics of all PmSMs in `pmsm_df`.
-
-        The statistics use no labels, so fitting them on every PmSM (both CV
-        folds, targets and decoys) does not leak information between folds.
-        """
+    def _scaled_rescoring_features(
+        result_aggregator: ResultsAggregator, pmsm_df: pl.DataFrame
+    ) -> np.ndarray:
+        """Rescoring features z-scored over all PmSMs (label-free, so no
+        leakage between folds)."""
         gradient_lengths = TDAProcessor._gradient_lengths(result_aggregator, pmsm_df)
-        scaler = StandardScaler().fit(
-            compute_rescoring_features(pmsm_df, gradient_lengths)
-        )
+        rescoring_features = compute_rescoring_features(pmsm_df, gradient_lengths)
+        scaler = StandardScaler().fit(rescoring_features)
         logger.debug(
             "Rescoring feature mean %s, scale %s", scaler.mean_, scaler.scale_
         )
+        return scaler.transform(rescoring_features).astype(np.float32)
 
-        def _load(df: pl.DataFrame) -> np.ndarray:
-            arr = result_aggregator.load_features(
-                df, group_key=group_key, feature_dim=FEATURE_DIM
-            )
-            arr[:, PMSM_EMBEDDING_DIM:] = scaler.transform(
-                compute_rescoring_features(df, gradient_lengths)
-            )
-            return arr
-
-        return _load
+    @staticmethod
+    def _features_fit_in_memory(
+        pmsm_df: pl.DataFrame, fold_a: pl.DataFrame, fold_b: pl.DataFrame
+    ) -> bool:
+        """Whether all PmSMs' inputs plus one fold's training copy fit in
+        ``TDA_MAX_FEATURE_MEMORY``."""
+        n_train = min(max(fold_a.height, fold_b.height), TDA_MAX_TRAIN_SIZE)
+        row_bytes = FEATURE_DIM * np.dtype(np.float32).itemsize
+        needed = (pmsm_df.height + n_train) * row_bytes
+        in_memory = needed <= TDA_MAX_FEATURE_MEMORY
+        logger.info(
+            f"Rescoring inputs of {pmsm_df.height:,} PmSMs: "
+            f"{'kept in memory' if in_memory else 'read run by run'} "
+            f"({needed / 2**30:.1f} GiB needed in memory, "
+            f"limit {TDA_MAX_FEATURE_MEMORY / 2**30:.1f} GiB)"
+        )
+        return in_memory
 
     @staticmethod
     def _gradient_lengths(
@@ -453,11 +467,11 @@ class TDAProcessor:
     @staticmethod
     def _build_tensor_dataset(
         df: pl.DataFrame,
-        feature_fn: FeatureLoader,
+        features: PmsmFeatures,
     ) -> TensorDataset:
         """Build a TensorDataset from a subset DataFrame."""
-        feature_arr = feature_fn(df)
-        x = torch.from_numpy(feature_arr)
+        df = df.sort(FEATURE_ROW)
+        x = torch.from_numpy(features.rows(df))
         y = (~df["is_decoy"].to_torch()).float().unsqueeze(1)
         return TensorDataset(x, y)
 
@@ -496,80 +510,20 @@ class TDAProcessor:
         )
         return trainer.get_best_model().to(self.device).eval()
 
-    def _score(
-        self,
-        df: pl.DataFrame,
-        model: torch.nn.Module,
-        feature_fn: FeatureLoader,
-    ) -> np.ndarray:
-        """Score a subset of PmSMs with a trained model."""
-        feature_arr = feature_fn(df)
-        return self._batched_inference(model, feature_arr, self.batch_size)
-
-    def _ensemble_score(
-        self,
-        train_df: pl.DataFrame,
-        test_df: pl.DataFrame,
-        feature_fn: FeatureLoader,
-        fold_label: str = "",
-        training_params: dict = None,
-        model_version_prefix: str = "global_tda",
-        model_params: dict = None,
-    ) -> np.ndarray:
-        """Train K models via bootstrap from *train_df* and average logits."""
-        test_feature_arr = feature_fn(test_df)
-        n_train = len(train_df)
-        subset_size = int(n_train * self.ensemble_train_ratio)
-        avg_scores = np.zeros(len(test_df), dtype=np.float64)
-
-        for k in range(self.n_ensemble):
-            seed = 42 + k
-            indices = np.random.RandomState(seed).choice(
-                n_train, size=subset_size, replace=False
-            )
-            subset_df = train_df[indices.tolist()]
-            fit_df, val_df = self._split_train_val(
-                subset_df,
-                level=self.split_level,
-                train_frac=self._training_param(training_params, "train_split"),
-                max_val_samples=self._training_param(
-                    training_params, "max_val_samples"
-                ),
-                seed=seed,
-            )
-            train_dataset = self._build_tensor_dataset(fit_df, feature_fn)
-            val_dataset = self._build_tensor_dataset(val_df, feature_fn)
-
-            model = self._train_model(
-                train_dataset=train_dataset,
-                val_dataset=val_dataset,
-                model_version=f"{model_version_prefix}_{fold_label}_e{k}",
-                training_params=training_params,
-                model_params=model_params,
-                seed=seed,
-            )
-            scores = self._batched_inference(model, test_feature_arr, self.batch_size)
-            avg_scores += scores
-            logger.info(
-                f"Ensemble {fold_label} model {k + 1}/{self.n_ensemble} trained"
-            )
-
-        avg_scores /= self.n_ensemble
-        return avg_scores.astype(np.float32)
-
     @staticmethod
     def _batched_inference(
-        model: torch.nn.Module,
+        models: list[torch.nn.Module],
         feature_arr: np.ndarray,
         batch_size: int = 4096,
     ) -> np.ndarray:
-        """Run batched GPU inference without DataLoader overhead."""
-        device = next(model.parameters()).device
+        """``(len(models), n)`` logits; each batch is moved to the device once."""
+        device = next(models[0].parameters()).device
         x_all = torch.from_numpy(feature_arr)
-        scores = np.empty(len(feature_arr), dtype=np.float32)
+        logits = np.empty((len(models), len(feature_arr)), dtype=np.float32)
         with torch.inference_mode():
             for start in range(0, len(x_all), batch_size):
                 end = min(start + batch_size, len(x_all))
-                logits = model(x_all[start:end].to(device))
-                scores[start:end] = logits.flatten().cpu().numpy()
-        return scores
+                x = x_all[start:end].to(device)
+                for i, model in enumerate(models):
+                    logits[i, start:end] = model(x).flatten().cpu().numpy()
+        return logits
