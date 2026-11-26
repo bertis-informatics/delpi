@@ -48,7 +48,9 @@ class PrecursorGenerator:
         )
 
         # index_arr rows: [peptide_index, start_index, stop_index], where
-        # start:stop are the peptidoform's rows in mod_info_arr
+        # start:stop are the peptidoform's rows in mod_info_arr. int64 on every
+        # polars runtime: rt64 row indices are UInt64, and numba warns when a
+        # uint64 indexes a typed List.
         index_arr = (
             mod_df.with_columns(count_mods.cum_sum().alias("stop_index"))
             .select(
@@ -56,6 +58,7 @@ class PrecursorGenerator:
                 pl.col("stop_index").shift(1, fill_value=0).alias("start_index"),
                 pl.col("stop_index"),
             )
+            .cast(pl.Int64)
             .to_numpy()
         )
 
