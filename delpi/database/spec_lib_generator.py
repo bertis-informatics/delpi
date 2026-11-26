@@ -8,7 +8,6 @@ import numpy as np
 import pyarrow.parquet as pq
 
 import torch
-from torch.utils.data import DataLoader
 
 from delpi.lcms.base_ion_type import BaseIonType
 from delpi.lcms.fragmentation import Fragmentation
@@ -19,14 +18,19 @@ from delpi.database.spec_lib_schema import (
     with_speclib_index,
 )
 from delpi.model.spec_lib import Ms2SpectrumPredictor, RetentionTimePredictor
-from delpi.model.spec_lib.dataset import PeptideDataset
+from delpi.model.spec_lib.batch_encoder import MOD_FEATURE_DIM, PeptideBatchEncoder
 from delpi.utils.batch_sampler import SeqDataBatchSampler, ChunkedSeqDataBatchSampler
 from delpi.database.numba.prefix_mass_array import PrefixMassArrayContainer
 from delpi.database.numba.spec_lib_utils import update_speclib_chunk_arr
-from delpi.utils.prefetch import Prefetcher, pin_tensor_dict
 from delpi.search.progress import ProgressTracker, TqdmProgressTracker
 from delpi import MODEL_DIR
 from delpi.constants import DEFAULT_NCE
+
+# MS2 throughput saturates near 2048-4096 on a 4090; peak memory at 4096 and
+# 33 tokens is ~1.2 GB (MS2, fp16) and ~2.7 GB (RT)
+DEFAULT_BATCH_SIZE = 4096
+# precursors per Parquet row group; a 1M chunk holds ~270 MB of output rows
+DEFAULT_PRECURSOR_CHUNK_SIZE = 1 << 20
 
 
 class SpectralLibGenerator:
@@ -35,6 +39,10 @@ class SpectralLibGenerator:
     min_intensity is the inclusive normalized-intensity threshold and
     max_fragments is an upper bound. Rows are stored in increasing intensity
     order, with rank 1 assigned to the strongest fragment.
+
+    ms2_half_precision runs the MS2 predictor under fp16 autocast on CUDA
+    (~1.8x faster; spectral angle vs fp32 median 0.9994, top-16 overlap
+    99.9%). bf16 is less accurate and not offered. RT stays fp32.
     """
 
     speclib_df_schema = SPECLIB_SCHEMA
@@ -54,6 +62,7 @@ class SpectralLibGenerator:
         device: Union[str, torch.device] = "cuda:0",
         ms2_predictor: Ms2SpectrumPredictor = None,
         rt_predictor: RetentionTimePredictor = None,
+        ms2_half_precision: bool = True,
     ):
         if not isinstance(max_fragments, int) or not 1 <= max_fragments <= 255:
             raise ValueError("max_fragments must be an integer in [1, 255].")
@@ -78,6 +87,7 @@ class SpectralLibGenerator:
         )
 
         self.device = device
+        self.ms2_half_precision = ms2_half_precision
         self._ms2_predictor = ms2_predictor
         self._rt_predictor = rt_predictor
 
@@ -126,7 +136,7 @@ class SpectralLibGenerator:
         modification_df: pl.DataFrame,
         precursor_df: pl.DataFrame,
         prefix_mass_container: PrefixMassArrayContainer,
-        batch_size: int = 512,
+        batch_size: int = DEFAULT_BATCH_SIZE,
         detectable_min_mz: float = None,
         detectable_max_mz: float = None,
         progress: ProgressTracker = None,
@@ -192,8 +202,8 @@ class SpectralLibGenerator:
         precursor_df: pl.DataFrame,
         prefix_mass_container: PrefixMassArrayContainer,
         save_dir: Union[str, Path],
-        batch_size: int = 1024,
-        chunk_size: int = 65_536,
+        batch_size: int = DEFAULT_BATCH_SIZE,
+        chunk_size: int = DEFAULT_PRECURSOR_CHUNK_SIZE,
         detectable_min_mz: float = None,
         detectable_max_mz: float = None,
         progress: ProgressTracker = None,
@@ -202,7 +212,7 @@ class SpectralLibGenerator:
 
         The caller saves precursor_df with the other tables (PeptideDatabase.save).
         Only one chunk of output rows (chunk_size * max_fragments) is held in
-        memory; the input pipeline is still built once for the whole run.
+        memory; the input encoder is built once for the whole run.
         """
 
         if batch_size <= 0:
@@ -299,31 +309,14 @@ class SpectralLibGenerator:
 
         # batches are grouped by sequence_length and never span two chunks, so
         # chunk transitions can be detected from the batch stream
-        precursor_ds = PeptideDataset(
-            precursor_df, modification_df, peptide_df, level="precursor", nce=self.nce
+        encoder = PeptideBatchEncoder(
+            peptide_df, modification_df, precursor_df, nce=self.nce
         )
         batch_sampler = ChunkedSeqDataBatchSampler(
-            precursor_ds,
+            encoder,
             batch_size=batch_size,
             chunk_size=chunk_size,
             batch_grouping_column="sequence_length",
-        )
-        dl = DataLoader(
-            dataset=precursor_ds, batch_sampler=batch_sampler, num_workers=0
-        )
-
-        max_token_len = peptide_df["sequence_length"].max() + 3
-        mod_feat_dim = self.ms2_predictor.mod_embedding.in_features
-        X_aa_buf = torch.empty(
-            (batch_size, max_token_len), dtype=torch.long, device=self.device
-        )
-        X_mod_buf = torch.empty(
-            (batch_size, max_token_len, mod_feat_dim),
-            dtype=torch.float32,
-            device=self.device,
-        )
-        X_meta_buf = torch.empty(
-            (batch_size, 4), dtype=torch.float32, device=self.device
         )
 
         # CPU output buffers for one chunk, reused across chunks
@@ -342,6 +335,7 @@ class SpectralLibGenerator:
         out_rank_arr = np.empty(chunk_row_capacity, dtype=np.uint8)
 
         ms2_predictor = self.ms2_predictor
+        precursor_index_arr = precursor_df["precursor_index"].to_numpy()
 
         def flush_chunk(chunk_start, chunk_end, processed_mask):
             if not processed_mask.all():
@@ -376,86 +370,73 @@ class SpectralLibGenerator:
         current_chunk_end = None
         processed_mask = None
 
-        with torch.inference_mode():
-            for batch in Prefetcher(dl, transform=pin_tensor_dict):
-                batch_precursor_index_arr = (
-                    batch["precursor_index"].to(torch.uint32).numpy()
+        # the next batch is already queued on the GPU while one is post-processed
+        # (and while a finished chunk is compacted and written)
+        for batch_idx, batch_intensity_arr in self._predict_in_batches(
+            ms2_predictor,
+            encoder,
+            batch_sampler,
+            batch_size,
+            with_meta=True,
+            half_precision=self.ms2_half_precision,
+        ):
+            n = batch_idx.shape[0]
+            batch_precursor_index_arr = precursor_index_arr[batch_idx].astype(np.uint32)
+
+            # the first row's chunk is the whole batch's
+            batch_chunk_start = (
+                int(batch_precursor_index_arr[0]) // chunk_size
+            ) * chunk_size
+            if current_chunk_start != batch_chunk_start:
+                if current_chunk_start is not None:
+                    flush_chunk(current_chunk_start, current_chunk_end, processed_mask)
+                current_chunk_start = batch_chunk_start
+                current_chunk_end = min(current_chunk_start + chunk_size, n_precursors)
+                processed_mask = np.zeros(
+                    current_chunk_end - current_chunk_start, dtype=np.bool_
                 )
 
-                # the first row's chunk is the whole batch's
-                batch_chunk_start = (
-                    int(batch_precursor_index_arr[0]) // chunk_size
-                ) * chunk_size
-                if current_chunk_start != batch_chunk_start:
-                    if current_chunk_start is not None:
-                        flush_chunk(
-                            current_chunk_start, current_chunk_end, processed_mask
-                        )
-                    current_chunk_start = batch_chunk_start
-                    current_chunk_end = min(
-                        current_chunk_start + chunk_size, n_precursors
-                    )
-                    processed_mask = np.zeros(
-                        current_chunk_end - current_chunk_start, dtype=np.bool_
-                    )
-
-                # bounds check before the njit helper writes by local index
-                if (
-                    batch_precursor_index_arr.min() < current_chunk_start
-                    or batch_precursor_index_arr.max() >= current_chunk_end
-                ):
-                    raise ValueError(
-                        "batch precursor_index out of chunk range "
-                        f"[{current_chunk_start}, {current_chunk_end})"
-                    )
-
-                local_idx = (
-                    batch_precursor_index_arr.astype(np.int64) - current_chunk_start
+            # bounds check before the njit helper writes by local index
+            if (
+                batch_precursor_index_arr.min() < current_chunk_start
+                or batch_precursor_index_arr.max() >= current_chunk_end
+            ):
+                raise ValueError(
+                    "batch precursor_index out of chunk range "
+                    f"[{current_chunk_start}, {current_chunk_end})"
                 )
-                if processed_mask[local_idx].any():
-                    dup = batch_precursor_index_arr[processed_mask[local_idx]]
-                    raise ValueError(f"duplicate precursor_index in chunk: {dup[:10]}")
-                processed_mask[local_idx] = True
 
-                x_aa_t = batch["x_aa"]
-                x_mod_t = batch["x_mod"]
-                x_meta_t = batch["x_meta"]
+            local_idx = batch_precursor_index_arr.astype(np.int64) - current_chunk_start
+            if processed_mask[local_idx].any():
+                dup = batch_precursor_index_arr[processed_mask[local_idx]]
+                raise ValueError(f"duplicate precursor_index in chunk: {dup[:10]}")
+            processed_mask[local_idx] = True
 
-                n, L = x_aa_t.shape
-                X_aa_buf[:n, :L].copy_(x_aa_t, non_blocking=True)
-                X_mod_buf[:n, :L, :].copy_(x_mod_t, non_blocking=True)
-                X_meta_buf[:n].copy_(x_meta_t, non_blocking=True)
+            update_speclib_chunk_arr(
+                out_precursor_index_arr,
+                out_clevage_index_arr,
+                out_is_prefix_arr,
+                out_charge_arr,
+                out_is_modloss_arr,
+                out_mz_arr,
+                out_pred_intensity_arr,
+                out_rank_arr,
+                out_num_rows_arr,
+                prefix_mass_container,
+                ion_type_container,
+                peptidoform_index_arr,
+                batch_precursor_index_arr,
+                batch_intensity_arr,
+                chunk_start_precursor_index=current_chunk_start,
+                max_fragments=max_fragments,
+                min_intensity=self.min_intensity,
+                detectable_min_mz=detectable_min_mz,
+                detectable_max_mz=detectable_max_mz,
+            )
+            progress.advance(n)
 
-                y_pred = ms2_predictor(
-                    X_aa_buf[:n, :L], X_mod_buf[:n, :L, :], X_meta_buf[:n]
-                )
-                batch_intensity_arr = y_pred.detach().cpu().numpy()
-
-                update_speclib_chunk_arr(
-                    out_precursor_index_arr,
-                    out_clevage_index_arr,
-                    out_is_prefix_arr,
-                    out_charge_arr,
-                    out_is_modloss_arr,
-                    out_mz_arr,
-                    out_pred_intensity_arr,
-                    out_rank_arr,
-                    out_num_rows_arr,
-                    prefix_mass_container,
-                    ion_type_container,
-                    peptidoform_index_arr,
-                    batch_precursor_index_arr,
-                    batch_intensity_arr,
-                    chunk_start_precursor_index=current_chunk_start,
-                    max_fragments=max_fragments,
-                    min_intensity=self.min_intensity,
-                    detectable_min_mz=detectable_min_mz,
-                    detectable_max_mz=detectable_max_mz,
-                )
-                progress.advance(n)
-
-            if current_chunk_start is not None:
-                flush_chunk(current_chunk_start, current_chunk_end, processed_mask)
+        if current_chunk_start is not None:
+            flush_chunk(current_chunk_start, current_chunk_end, processed_mask)
         return all_counts
 
     @staticmethod
@@ -470,19 +451,119 @@ class SpectralLibGenerator:
                 f"position; chunk [{chunk_start}, {chunk_end}) violates this"
             )
 
+    def _predict_in_batches(
+        self,
+        model: torch.nn.Module,
+        encoder: PeptideBatchEncoder,
+        batch_sampler,
+        batch_size: int,
+        with_meta: bool,
+        half_precision: bool,
+    ):
+        """Yield (item index array, float32 prediction array) per batch, in
+        sampler order.
+
+        Batch k+1 is encoded and queued on the GPU before batch k is yielded,
+        so the caller's post-processing of batch k overlaps with GPU work.
+        Inputs are staged in two pinned host slots: slot k % 2 is reused only
+        after batch k-2's copy has completed (its event is waited on before
+        batch k-2 is yielded).
+        """
+        if model.mod_embedding.in_features != MOD_FEATURE_DIM:
+            raise ValueError(
+                f"model expects {model.mod_embedding.in_features} modification "
+                f"features, the encoder produces {MOD_FEATURE_DIM}"
+            )
+        device = torch.device(self.device)
+        use_cuda = device.type == "cuda"
+        max_tokens = batch_size * encoder.max_token_len
+
+        def host_buffer(numel, dtype):
+            buf = torch.empty(numel, dtype=dtype)
+            return buf.pin_memory() if use_cuda else buf
+
+        host_slots = [
+            (
+                host_buffer(max_tokens, torch.int8),
+                host_buffer(max_tokens * MOD_FEATURE_DIM, torch.float32),
+                host_buffer(batch_size * 4, torch.float32),
+            )
+            for _ in range(2)
+        ]
+        # same dtypes as the host slots: one plain DMA per input, cast on the GPU
+        dev_aa = torch.empty(max_tokens, dtype=torch.int8, device=device)
+        dev_mod = torch.empty(
+            max_tokens * MOD_FEATURE_DIM, dtype=torch.float32, device=device
+        )
+        dev_meta = torch.empty(batch_size * 4, dtype=torch.float32, device=device)
+
+        def wait(pending):
+            batch_idx, y_host, event = pending
+            if event is not None:
+                event.synchronize()
+            return batch_idx, y_host.numpy()
+
+        pending = None
+        for k, batch_idx in enumerate(batch_sampler):
+            batch_idx = np.asarray(batch_idx, dtype=np.int64)
+            n = batch_idx.shape[0]
+            if n > batch_size:
+                raise ValueError(f"batch of {n} exceeds batch_size {batch_size}")
+            L = encoder.token_length(batch_idx[0])
+            aa_buf, mod_buf, meta_buf = host_slots[k % 2]
+            h_aa = aa_buf[: n * L].view(n, L)
+            h_mod = mod_buf[: n * L * MOD_FEATURE_DIM].view(n, L, MOD_FEATURE_DIM)
+            h_meta = meta_buf[: n * 4].view(n, 4)
+            encoder.encode(
+                batch_idx,
+                h_aa.numpy(),
+                h_mod.numpy(),
+                h_meta.numpy() if with_meta else None,
+            )
+
+            # context managers are exited before yielding, so their thread-local
+            # state does not leak into the caller
+            with (
+                torch.inference_mode(),
+                torch.autocast(
+                    "cuda", dtype=torch.float16, enabled=use_cuda and half_precision
+                ),
+            ):
+                x_aa = dev_aa[: n * L].view(n, L)
+                x_mod = dev_mod[: n * L * MOD_FEATURE_DIM].view(n, L, MOD_FEATURE_DIM)
+                x_aa.copy_(h_aa, non_blocking=use_cuda)
+                x_mod.copy_(h_mod, non_blocking=use_cuda)
+                inputs = [x_aa.long(), x_mod]
+                if with_meta:
+                    x_meta = dev_meta[: n * 4].view(n, 4)
+                    x_meta.copy_(h_meta, non_blocking=use_cuda)
+                    inputs.append(x_meta)
+                y_pred = model(*inputs).float()
+                # a non_blocking D2H copy lands in pinned memory
+                y_host = y_pred.to("cpu", non_blocking=use_cuda)
+            event = None
+            if use_cuda:
+                event = torch.cuda.Event()
+                event.record(torch.cuda.current_stream(device))
+
+            if pending is not None:
+                yield wait(pending)
+            pending = (batch_idx, y_host, event)
+
+        if pending is not None:
+            yield wait(pending)
+
     def predict_rt(
         self,
         peptide_df: pl.DataFrame,
         modification_df: pl.DataFrame,
         precursor_df: pl.DataFrame,
-        batch_size: int = 512,
+        batch_size: int = DEFAULT_BATCH_SIZE,
         progress: ProgressTracker = None,
     ):
-        precursor_ds = PeptideDataset(
-            precursor_df, modification_df, peptide_df, level="peptidoform"
-        )
+        encoder = PeptideBatchEncoder(peptide_df, modification_df)
         batch_sampler = SeqDataBatchSampler(
-            precursor_ds,
+            encoder,
             batch_grouping_column="sequence_length",
             batch_size=batch_size,
             shuffle=False,
@@ -502,47 +583,23 @@ class SpectralLibGenerator:
                 "Predicting RT", total=total_batches, portion=100
             )
 
-        dl = DataLoader(
-            dataset=precursor_ds, batch_sampler=batch_sampler, num_workers=0
-        )
-
-        # GPU buffers reused for every H2D copy
-        max_token_len = peptide_df["sequence_length"].max() + 3
-        mod_feat_dim = self.rt_predictor.mod_embedding.in_features
-        X_aa_buf = torch.empty(
-            (batch_size, max_token_len), dtype=torch.long, device=self.device
-        )
-        X_mod_buf = torch.empty(
-            (batch_size, max_token_len, mod_feat_dim),
-            dtype=torch.float32,
-            device=self.device,
-        )
-
         out_peptidoform_index = np.empty(modification_df.shape[0], dtype=np.uint32)
         out_ref_rt = np.empty(modification_df.shape[0], dtype=np.float32)
         offset = 0
-        rt_predictor = self.rt_predictor
 
-        with torch.inference_mode():
-            for batch in Prefetcher(dl, transform=pin_tensor_dict):
-                peptidoform_index_arr = (
-                    batch["peptidoform_index"].to(torch.uint32).numpy()
-                )
-                x_aa_t = batch["x_aa"]
-                x_mod_t = batch["x_mod"]
-
-                n, L = x_aa_t.shape
-                X_aa_buf[:n, :L].copy_(x_aa_t, non_blocking=True)
-                X_mod_buf[:n, :L, :].copy_(x_mod_t, non_blocking=True)
-
-                y_pred = rt_predictor(X_aa_buf[:n, :L], X_mod_buf[:n, :L, :])
-
-                out_peptidoform_index[offset : offset + n] = peptidoform_index_arr
-                out_ref_rt[offset : offset + n] = (
-                    y_pred.flatten().detach().cpu().numpy()
-                )
-                offset += n
-                batch_progress.advance(1)
+        for batch_idx, y_pred in self._predict_in_batches(
+            self.rt_predictor,
+            encoder,
+            batch_sampler,
+            batch_size,
+            with_meta=False,
+            half_precision=False,
+        ):
+            n = batch_idx.shape[0]
+            out_peptidoform_index[offset : offset + n] = batch_idx
+            out_ref_rt[offset : offset + n] = y_pred.reshape(-1)
+            offset += n
+            batch_progress.advance(1)
 
         if own_progress:
             progress.complete()
@@ -566,7 +623,7 @@ class SpectralLibGenerator:
         progress: ProgressTracker = None,
         save_dir: Union[str, Path] = None,
         precursor_chunk_size: int = None,
-        batch_size: int = 512,
+        batch_size: int = DEFAULT_BATCH_SIZE,
     ):
         """Return (MS2 result, modification_df, precursor_df with fragment indexing).
 

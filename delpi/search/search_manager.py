@@ -141,11 +141,11 @@ class SearchManager:
 
             from delpi.search.database import build_database_in_subprocess
 
-            batch_size = self.search_config.config.get("batch_size", 512)
+            # the library batch size is fixed rather than the search batch_size:
+            # library inference needs < 3 GB at DEFAULT_BATCH_SIZE
             build_database_in_subprocess(
                 self.search_config,
                 self.device,
-                batch_size=batch_size,
                 progress=self._progress,
             )
         else:

@@ -19,7 +19,10 @@ from delpi.database.enzyme import (
 from delpi.database.decoy_generator import DecoyGenerator
 from delpi.database.modification_handler import ModificationHandler
 from delpi.database.precursor_generator import PrecursorGenerator
-from delpi.database.spec_lib_generator import SpectralLibGenerator
+from delpi.database.spec_lib_generator import (
+    DEFAULT_BATCH_SIZE,
+    SpectralLibGenerator,
+)
 from delpi.database.utils import create_peptidoform_df, il_normalized_sequence_expr
 from delpi.search.progress import ProgressTracker
 from delpi.utils.yaml_file import load_yaml, save_yaml
@@ -134,7 +137,7 @@ class PeptideDatabase:
         progress: ProgressTracker = None,
         save_dir: Union[str, Path] = None,
         precursor_chunk_size: int = None,
-        batch_size: int = 512,
+        batch_size: int = DEFAULT_BATCH_SIZE,
         min_intensity: float = 0.01,
         nce: float = DEFAULT_NCE,
         *args,

@@ -7,6 +7,10 @@ import torch
 
 from delpi.lcms.base_ion_type import BaseIonType
 from delpi.database.peptide_database import PeptideDatabase
+from delpi.database.spec_lib_generator import (
+    DEFAULT_BATCH_SIZE,
+    DEFAULT_PRECURSOR_CHUNK_SIZE,
+)
 from delpi.search.config import SearchConfig
 from delpi.search.progress import CallbackProgressTracker, TqdmProgressTracker
 from delpi.utils.log_config import configure_logging
@@ -19,7 +23,7 @@ logger = logging.getLogger(__name__)
 def build_database(
     search_config: SearchConfig,
     device: torch.device,
-    batch_size: int = 512,
+    batch_size: int = DEFAULT_BATCH_SIZE,
     progress_queue=None,
 ):
     use_tqdm = progress_queue is None
@@ -73,7 +77,7 @@ def build_database(
             nce=search_config.nce,
             device=device,
             use_multiprocessing=True,
-            precursor_chunk_size=65_536,
+            precursor_chunk_size=DEFAULT_PRECURSOR_CHUNK_SIZE,
             save_dir=db_dir,
             batch_size=batch_size,
             progress=progress,
@@ -91,7 +95,7 @@ def build_database(
 def build_database_in_subprocess(
     search_config: SearchConfig,
     device: torch.device,
-    batch_size: int = 512,
+    batch_size: int = DEFAULT_BATCH_SIZE,
     progress: CallbackProgressTracker = None,
 ):
     # forkserver/spawn, not fork: forking a process that already runs numba
