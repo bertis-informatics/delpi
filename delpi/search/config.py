@@ -7,7 +7,7 @@ from delpi.chem.modification_param import ModificationParam
 from delpi.search.result_manager import ResultManager
 from delpi.database.decoy_generator import DecoyGenerator
 from delpi.utils.yaml_file import load_yaml, save_yaml, resolve_input_files
-from delpi.constants import DEFAULT_Q_VALUE_CUTOFF, MIN_SEARCH_FRAGMENTS
+from delpi.constants import DEFAULT_NCE, DEFAULT_Q_VALUE_CUTOFF, MIN_SEARCH_FRAGMENTS
 from delpi.search.tda.protein_scoring import (
     DEFAULT_PROTEIN_SCORING,
     ProteinScoringMethod,
@@ -122,6 +122,7 @@ class SearchConfig:
 
         validate_protein_scoring(self.protein_scoring)
         _ = self.min_search_fragments  # validate early
+        _ = self.nce
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -169,6 +170,7 @@ class SearchConfig:
                 for k, v in db_params["fragment"].items()
                 if k not in SEARCH_ONLY_FRAGMENT_KEYS
             }
+            db_params["fragment"]["nce"] = self.nce  # compare the value built
 
         if "decoy_method" in db_params:
             # Compare the method that is actually built (null -> default).
@@ -198,6 +200,17 @@ class SearchConfig:
             raise ValueError(
                 f"fragment.min_fragments must be an integer >= 3, got {value!r}"
             )
+        return value
+
+    @property
+    def nce(self) -> float:
+        """MS2 predictor NCE for the library (``fragment.nce``, default 30)."""
+        fragment = self.config.get("fragment") or {}
+        value = fragment.get("nce")
+        if value is None:  # absent or left empty in YAML
+            return DEFAULT_NCE
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+            raise ValueError(f"fragment.nce must be a positive number, got {value!r}")
         return value
 
     @property
@@ -273,6 +286,9 @@ class SearchConfig:
         # Libraries built before the key rename store the method as "decoy".
         if "decoy" in saved_params and "decoy_method" not in saved_params:
             saved_params["decoy_method"] = saved_params.pop("decoy")
+        # Libraries built before fragment.nce existed used DEFAULT_NCE.
+        if isinstance(saved_params.get("fragment"), dict):
+            saved_params["fragment"].setdefault("nce", DEFAULT_NCE)
         current_params = self.get_db_params()
 
         return self._find_diff_keys(saved_params, current_params)

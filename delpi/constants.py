@@ -27,6 +27,8 @@ COMMON_NEUTRAL_LOSS_INDEX = {
 }
 
 MAX_FRAGMENTS = 16
+# MS2 predictor input when fragment.nce is not set
+DEFAULT_NCE = 30
 
 # Isotopes of theoretical peaks (precursor: averagine rows, fragment:
 # TheoreticalPeakContainer.fragment_mz_arr rows); a library reader keeps the

@@ -70,6 +70,7 @@ def build_database(
             suffix_ion_type=BaseIonType.Y,
             max_fragments=search_config["fragment"].get("max_fragments", MAX_FRAGMENTS),
             min_intensity=search_config["fragment"].get("min_intensity", 0.01),
+            nce=search_config.nce,
             device=device,
             use_multiprocessing=True,
             precursor_chunk_size=65_536,

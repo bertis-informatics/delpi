@@ -26,6 +26,7 @@ from delpi.database.numba.spec_lib_utils import update_speclib_chunk_arr
 from delpi.utils.prefetch import Prefetcher, pin_tensor_dict
 from delpi.search.progress import ProgressTracker, TqdmProgressTracker
 from delpi import MODEL_DIR
+from delpi.constants import DEFAULT_NCE
 
 
 class SpectralLibGenerator:
@@ -49,6 +50,7 @@ class SpectralLibGenerator:
         max_fragment_mz: float = 1800,
         apply_phospho: bool = False,
         min_intensity: float = 0.01,
+        nce: float = DEFAULT_NCE,
         device: Union[str, torch.device] = "cuda:0",
         ms2_predictor: Ms2SpectrumPredictor = None,
         rt_predictor: RetentionTimePredictor = None,
@@ -59,6 +61,7 @@ class SpectralLibGenerator:
             raise ValueError("min_intensity must be in [0, 1].")
         self.max_fragments = max_fragments
         self.min_intensity = min_intensity
+        self.nce = nce
         self.min_fragment_mz = min_fragment_mz
         self.max_fragment_mz = max_fragment_mz
         neutral_losses = [NeutralLoss.NO_LOSS]
@@ -103,6 +106,7 @@ class SpectralLibGenerator:
             "suffix_ion_type": self.fragmentation.base_ion_types[1].symbol,
             "max_fragments": self.max_fragments,
             "min_intensity": self.min_intensity,
+            "nce": self.nce,
             # 2: variable fragment rows per precursor (speclib_offset/rows).
             "format_version": 2,
             "min_mz": self.min_fragment_mz,
@@ -296,7 +300,7 @@ class SpectralLibGenerator:
         # batches are grouped by sequence_length and never span two chunks, so
         # chunk transitions can be detected from the batch stream
         precursor_ds = PeptideDataset(
-            precursor_df, modification_df, peptide_df, level="precursor"
+            precursor_df, modification_df, peptide_df, level="precursor", nce=self.nce
         )
         batch_sampler = ChunkedSeqDataBatchSampler(
             precursor_ds,

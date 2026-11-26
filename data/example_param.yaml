@@ -133,6 +133,8 @@ fragment:
   max_mz: 1800
   # max_fragments: 16    # most intense fragments stored per precursor (upper bound)
   # min_intensity: 0.01  # minimum predicted intensity relative to the strongest fragment
+  # nce: 30              # collision energy given to the MS2 predictor; part of the
+  #                      # library, so a new value needs a new database_directory
   # min_fragments: 5     # search only precursors with at least this many stored
   #                      # fragments (integer >= 3); applied at search time, so it
   #                      # can change without rebuilding the library

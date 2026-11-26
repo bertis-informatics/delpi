@@ -7,6 +7,7 @@ import torch
 from delpi.lcms.base_ion_type import BaseIonType
 from delpi.chem.amino_acid import AminoAcid
 from delpi.chem.modification_param import ModificationParam
+from delpi.constants import DEFAULT_NCE
 from delpi.database.fasta_parser import FastaParser
 from delpi.database.enzyme import (
     Enzyme,
@@ -135,6 +136,7 @@ class PeptideDatabase:
         precursor_chunk_size: int = None,
         batch_size: int = 512,
         min_intensity: float = 0.01,
+        nce: float = DEFAULT_NCE,
         *args,
         **kwargs,
     ) -> Self:
@@ -207,6 +209,7 @@ class PeptideDatabase:
             max_fragment_mz=max_fragment_mz,
             apply_phospho=mod_handler.has_phospho,
             min_intensity=min_intensity,
+            nce=nce,
             device=device,
         )
         # precursor_df gains speclib_offset/speclib_rows (variable fragment rows).

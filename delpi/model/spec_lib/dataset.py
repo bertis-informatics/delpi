@@ -3,12 +3,12 @@ import torch
 import polars as pl
 from torch.utils.data import Dataset
 
+from delpi.constants import DEFAULT_NCE
 from delpi.model.spec_lib.aa_encoder import (
     encode_sequence,
     encode_modification_feature_from_strings,
 )
 
-DEFAULT_NCE = 30
 DEFAULT_FRAGMENTATION = 0
 DEFAULT_MASS_ANALYZER = 0
 
@@ -21,9 +21,11 @@ class PeptideDataset(Dataset):
         modification_df: pl.DataFrame,
         peptide_df: pl.DataFrame,
         level: str = "precursor",  # "precursor" or "peptidoform"
+        nce: float = DEFAULT_NCE,  # x_meta NCE (precursor level only)
     ):
         assert level in ["precursor", "peptidoform"], "Invalid dataset level"
         self.is_precursor_level = level == "precursor"
+        self.nce = nce
 
         # Every table's primary key is 0..N-1 and row-position-aligned, so
         # foreign keys resolve via plain array indexing instead of a join:
@@ -70,7 +72,7 @@ class PeptideDataset(Dataset):
             x_meta = torch.FloatTensor(
                 [
                     precursor_charge,
-                    DEFAULT_NCE,
+                    self.nce,
                     DEFAULT_FRAGMENTATION,
                     DEFAULT_MASS_ANALYZER,
                 ]

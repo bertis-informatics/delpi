@@ -451,6 +451,7 @@ class SearchManager:
             max_fragment_charge=search_config["fragment"].get("max_charge", 2),
             min_fragment_mz=search_config["fragment"].get("min_mz", 200),
             max_fragment_mz=search_config["fragment"].get("max_mz", 1800),
+            nce=search_config.nce,
             ms2_predictor=ms2_predictor,
             rt_predictor=rt_predictor,
         )
