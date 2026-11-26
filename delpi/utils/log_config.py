@@ -31,7 +31,7 @@ def configure_logging(
     handlers = []
     log_formatter = logging.Formatter(fmt=LOG_FORMAT, datefmt=LOG_DATE_FORMAT)
 
-    # 1. stdout handler (tqdm-compatible when tqdm bars are active)
+    # stdout, tqdm-compatible when tqdm bars are active
     if use_tqdm:
         stream_handler = TqdmLoggingHandler(sys.stdout)
     else:
@@ -39,7 +39,6 @@ def configure_logging(
     stream_handler.setFormatter(log_formatter)
     handlers.append(stream_handler)
 
-    # 2. file handler
     if logfile_path:
         logfile_path = Path(logfile_path)
         if not logfile_path.parent.exists():
@@ -48,8 +47,7 @@ def configure_logging(
         file_handler.setFormatter(log_formatter)
         handlers.append(file_handler)
 
-    # 3. basic config
     logging.basicConfig(level=level, handlers=handlers, force=True)
 
-    # 4. ignore false positive warnings from lightning
+    # false-positive Lightning warnings
     warnings.filterwarnings("ignore", category=PossibleUserWarning)

@@ -24,15 +24,12 @@ def _dotnet_handles():
 
 
 def DotNetArrayToNPArray(src, dtype=np.float64):
-    """
-    See https://mail.python.org/pipermail/pythondotnet/2014-May/001527.html
+    """Copy a .NET ``double[]`` into a new NumPy array of `dtype`.
 
-    GCHandle pins the .NET array and np.frombuffer creates a zero-copy view.
-    The pin is released in `finally`, so we must copy the data before returning;
-    otherwise the numpy array becomes a dangling pointer and may segfault
-    when the .NET GC compacts the heap.
-
-    Pass dtype (e.g. np.float32) to convert in a single copy instead of two.
+    See https://mail.python.org/pipermail/pythondotnet/2014-May/001527.html.
+    The data is copied while the array is pinned: a view would dangle once the
+    pin is released and the .NET GC compacts the heap. Passing `dtype` (e.g.
+    np.float32) converts in the same copy.
     """
     if src is None:
         return np.array([], dtype=dtype)
@@ -49,8 +46,7 @@ def DotNetArrayToNPArray(src, dtype=np.float64):
     return dest
 
 
-# Maps a NumPy source dtype to (the expected .NET array element type name,
-# the equivalent ctypes scalar type) used by `pinned_dotnet_array_view`.
+# NumPy dtype -> (.NET element type name, ctypes scalar type)
 _DOTNET_ELEMENT_TYPES = {
     np.dtype(np.float64): ("Double", ctypes.c_double),
     np.dtype(np.float32): ("Single", ctypes.c_float),
@@ -60,19 +56,13 @@ _DOTNET_ELEMENT_TYPES = {
 def pin_dotnet_array(
     src, *, source_dtype: np.dtype = np.float64, validate: bool = True
 ):
-    """Low-level primitive behind :func:`pinned_dotnet_array_view`.
+    """Pin ``src`` and return ``(view, handle)``, a zero-copy read-only view.
 
-    Pins ``src`` and returns ``(view, handle)``. The caller **must** call
-    :func:`unpin_dotnet_array(handle)` in a ``finally`` block once done with
-    ``view`` - prefer the :func:`pinned_dotnet_array_view` context manager
-    unless profiling shows its overhead matters (e.g. many thousands of
-    calls in a hot per-scan loop): a context manager built on a generator
-    function has measurable overhead of its own (protocol dispatch, the
-    generator's extra ``next()`` call, etc.) that is worth avoiding in a
-    tight loop called once per scan.
-
-    ``handle`` is ``None`` when ``src`` is ``None``/empty (nothing to pin);
-    :func:`unpin_dotnet_array` is a no-op for ``None``.
+    The caller must pass ``handle`` to :func:`unpin_dotnet_array` in a
+    ``finally`` block once done with ``view``. Prefer the
+    :func:`pinned_dotnet_array_view` context manager except in hot per-scan
+    loops, where its generator overhead adds up. ``handle`` is ``None`` for a
+    ``None`` or empty ``src``.
     """
     if src is None or len(src) == 0:
         return np.empty(0, dtype=source_dtype), None
@@ -111,33 +101,18 @@ def unpin_dotnet_array(handle) -> None:
 def pinned_dotnet_array_view(
     src, *, source_dtype: np.dtype = np.float64, validate: bool = True
 ) -> Iterator[np.ndarray]:
-    """Temporarily expose a zero-copy, read-only NumPy view over a pinned
-    .NET array.
+    """Zero-copy, read-only NumPy view over a pinned .NET array.
 
-    Unlike :func:`DotNetArrayToNPArray`, this does **not** copy: the yielded
-    view aliases the pinned .NET memory directly. The GCHandle is freed as
-    soon as the ``with`` block exits, so the view MUST NOT be used (read,
-    stored, or returned) after the context manager exits - doing so is
-    equivalent to holding a dangling pointer once the .NET GC can move or
-    collect the underlying array.
+    The handle is freed when the ``with`` block exits; the view must not be
+    used after that, since the .NET GC may then move or collect the array.
+    For hot per-scan loops, use :func:`pin_dotnet_array` and
+    :func:`unpin_dotnet_array` directly.
 
     Args:
         src: a .NET array (e.g. ``System.Double[]``), or ``None``.
-        source_dtype: expected NumPy-equivalent element dtype. The actual
-            .NET element type is validated against this before pinning.
-        validate: if ``False``, skip the ``GetType().GetElementType().Name``
-            reflection check. This check is a real (measured) pythonnet
-            boundary cost when repeated per-scan in a hot loop; callers that
-            already validated the element type once for a given array source
-            (e.g. once per RAW file/instrument) should pass ``False`` on
-            subsequent calls.
-
-    Note:
-        For very hot loops (thousands of calls, e.g. once per scan), prefer
-        the lower-level :func:`pin_dotnet_array`/:func:`unpin_dotnet_array`
-        pair with an explicit ``try``/``finally`` - this context manager's
-        generator-based protocol has measurable overhead of its own at that
-        call frequency.
+        source_dtype: NumPy dtype the .NET element type is checked against.
+        validate: run that reflection check. It is a measurable pythonnet cost
+            per scan, so callers that checked once per source can pass False.
     """
     view, handle = pin_dotnet_array(src, source_dtype=source_dtype, validate=validate)
     try:
@@ -150,9 +125,8 @@ def pinned_dotnet_array_view(
 def pinned_dotnet_array_views(
     *arrays, source_dtype: np.dtype = np.float64, validate: bool = True
 ) -> Iterator[Tuple[np.ndarray, ...]]:
-    """Like :func:`pinned_dotnet_array_view`, but pins/yields multiple .NET
-    arrays at once (e.g. masses + intensities), guaranteeing every GCHandle
-    is released even if pinning or use of a later array raises.
+    """:func:`pinned_dotnet_array_view` for several arrays at once; every
+    handle is released even if a later pin or the ``with`` body raises.
     """
     with ExitStack() as stack:
         views = tuple(
@@ -181,10 +155,12 @@ def _norm_cdf(z: float) -> float:
 def compute_z_score_cdf_numba(
     ab_arr: np.ndarray, peak_range_arr: np.ndarray
 ) -> np.ndarray:
-    """
-    ab_arr: 1-D float32 intensity array of length N
-    peak_range_arr: shape (M, 2) [start, end) integer
-    returns: float32 array of length N in [0,1] (robust z -> normal CDF)
+    """Normal CDF of each peak's robust z-score within its spectrum.
+
+    ``ab_arr`` is the (N,) float32 intensity array and ``peak_range_arr`` the
+    (M, 2) integer ``[start, end)`` range of each spectrum. z is
+    (ab - median) / IQR. Returns (N,) float32 in [0, 1]; 0.5 for peaks outside
+    any range or in a spectrum with zero IQR.
     """
     n = ab_arr.shape[0]
     out = np.empty(n, dtype=np.float32)
@@ -197,7 +173,7 @@ def compute_z_score_cdf_numba(
         ed = int(peak_range_arr[i, 1])
         if ed > st:
             ab = ab_arr[st:ed]
-            # Numba(>=0.47)
+            # np.quantile needs Numba >= 0.47
             q1, q2, q3 = np.quantile(ab, np.array([0.25, 0.5, 0.75]))
             iqr = q3 - q1
             if iqr > 0.0:

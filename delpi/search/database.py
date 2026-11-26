@@ -84,7 +84,7 @@ def build_database(
         progress.complete()
         progress.close()
         if progress_queue is not None:
-            progress_queue.put(None)  # sentinel — tells parent we're done
+            progress_queue.put(None)  # sentinel: the build is done
 
 
 def build_database_in_subprocess(
@@ -93,8 +93,8 @@ def build_database_in_subprocess(
     batch_size: int = 512,
     progress: CallbackProgressTracker = None,
 ):
-    # Use 'spawn' instead of 'fork' to avoid deadlocks with Numba's threading
-    # when the main process is already multi-threaded (e.g., from Numba JIT compilation)
+    # forkserver/spawn, not fork: forking a process that already runs numba
+    # threads can deadlock
     from delpi.utils.mp import get_multiprocessing_context
 
     mp_ctx = get_multiprocessing_context()
@@ -109,7 +109,7 @@ def build_database_in_subprocess(
     logger.debug(f"Start a child process (PID: {p.pid})")
 
     if progress_queue is not None:
-        # Drain snapshots from the child and forward to the caller's tracker
+        # forward the child's snapshots to the caller's tracker
         while True:
             try:
                 snapshot = progress_queue.get(timeout=1.0)

@@ -41,16 +41,14 @@ class PrecursorGenerator:
         # peptides = peptide_df["peptide"].to_numpy().astype(str)
         peptide_list = List(peptide_df["peptide"])
 
-        ## a bit messy codes for faster computation
         count_mods = (
             pl.when(pl.col("mod_ids").is_null())
             .then(0)
             .otherwise(pl.col("mod_ids").str.split(MOD_SEPARATOR).list.len())
         )
 
-        # index_arr consitsts of [peptide_index, start_index, stop_index]
-        # mod_ids and mod_sites can be obtained from mod_info_arr
-        # (start_index, stop_index) are row indexes of mod_info_arr
+        # index_arr rows: [peptide_index, start_index, stop_index], where
+        # start:stop are the peptidoform's rows in mod_info_arr
         index_arr = (
             mod_df.with_columns(count_mods.cum_sum().alias("stop_index"))
             .select(
@@ -61,14 +59,14 @@ class PrecursorGenerator:
             .to_numpy()
         )
 
-        # mod_info_arr consists of (mod_ids, mod_sites)
+        # mod_info_arr rows: (mod_id, mod_site)
         mod_info_arr = (
             mod_df.filter(pl.col("mod_ids").is_not_null())
             .select(
                 pl.col("mod_ids").str.split(MOD_SEPARATOR).cast(pl.List(pl.UInt32)),
                 pl.col("mod_sites").str.split(MOD_SEPARATOR).cast(pl.List(pl.Int8)),
             )
-            # rows were pre-filtered on mod_ids.is_not_null(), so lists are never empty; empty_as_null is a no-op
+            # mod_ids is non-null here, so lists are never empty (empty_as_null no-op)
             .explode(pl.all(), empty_as_null=True)
             .to_numpy()
         )
@@ -104,7 +102,7 @@ class PrecursorGenerator:
             modification_df.select(
                 pl.col("peptidoform_index", "precursor_mass"), get_charge
             )
-            # min_charge <= max_charge guarantees a non-empty range, so empty_as_null is a no-op
+            # min_charge <= max_charge: the range is never empty (empty_as_null no-op)
             .explode("precursor_charge", empty_as_null=True)
             .select(pl.col("peptidoform_index", "precursor_charge"), get_mz)
             .filter(pl.col("precursor_mz").is_between(self.min_mz, self.max_mz))

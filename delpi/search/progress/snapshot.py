@@ -1,4 +1,4 @@
-"""Immutable snapshot of root tracker state at one point in time."""
+"""`ProgressSnapshot`, the state passed to progress callbacks."""
 
 from __future__ import annotations
 

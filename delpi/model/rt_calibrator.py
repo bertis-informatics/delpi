@@ -68,7 +68,6 @@ class LinearProjectionCalibrator:
 
     def predict(self, ref_rt: Union[np.ndarray, List, pl.Series]):
 
-        # "predicted_rt"
         ref_rt_arr = self._to_array(ref_rt)
 
         conf_interval = self.rt_tolerance * self.lc_grad_len
@@ -109,24 +108,21 @@ class RetentionTimeCalibrator(LinearProjectionCalibrator):
         ref_rt: Union[np.ndarray, List, pl.Series],
         obs_rt: Union[np.ndarray, List, pl.Series],
     ):
-        # Use float64 to make polynomial regression numerically stable across
-        # sklearn / LAPACK implementations.
+        # float64 keeps the polynomial fit stable across sklearn/LAPACK builds
         x_train = self._to_array(ref_rt).astype(np.float64).reshape(-1, 1)
         y_train = self._to_array(obs_rt).astype(np.float64)
 
-        # fitting calibrator model
         estimator = make_pipeline(
-            # include_bias=False avoids duplicating the intercept term because
-            # LinearRegression already fits an intercept by default.
+            # LinearRegression already fits the intercept
             PolynomialFeatures(degree=self.degree, include_bias=False),
             LinearRegression(),
         ).fit(x_train, y_train)
 
-        # estimate residuals
         y_pred = estimator.predict(x_train)
         residuals = y_train - y_pred
 
-        #### Residual Modeling with Heteroscedasticity-Aware Error Modeling
+        # heteroscedastic error model: fit positive and negative residual
+        # magnitudes separately as functions of predicted RT
         mask = residuals > 0
         upper_residual_estimator = make_pipeline(
             PolynomialFeatures(degree=self.degree, include_bias=False),
@@ -141,7 +137,7 @@ class RetentionTimeCalibrator(LinearProjectionCalibrator):
 
         self.residual_estimator = (lower_residual_estimator, upper_residual_estimator)
 
-        #### Conformal Prediction with Residual Binning
+        # disabled alternative: conformal prediction with residual binning
         # rt_points = np.linspace(y_pred.min() - 1, y_pred.max() + 1, num=20)
         # rt = []
         # rt_scale = []
@@ -163,13 +159,13 @@ class RetentionTimeCalibrator(LinearProjectionCalibrator):
 
     def get_confident_interval(self, rt_pred, confidence_interval_sigma):
 
-        #### Residual Modeling with Heteroscedasticity-Aware Error Modeling
+        # heteroscedastic error model
         lower_res = self.residual_estimator[0].predict(rt_pred.reshape((-1, 1)))
         upper_res = self.residual_estimator[1].predict(rt_pred.reshape((-1, 1)))
         lower_interval = lower_res * confidence_interval_sigma
         upper_interval = upper_res * confidence_interval_sigma
 
-        #### Conformal Prediction with Residual Binning
+        # disabled alternative: conformal prediction with residual binning
         # lower_interval = (
         #     np.interp(rt_pred, self._rt, self._rt_scale[:, 0])
         #     * confidence_interval_sigma
@@ -225,7 +221,7 @@ class RetentionTimeCalibrator(LinearProjectionCalibrator):
         figure_path: Path = None,
         degree: int = 5,
     ) -> Self:
-        """Convenience method to train the calibrator."""
+        """Construct and fit a calibrator; optionally save an RT mapping plot."""
         calibrator = cls(
             min_rt_in_seconds,
             max_rt_in_seconds,
@@ -339,18 +335,14 @@ class RetentionTimeCalibrator(LinearProjectionCalibrator):
 
 
 class BootstrapRTCalibrator(LinearProjectionCalibrator):
-    """Huber-robust, degree-<=`max_degree` RT calibrator used only by the
-    DIA bootstrap calibration pipeline (:mod:`delpi.search.dia.rt_bootstrap`).
-    Not persisted via HDF; used only transiently before the first full DIA
-    search.
+    """Huber-robust polynomial RT calibrator for the DIA bootstrap
+    (:mod:`delpi.search.dia.rt_bootstrap`); transient, not saved to HDF.
 
-    Uses a scikit-learn
-    ``Pipeline(PolynomialFeatures, StandardScaler, HuberRegressor)``, always
-    fitting at a fixed `max_degree` (no monotonicity-driven degree
-    downgrade). Outlier rejection relies on `HuberRegressor`'s own
-    `outliers_` mask instead of iterative MAD clipping, and the RT
-    half-width is derived from the residual distribution rather than a
-    separately-fit residual model.
+    Fits ``Pipeline(PolynomialFeatures, StandardScaler, HuberRegressor)`` at
+    degree ``min(max_degree, n - 1)``. Inliers are the complement of
+    ``HuberRegressor.outliers_``. The RT half-width is the 0.99 quantile of
+    ``|residual - median inlier residual|``, clipped to the min/max RT
+    tolerance regardless of the residual spread.
     """
 
     def __init__(
@@ -403,9 +395,6 @@ class BootstrapRTCalibrator(LinearProjectionCalibrator):
         residual = y_train - estimator.predict(x_train)
         center = float(np.median(residual[inlier_mask]))
         required_half_width = float(np.quantile(np.abs(residual - center), 0.99))
-        # min_rt_tol_in_seconds/max_rt_tol_in_seconds act as a hard lower/
-        # upper bound on the search half-width, regardless of how wide the
-        # observed residual spread is.
         half_width = np.clip(
             required_half_width, self.min_rt_tol_in_seconds, self.max_rt_tol_in_seconds
         )
@@ -434,9 +423,8 @@ class BootstrapRTCalibrator(LinearProjectionCalibrator):
         x_flat = x.reshape(-1)
         finite_mask = np.isfinite(x_flat)
 
-        # sklearn's PolynomialFeatures rejects non-finite input outright, so
-        # non-finite ref_rt is mapped directly to the RT bounds instead of
-        # being extrapolated through the fitted model.
+        # PolynomialFeatures rejects non-finite input; map non-finite ref_rt
+        # to the RT bounds instead
         predicted = np.empty(x_flat.shape[0], dtype=np.float64)
         if np.any(finite_mask):
             predicted[finite_mask] = self.estimator.predict(x[finite_mask])

@@ -1,25 +1,15 @@
-"""Robust, incremental, initial DIA bootstrap calibration.
+"""Initial DIA RT calibration by incremental quick matching.
 
-Replaces the match-count-based `run_quick_search` stopping rule for the
-*initial* DIA calibration step (before the first full search) with:
-
-    per-DIA-window full-precursor quick matching, one window at a time
-    (like the legacy `run_quick_search`, but incremental/early-stopping)
-        -> cumulative target-decoy analysis (AnchorSelector, q-value based)
-        -> anchor count check
-        -> robust (Huber, degree<=2) calibration (BootstrapRTCalibrator)
-        -> stop on success, else keep matching more windows within a hard
-           workload budget
-        -> if the budget is exhausted, a best-effort fit with whatever
-           qualified anchors were collected (relaxed anchor-count floor)
-        -> if that also fails, fit directly on the raw top-scoring target
-           matches (ignoring the q-value requirement)
-        -> broad LinearProjectionCalibrator fallback only if even that
-           fails
-
-Orchestrated by `DIARTBootstrapCalibrator`. Only used by
-`DIASearchEngine.perform_rt_bootstrap()`; DDA and all other RT calibration
-stages (post-search, second-pass) are untouched.
+Used by `DIASearchEngine.perform_rt_bootstrap()` before the first full search,
+in place of `run_quick_search`'s match-count stopping rule. DIA windows are
+quick-matched one at a time in random order, all precursors of a window at once.
+After each window, the q-value-filtered anchors from all matches so far
+(`AnchorSelector`) are counted; once there are enough, a robust Huber fit of
+degree <= 2 (`BootstrapRTCalibrator`) is tried, and the first fit that passes
+QC is returned. Matching stops at a workload budget (`hard_limit` precursors).
+If the budget or the windows run out, one fit with the relaxed
+`min_anchors_best_effort` floor is tried before falling back to broad
+`LinearProjectionCalibrator` bounds.
 """
 
 import logging
@@ -46,8 +36,7 @@ _MATCH_SCHEMA = {
     "is_decoy": pl.Boolean,
 }
 
-# Number of bins used ONLY for the qualified-anchor coverage panel in the
-# saved diagnostic figure; not used anywhere in the anchor-selection logic.
+# bins of the anchor-coverage panel in the diagnostic figure only
 _PLOT_N_BINS = 10
 
 
@@ -83,18 +72,19 @@ class RTBootstrapResult:
 
 
 class AnchorSelector:
-    """Turns cumulative quick-match results into deduplicated, q-value
-    filtered RT anchors."""
+    """Deduplicated, q-value-filtered RT anchors from cumulative quick matches."""
 
     def __init__(self, cfg: RTBootstrapConfig):
         self.cfg = cfg
 
     def select(self, cumulative_df: pl.DataFrame) -> pl.DataFrame:
-        """q-values from ALL accumulated target+decoy matches, then target
-        filtering (q<=cutoff), finite-RT filtering, and one anchor per
-        peptidoform (highest score, ties broken by precursor_index). No
-        top-N fallback: an undersized result here means "keep collecting",
-        not "relax the threshold"."""
+        """One anchor per peptidoform among targets passing the q-value cutoff.
+
+        q-values are computed over all accumulated target and decoy matches;
+        anchors need finite RTs and keep the highest score (ties: lowest
+        precursor_index). No top-N fallback: too few anchors means keep
+        collecting.
+        """
         if cumulative_df.height == 0:
             return cumulative_df
 
@@ -136,15 +126,9 @@ class AnchorSelector:
 
 
 class DIARTBootstrapCalibrator:
-    """Orchestrates the initial DIA RT bootstrap: quick-matches every
-    precursor mapped to a DIA window, one window at a time (in random
-    order), checking after each window whether the cumulative q-value-
-    qualified anchors are enough for a robust fit, until a calibration
-    passes QC, the hard workload budget is exhausted, or every window has
-    been searched.
+    """Runs the initial DIA RT bootstrap described in the module docstring.
 
-    `spec_reader`/`match_fn` are optional injection points for testing;
-    production callers should leave them as None.
+    `spec_reader` and `match_fn` are injection points for tests; leave them None.
     """
 
     def __init__(
@@ -185,7 +169,7 @@ class DIARTBootstrapCalibrator:
         ).fit(self.spec_reader.modification_df["ref_rt"])
         self.spec_reader.calibrate_rt(initial_calibrator)
 
-    # -- one-time setup ------------------------------------------------------
+    # one-time setup
 
     def _broad_fallback_calibrator(self) -> LinearProjectionCalibrator:
         calibrator = LinearProjectionCalibrator(
@@ -196,16 +180,14 @@ class DIARTBootstrapCalibrator:
         return calibrator
 
     def _make_bin_edges(self, ref_rt_eligible: np.ndarray) -> np.ndarray:
-        """Only used to draw the coverage histogram in the diagnostic
-        figure -- not part of the anchor-selection/matching logic."""
+        """Bin edges for the diagnostic figure's coverage histogram only."""
         lo, hi = float(np.min(ref_rt_eligible)), float(np.max(ref_rt_eligible))
         return np.linspace(lo, hi if hi > lo else lo + 1.0, _PLOT_N_BINS + 1)
 
-    # -- per-window matching ----------------------------------------------------
+    # per-window matching
 
     def _match_window(self, dia_win, container) -> pl.DataFrame:
-        """Quick-match every precursor mapped to this DIA window -- no
-        sampling, mirrors the legacy `run_quick_search` per-window pass."""
+        """Quick-match every precursor of this DIA window (no sampling)."""
         num_precursors = container.precursor_mz_arr.shape[0]
         if num_precursors == 0:
             return pl.DataFrame(schema=_MATCH_SCHEMA)
@@ -245,7 +227,7 @@ class DIARTBootstrapCalibrator:
             schema=_MATCH_SCHEMA,
         )
 
-    # -- trial fitting -----------------------------------------------------
+    # trial fitting
 
     def _try_fit(self, anchors_df: pl.DataFrame):
         fit_df = self.anchor_selector.subsample_for_fit(anchors_df)
@@ -258,11 +240,11 @@ class DIARTBootstrapCalibrator:
     def _top_score_fit(
         self, cumulative_df: pl.DataFrame
     ) -> Tuple[Optional[BootstrapRTCalibrator], dict, pl.DataFrame]:
-        """Absolute last resort before the broad fallback: ignore the
-        q-value requirement entirely and fit directly on the
-        ``top_n_best_effort`` highest-scoring target matches (one per
-        peptidoform), still subject to `BootstrapRTCalibrator`'s own robust
-        Huber/residual-width QC."""
+        """Fit on the ``top_n_best_effort`` best-scoring targets, ignoring q-values.
+
+        One match per peptidoform; `BootstrapRTCalibrator`'s QC still applies.
+        Not called by `run()`.
+        """
         target_df = cumulative_df.filter(
             (~pl.col("is_decoy"))
             & pl.col("ref_rt").is_finite()
@@ -319,7 +301,7 @@ class DIARTBootstrapCalibrator:
         except Exception:
             logger.exception(f"Failed to save DIA RT bootstrap diagnostics")
 
-    # -- orchestration -----------------------------------------------------
+    # orchestration
 
     def run(self) -> RTBootstrapResult:
         broad_calibrator = self._broad_fallback_calibrator()
@@ -385,18 +367,14 @@ class DIARTBootstrapCalibrator:
                         )
                         return result
 
-            # never stop on the hard_limit alone before searching at least
-            # min_window_frac of all windows, so a handful of low-yield
-            # windows can't end the search prematurely
+            # hard_limit applies only after min_windows windows
             if n_evaluated >= self.cfg.hard_limit and n_windows >= min_windows:
                 break
 
         n_unique_anchors = anchors_df.height
 
-        # Budget/windows exhausted without ever reaching min_unique_anchors:
-        # rather than jumping straight to the very wide broad fallback
-        # bounds, make one last attempt with whatever qualified anchors were
-        # actually collected (relaxed anchor-count floor).
+        # budget or windows exhausted: one fit with the relaxed anchor floor
+        # before the broad fallback
         if n_unique_anchors >= self.cfg.min_anchors_best_effort:
             calibrator, diag, fit_df = self._try_fit(anchors_df)
             last_diag = diag

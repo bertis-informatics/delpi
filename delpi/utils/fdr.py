@@ -3,11 +3,8 @@ import numpy as np
 
 
 def fdr_to_q_values(fdr_values: np.ndarray) -> np.ndarray:
-    """Converts FDR values to q-values.
-    The q-value can be understood as the minimal FDR at which a PSM is accepted
-    Takes a ascending sorted array of FDR values and converts them to q-values.
-    for every element the lowest FDR where it would be accepted is used as q-value.
-    """
+    """Convert FDRs, ordered from best to worst score, to q-values: the
+    minimum FDR at each position or any later one."""
     fdr_values_flipped = np.flip(fdr_values)
     q_values_flipped = np.minimum.accumulate(fdr_values_flipped)
     q_vals = np.flip(q_values_flipped)

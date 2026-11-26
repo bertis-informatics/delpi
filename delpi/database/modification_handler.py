@@ -91,9 +91,8 @@ class ModificationHandler:
             for match in re.finditer(var_mod_patterns, seq)
         ]
 
-        # https://github.com/MannLabs/alphabase/issues/169
-        # The modification site in alphabase (mod_sites) is
-        # 1<=site<=n, 0 is for N-term, and -1 for C-term.
+        # alphabase mod_sites: 1..n for residues, 0 for N-term, -1 for C-term
+        # (https://github.com/MannLabs/alphabase/issues/169)
         get_site = lambda site: -1 if site == len(seq) - 1 else site
 
         num_mod_sites = len(mod_tups)
@@ -200,7 +199,7 @@ class ModificationHandler:
             id_to_name_map=id_to_name_map,
         )
 
-        ######## find var modification sites ########
+        # peptides with at least one variable modification site
         m_peptide_df = peptide_df.filter(
             pl.col("peptide").str.contains(var_mod_patterns)
         ).select(pl.col("peptide_index", "peptide"))
@@ -232,17 +231,16 @@ class ModificationHandler:
         use_multiprocessing: bool = False,
     ):
 
-        #### apply fixed modifications
+        # fixed modifications
         unmodified_df = self.generate_static_modifications(
             peptide_df, use_mp=use_multiprocessing
         )
 
-        #### apply variable modifications
+        # variable modifications
         var_mod_df = self.generate_variable_modifications(
             peptide_df, use_mp=use_multiprocessing
         )
 
-        #### apply variable modifications
         if var_mod_df is not None:
             # merge with static modifications
             cols = []

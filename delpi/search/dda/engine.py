@@ -1,8 +1,4 @@
-"""
-DDA Search Engine for DelPi
-
-This module provides the DDA-specific search engine implementation.
-"""
+"""DDA search engine."""
 
 import time
 import logging
@@ -42,19 +38,11 @@ TOPK_PER_PRECURSOR = 10
 
 
 class DDASearchEngine(BaseSearchEngine):
-    """
-    Data-Dependent Acquisition (DDA) search engine implementation.
+    """DDA search engine.
 
-    This engine implements the DDA-specific search pipeline:
-    1. MS2 peak grouping and precursor isolation
-    2. Fragment database matching with mass tolerance
-    3. Deep learning-based peptide-spectrum match scoring
-    4. Retention time calibration and prediction
-    5. Match clustering to resolve shared peaks
-
-    The engine processes DDA data by isolation windows, grouping peaks
-    into precursor-fragment relationships and scoring them using a
-    trained neural network model.
+    Per isolation window, matches library precursors to MS2 spectra, scores the
+    peak groups with the DelPi model, and clusters PmSMs that share center-spectrum
+    peaks. RT calibration is fitted after the search.
     """
 
     def __init__(
@@ -133,10 +121,8 @@ class DDASearchEngine(BaseSearchEngine):
 
         if progress is None:
             progress = DummyProgressTracker()
-        # portion=0: this child reports its own bar but does NOT advance the
-        # parent automatically. _search_spectra is invoked once per
-        # (ms2_map, speclib chunk); the parent (which counts ms2_maps) is
-        # advanced manually in _perform_full_search when an ms2_map completes.
+        # portion=0: called once per (ms2_map, speclib chunk); the parent counts
+        # ms2_maps and is advanced in _perform_full_search.
         batch_progress = progress.create_child("PmSMs", total=total_batches, portion=0)
 
         results = defaultdict(list)
@@ -187,7 +173,7 @@ class DDASearchEngine(BaseSearchEngine):
                 ms1_scale_arr = ms1_scale_t.numpy()[mask]
                 ms2_scale_arr = ms2_scale_t.numpy()[mask]
 
-                # cheap scalar per PmSM -- always saved, regardless of save_quant
+                # cheap, so saved even without save_quant
                 results["median_intensity"].append(
                     get_pmsm_median_intensity(x_exp, x_rank, ms2_scale_arr)
                 )
@@ -233,7 +219,7 @@ class DDASearchEngine(BaseSearchEngine):
         else:
             lc_peak_width = run.estimate_LC_fwhm() * 1.69
 
-        rt_window_half = lc_peak_width * 0.5  # in terms of seconds
+        rt_window_half = lc_peak_width * 0.5  # seconds
         self.lc_peak_width = lc_peak_width
 
         ms1_meta_df = run.ms1_map.get_meta_container()
@@ -291,8 +277,8 @@ class DDASearchEngine(BaseSearchEngine):
                     k: np.concatenate([r[k] for r in chunk_results])
                     for k in chunk_results[0]
                 }
-                # pairwise peak NMS over the pre-trained logits: a head and the
-                # PmSMs sharing >= 50% of their center peaks with it (cluster_gap)
+                # pairwise peak NMS over pre-trained logits: a head plus the PmSMs
+                # sharing >= 50% of their center peaks with it (used by cluster_gap)
                 cluster_arr = peak_nms_clusters(
                     merged["logit"], merged["center_peak_index"]
                 )
@@ -316,7 +302,7 @@ class DDASearchEngine(BaseSearchEngine):
                             prev_ms2_map, chunk_results, cluster_count
                         )
                         chunk_results = []
-                    # Previous ms2_map fully processed -> advance parent by 1.
+                    # previous ms2_map done
                     progress.advance(1)
                 prev_ms2_map = ms2_map
 
@@ -359,28 +345,16 @@ class DDASearchEngine(BaseSearchEngine):
     def perform_search(
         self, lcms_data: MassSpecData, progress: ProgressTracker = None
     ) -> ResultManager:
-        """
-        Perform the DDA search pipeline.
-
-        Args:
-            search_config: Search configuration
-            lcms_data: DDA LC-MS/MS data
-            progress: Progress tracker for reporting status
-
-        Returns:
-            ResultManager with search results
-        """
+        """Run the DDA search pipeline on `lcms_data`."""
         if progress is None:
             progress = DummyProgressTracker()
 
-        # Data preparation (20% of overall)
         prep_progress = progress.create_child("Data-Prep", total=1, portion=10)
         run = DDARun(lcms_data)
         run = run.prepare(num_groups=128)
         prep_progress.complete()
         logger.info("DDA data prepared")
 
-        # Full search (70% of overall)
         st_t = time.perf_counter()
         logger.info("Search started")
         save_quant = self.get_save_quant()
@@ -401,7 +375,6 @@ class DDASearchEngine(BaseSearchEngine):
         elapsed = time.perf_counter() - st_t
         logger.info(f"Search completed. Elapsed: {elapsed:.1f} s")
 
-        # Post-search RT calibration (10% of overall)
         rt_cal_progress = progress.create_child("RT-Calibration", total=1, portion=5)
         rt_calibrator = self._perform_rt_calibration(run, before_full_search=False)
         rt_cal_progress.complete()

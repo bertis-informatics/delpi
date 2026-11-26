@@ -45,16 +45,14 @@ class RetentionTimePredictor(LightningModule):
 
         self.encoder_type = encoder_type
 
-        # Embedding layer
+        # aa and mod embeddings are concatenated to aa_embedding_dim
         self.aa_embedding = nn.Embedding(
             aa_vocab_size, aa_embedding_dim - mod_embedding_dim
         )
         # self.mod_embedding = ModificationEncoder(embedding_dim=mod_embedding_dim)
         self.mod_embedding = nn.Linear(MOD_FEATURE_MAP.shape[-1], mod_embedding_dim)
 
-        # Choose encoder architecture
         if encoder_type == "cnn_rnn":
-            # CNN + RNN encoder
             self.encoder = nn.Sequential(
                 Permute(0, 2, 1),  # [B, L, D] -> [B, D, L] for CNN
                 ResNet1D(
@@ -67,13 +65,12 @@ class RetentionTimePredictor(LightningModule):
                 BiLSTM(
                     embedding_dim=embedding_dim,
                     num_layers=num_layers,
-                    return_sequences=False,  # Return final hidden state for RT
+                    return_sequences=False,  # final hidden states
                 ),
             )
             encoder_output_dim = num_layers * 2 * embedding_dim  # Bidirectional LSTM
 
         elif encoder_type == "transformer":
-            # Transformer encoder
             self.encoder = nn.Sequential(
                 nn.Linear(aa_embedding_dim, embedding_dim),
                 PositionalEncoding(embedding_dim),
@@ -83,7 +80,7 @@ class RetentionTimePredictor(LightningModule):
                     num_heads=transformer_num_heads,
                     qkv_bias=transformer_qkv_bias,
                     drop_path_rate=transformer_drop_path_rate,
-                    return_sequences=False,  # Return CLS token for RT
+                    return_sequences=False,  # CLS token output
                 ),
             )
             encoder_output_dim = embedding_dim
@@ -135,27 +132,20 @@ class RetentionTimePredictor(LightningModule):
         save_model(self, save_path, model_version=model_version)
 
     def forward(self, x_aa, x_mod):
-        """
-        Forward pass for RT prediction.
+        """Predict reference RT, shape (B, 1).
 
         Args:
-            x_aa: Amino acid sequence tensor (B, L+2) where L is peptide length
-            x_mod: Modification tensor (B, max_mod_count, 2) with modification tuples
-
-        Returns:
-            Retention time predictions tensor (B, 1)
+            x_aa: residue indices (B, L+2): N-term token, L residues, C-term token
+            x_mod: per-residue modification features (B, L+2, MOD_FEATURE_MAP width)
         """
-        # Pass through AA and Mod embedding layers
 
         x_aa_emb = self.aa_embedding(x_aa.to(torch.int32))
         # x_mod_emb = self.mod_embedding(x_mod, x_aa_emb.shape[1])
         x_mod_emb = self.mod_embedding(x_mod)
         x_emb = torch.cat([x_aa_emb, x_mod_emb], dim=-1)
 
-        # Pass through encoder (both CNN+RNN and Transformer are now Sequential)
         x_emb = self.encoder(x_emb)
 
-        # Predict retention time
         y_pred = self.rt_predictor(x_emb)
 
         return y_pred
@@ -177,7 +167,7 @@ class RetentionTimePredictor(LightningModule):
     def _compute_loss(self, x_aa, x_mod, y_true):
 
         y_pred = self(x_aa, x_mod)
-        # Use L1 loss for RT prediction (matches Carafe / AlphaPeptDeep recipe)
+        # L1 loss, as in the Carafe / AlphaPeptDeep recipe
         loss = nn.functional.l1_loss(y_pred, y_true)
 
         return loss, y_true, y_pred

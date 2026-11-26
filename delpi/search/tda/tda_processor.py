@@ -1,12 +1,9 @@
-"""
-Unified Target-Decoy Analysis Processor
+"""Cross-run (2-fold CV) PmSM rescoring.
 
-Cross-run (2-fold CV) PmSM scoring. PmSM assignment and FDR control are
-separate concerns handled by the caller -- see
+PmSM assignment, protein inference, group scoring and FDR are left to the
+caller, on the DataFrame returned by :meth:`TDAProcessor.run_global` (see
 :func:`~delpi.search.pmsm_assignment.assign_pmsms_across_runs` and
-:meth:`~delpi.search.search_manager.SearchManager._infer_proteins_and_analyze_fdr`,
-which orchestrates protein inference, group scoring and FDR on the
-DataFrame returned by :meth:`TDAProcessor.run_global`.
+:meth:`~delpi.search.search_manager.SearchManager._infer_proteins_and_analyze_fdr`).
 """
 
 import logging
@@ -41,7 +38,7 @@ _FEATURE_INPUT_COLUMNS = ("precursor_mz", "sequence_length")
 
 
 class TDAProcessor:
-    """Unified target-decoy analysis for single-run and cross-run modes."""
+    """Target-decoy rescoring of PmSMs across runs with 2-fold CV."""
 
     def __init__(
         self,
@@ -67,9 +64,7 @@ class TDAProcessor:
         self.batch_size = batch_size
         self.split_level = split_level
 
-    # ==================================================================
-    # Public entry points
-    # ==================================================================
+    # public entry points
 
     def run_global(
         self,
@@ -81,26 +76,18 @@ class TDAProcessor:
     ) -> pl.DataFrame:
         """Cross-run TDA across multiple LC-MS runs (2-fold CV).
 
-        Split granularity is controlled by ``self.split_level``.  Training
-        data in each fold is subsampled when it exceeds ``TDA_MAX_TRAIN_SIZE``.
-        Both fold models are trained first; then each run is scored, every
-        PmSM by the model(s) of the other fold.
+        Folds are split at ``self.split_level``; each fold's training data is
+        subsampled to at most ``TDA_MAX_TRAIN_SIZE`` rows. Both folds' models
+        are trained first, then every PmSM is scored by the other fold's
+        model(s). With ``n_ensemble > 1``, each fold trains K models on random
+        subsets of ``ensemble_train_ratio`` x N_fold rows (different seeds)
+        and averages their logits.
 
-        When ``n_ensemble > 1``, each fold trains K models via bootstrap
-        sampling (each of size ``ensemble_train_ratio`` × N_fold) with
-        different seeds, and averages their logits.
+        ``pass_label`` prefixes saved models/logs (``{pass_label}_tda_{fold}``)
+        so first- and second-pass runs do not overwrite each other.
 
-        ``pass_label`` (e.g. ``"first"``/``"second"``) is used as the prefix
-        for saved model artifacts/logs (``{pass_label}_tda_{fold}``) so that
-        first- and second-pass training runs don't collide/overwrite each
-        other and are easy to tell apart on disk.
-
-        Returns every scored PmSM (joined with `frame_num`/`predicted_rt`/
-        `observed_rt`/`is_decoy`/etc.) -- **not yet** assigned or
-        FDR-annotated; the caller is expected to run
-        :func:`~delpi.search.pmsm_assignment.assign_pmsms_across_runs` and
-        then infer/score proteins and estimate FDR via
-        :meth:`~delpi.search.search_manager.SearchManager._infer_proteins_and_analyze_fdr`.
+        Returns every scored PmSM with its PmSM/library columns, not yet
+        assigned or FDR-annotated (see the module docstring).
         """
         pmsm_df = self._load_multi_run(result_aggregator, group_key)
         fold_a, fold_b = self._split_pmsm_df(pmsm_df, level=self.split_level)
@@ -151,8 +138,8 @@ class TDAProcessor:
         model_version_prefix: str = "global_tda",
         model_params: dict = None,
     ) -> list[torch.nn.Module]:
-        """Train the model(s) of one fold. With ``n_ensemble > 1``, K models
-        on bootstrap subsets of *train_fold* (after subsampling)."""
+        """Train the model(s) of one fold. With ``n_ensemble > 1``, K models on
+        random subsets (no replacement) of the subsampled `train_fold`."""
         train_df = self._subsample_train(train_fold, level=self.split_level)
 
         if self.n_ensemble <= 1:
@@ -222,9 +209,7 @@ class TDAProcessor:
             scores[start:end] = np.where(in_fold_b[start:end], by_models_a, by_models_b)
         return scores
 
-    # ==================================================================
-    # Data loading
-    # ==================================================================
+    # data loading
 
     @staticmethod
     def _load_multi_run(
@@ -303,9 +288,7 @@ class TDAProcessor:
             lengths[run_index] = value
         return lengths
 
-    # ==================================================================
-    # Shared pipeline steps
-    # ==================================================================
+    # shared pipeline steps
 
     @staticmethod
     def _training_param(training_params: dict | None, name: str):
@@ -337,16 +320,11 @@ class TDAProcessor:
         Parameters
         ----------
         level
-            ``"pmsm"`` (default): random row-level split.  Same peptide/
-            precursor can appear in both folds.  Cheapest but allows mild
-            information leakage through shared sequence embeddings.
-            ``"precursor"``: split on ``precursor_index`` so that every
-            (peptide, charge, mod) variant is confined to one fold.
-            ``"peptide"``: split on ``peptide_index`` so that every
-            sequence is confined to one fold (most conservative, à la
-            Percolator).
-        seed
-            RNG seed for the shuffle.
+            ``"pmsm"``: random row split; a peptide or precursor can be in
+            both folds (mild leakage through shared sequence embeddings).
+            ``"precursor"``: each ``precursor_index`` stays in one fold.
+            ``"peptide"``: each ``peptide_index`` stays in one fold (most
+            conservative, as in Percolator).
         """
         group_col = TDAProcessor._split_group_column(level)
         if group_col is None:
@@ -356,8 +334,8 @@ class TDAProcessor:
             mid = shuffled.shape[0] // 2
             return shuffled.head(mid), shuffled.slice(mid)
 
-        # Sort before shuffle: unique() returns rows in a non-deterministic
-        # order, so we canonicalise first to make the seeded shuffle reproducible.
+        # unique() order is non-deterministic; sort so the seeded shuffle is
+        # reproducible
         group_ids = (
             pmsm_df.select(group_col)
             .unique()
@@ -486,8 +464,8 @@ class TDAProcessor:
     ):
         """Train the TDA classifier and return the best model on self.device.
 
-        ``training_params`` is forwarded to :class:`TargetDecoyTrainer`.
-        When ``seed`` is provided, it overrides ``random_seed`` in the dict.
+        ``training_params`` go to :class:`TargetDecoyTrainer`; ``seed``, if
+        given, overrides its ``random_seed``.
         """
         training_params = dict(training_params) if training_params else {}
         if seed is not None:

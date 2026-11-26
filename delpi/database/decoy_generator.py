@@ -16,23 +16,19 @@ logger = logging.getLogger(__name__)
 
 
 def _default_varmod_signature(aa: str) -> tuple:
-    """Trivial signature used when no variable modifications are active:
-    every residue compares equal, so every position is considered safe."""
+    """Signature without variable modifications: every position is safe."""
     return ()
 
 
 def build_varmod_signature_fn(
     mod_param_set: Optional[Sequence],
 ) -> Callable[[str], tuple]:
-    """Build a function mapping a residue character to an eligibility tuple
-    over the active (non-fixed) residue-specific variable modifications.
+    """Map a residue to its eligibility tuple over the variable modifications.
 
-    Residues are grouped by modification name so that e.g. Phospho(S)/(T)/(Y)
-    collapse into a single "is this residue phospho-eligible" flag rather
-    than three independent ones (matching the ``generate_variable_modifications``
-    residue-matching logic in :class:`~delpi.database.modification_handler.ModificationHandler`).
-    Two residues are considered "safe" to swap for decoy mutation when they
-    share the same signature tuple. Fixed modifications are ignored.
+    Residues are grouped by modification name, so Phospho(S)/(T)/(Y) give one
+    flag, as in ``ModificationHandler.generate_variable_modifications``. A
+    mutation is safe when both residues have the same tuple. Fixed modifications
+    are ignored.
     """
     mod_name_to_residues: dict = {}
     for p in mod_param_set or []:
@@ -57,11 +53,12 @@ def _find_safe_mutation_position(
     varmod_signature: Callable[[str], tuple],
     exclude: Optional[int] = None,
 ) -> Optional[int]:
-    """Try ``candidates`` (0-based indices; negative values count from the
-    end, as in Python slicing) in priority order and return the first
-    internal position (never the first or last residue, and never
-    ``exclude``) whose ``MUTATION_MAP`` mutation preserves the residue's
-    variable-modification eligibility. Returns ``None`` if none qualifies."""
+    """First of ``candidates`` whose ``MUTATION_MAP`` substitution keeps the
+    residue's varmod signature, or None.
+
+    Negative indices count from the end. Positions 0 and len - 1 and
+    ``exclude`` are skipped.
+    """
     length = len(peptide)
     for pos in candidates:
         if pos < 0:
@@ -77,22 +74,14 @@ def _find_safe_mutation_position(
 def get_mutated_decoy(
     peptide: str, varmod_signature: Callable[[str], tuple] = None
 ) -> str:
-    """Mutate two internal residues of ``peptide`` to generate a decoy,
-    preserving the first residue and the last two residues.
+    """Decoy with one N-side and one C-side residue replaced via MUTATION_MAP.
 
-    Each terminal side tries a fixed, prioritized list of positions and
-    mutates the first one whose ``MUTATION_MAP`` substitution preserves the
-    residue's eligibility for any active variable modification (see
-    :func:`build_varmod_signature_fn`):
-
-    - N-terminal side: index 2, then 3, then 4, then 1.
-    - C-terminal side: index ``len - 3``, then ``len - 4``, then ``len - 5``.
-
-    If none of a side's candidates are safe (or valid), that side falls back
-    to its original default position (2 for N-term, ``len(peptide) - 3`` for
-    C-term) and mutates it unconditionally, so the decoy always differs from
-    the target. The C-terminal search skips any position already claimed by
-    the N-terminal side.
+    The first character and the last two are kept. Each side mutates the first
+    candidate whose substitution keeps the residue's varmod eligibility (see
+    ``build_varmod_signature_fn``): N side 2, 3, 4, 1; C side len - 3, len - 4,
+    len - 5, skipping the N-side position. A side with no safe candidate mutates
+    its default (2 or len - 3) unconditionally, so the decoy always differs from
+    the target.
     """
     if varmod_signature is None:
         varmod_signature = _default_varmod_signature
@@ -123,10 +112,8 @@ def get_shuffled_decoy(peptide):
     return f"{peptide[0]}{''.join(mid)}{peptide[-2:]}"
 
 
-# --------------------------------------------------------------------------
-# Swap decoys (DIA-NN style, composition preserving).
-# Peptide strings always carry terminal markers at peptide[0] and peptide[-1].
-# --------------------------------------------------------------------------
+# Swap decoys (DIA-NN style, composition preserving). Peptide strings carry
+# terminal markers at peptide[0] and peptide[-1].
 ResidueMasses = Dict[str, Tuple[float, ...]]
 
 
@@ -352,15 +339,12 @@ class DecoyGenerator:
     def resolve_duplicate_decoys(
         self, target_peptide_df, decoy_df, max_attempts: int = 3
     ) -> pl.DataFrame:
-        """Resolve decoys shared by multiple targets.
+        """Regenerate decoys shared by several targets.
 
-        Different target sequences can map to the same decoy sequence. For each
-        group of colliding decoys the first occurrence is kept, while the rest
-        are regenerated with a pseudo-shuffle that preserves the N-term and
-        C-term residues of the corresponding target and only shuffles the
-        interior. ``target_peptide_df`` and ``decoy_df`` are matched row by row.
-        Decoys that still collide after ``max_attempts`` are collapsed into a
-        single decoy.
+        ``target_peptide_df`` and ``decoy_df`` are matched row by row. All but
+        the first occurrence of a duplicate decoy are replaced by a
+        pseudo-shuffle of their target (terminal residues kept). Decoys still
+        colliding after ``max_attempts`` are collapsed into one.
         """
 
         random.seed(self.random_seed)
@@ -369,7 +353,7 @@ class DecoyGenerator:
         decoy_peptides = decoy_df["peptide"].to_list()
 
         for _ in range(max_attempts):
-            # Indices of rows that duplicate an earlier decoy (keep the first).
+            # rows duplicating an earlier decoy
             dup_indices = (
                 pl.DataFrame({"peptide": decoy_peptides})
                 .with_row_index("__row")
@@ -422,7 +406,7 @@ class DecoyGenerator:
             .drop("_key")
         )
 
-        # Determine output column order: original target columns then new ones.
+        # target columns, then the new ones
         out_cols = list(target_peptide_df.columns) + [
             "is_decoy",
             "target_peptide_index",

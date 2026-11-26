@@ -107,17 +107,10 @@ def make_xic_array(
     max_frame_index: int,
     num_fragments: int,
 ) -> np.ndarray:
-    """_summary_
+    """Max-held XIC of each fragment over frames min_frame_index..max_frame_index.
 
-    Args:
-        max_xics (int): _description_
-        min_frame_index (int): _description_
-        max_frame_index (int): _description_
-        theo_peak_arr (np.ndarray): _description_
-        exp_peak_arr (np.ndarray): _description_
-
-    Returns:
-        np.ndarray: shape of (2, fragments, time points)
+    Uses the first `num_fragments` index ranges (the monoisotopic row). Returns
+    (num_fragments, n_frames) float32.
     """
 
     xic_len = max_frame_index - min_frame_index + 1
@@ -185,18 +178,18 @@ def clip_peak_group(peak_groups: np.ndarray, peak_lb: int, peak_ub: int):
     while i < n and peak_groups[i] <= peak_lb:
         i += 1
 
-    # val < lower_bound
+    # values <= peak_lb collapse to peak_lb
     if i > 0:
         result[index] = peak_lb
         index += 1
 
-    # copy for lb < values <= ub
+    # copy peak_lb < values < peak_ub
     while i < n and peak_groups[i] < peak_ub:
         result[index] = peak_groups[i]
         index += 1
         i += 1
 
-    # val > upper_bound
+    # values >= peak_ub collapse to peak_ub
     if i < n:
         result[index] = peak_ub
         index += 1
@@ -282,12 +275,11 @@ def find_peak_groups(
         ms2_st, ms2_ed = find_peak_index(
             ms2_peak_df.mz_arr, fragment_mz_arr.flatten(), ms2_mass_tol
         )
-        # searching for precursor ion peaks in MS1
+        # searching for precursor ion peaks in MS1 & MS2
         mz_arr = theo_peaks.precursor_mz_arr
         pc_ms1_st, pc_ms1_ed = find_peak_index(ms1_peak_df.mz_arr, mz_arr, ms1_mass_tol)
         pc_ms2_st, pc_ms2_ed = find_peak_index(ms2_peak_df.mz_arr, mz_arr, ms2_mass_tol)
 
-        # store matching results
         fragment_ms2_indices[precursor_index0, 0, : ms2_st.size] = ms2_st
         fragment_ms2_indices[precursor_index0, 1, : ms2_ed.size] = ms2_ed
         precursor_ms1_indices[precursor_index0, 0] = pc_ms1_st
@@ -327,7 +319,7 @@ def find_peak_groups(
             max_frame_index=max_frame_index,
         )
 
-        ## create fragment XIC array with fragment mono-isotopic peaks
+        # monoisotopic fragment XICs
         xic_arr = make_xic_array(
             ms2_peak_df,
             frame_num_map,
@@ -338,10 +330,11 @@ def find_peak_groups(
             num_fragments,
         )
 
-        ## count XIC peaks across fragments
+        # XIC maxima per scan: exact and within +/-1 scan
         xic_peak_count_arr, xic_peak_count_tol_arr = count_xic_peaks_tol(xic_arr)
 
-        ## count mono-isotopic peaks of fragments
+        # matched fragments per scan; quant: the QUANT_FRAGMENTS most intense
+        # library fragments, stored last
         spec_peak_count_arr = (xic_arr > 0).sum(axis=0, dtype=np.uint16)
         quant_peak_count_arr = (xic_arr[-QUANT_FRAGMENTS:, :] > 0).sum(
             axis=0, dtype=np.uint16
@@ -358,12 +351,11 @@ def find_peak_groups(
         if peak_group_arr.shape[0] < 1:
             continue
 
-        ## count the number of experimental peaks for each peak group
+        # experimental peaks within rt_window_radius of each candidate
         sum_peak_count_arr = sum_neighborhood(
             all_peak_count_arr, rt_window_radius, peak_group_arr
         )
 
-        ## filtering with min_peak_count
         mask = sum_peak_count_arr >= min_peak_count
         sum_peak_count_arr = sum_peak_count_arr[mask]
         peak_group_arr = peak_group_arr[mask]
@@ -371,7 +363,7 @@ def find_peak_groups(
         if peak_group_arr.shape[0] < 1:
             continue
 
-        ## suppress nearby candidates by fragment co-elution score
+        # NMS over nearby candidates by fragment co-elution score
         comb_count_arr = xic_peak_count_arr + spec_peak_count_arr
         peak_group_scores = (
             comb_count_arr[peak_group_arr - 1]
@@ -385,14 +377,14 @@ def find_peak_groups(
         sum_peak_count_arr = sum_peak_count_arr[selected_indices]
         peak_group_scores = peak_group_scores[selected_indices]
 
-        ## select Top K peak groups, ranked by fragment co-elution score
+        # top-k by co-elution score
         if peak_group_arr.shape[0] > topk:
             ii = np.argsort(-peak_group_scores, kind="mergesort")[:topk]
             peak_group_arr = peak_group_arr[ii]
             sum_peak_count_arr = sum_peak_count_arr[ii]
 
-        ## experimental token count per peak group (batching); capped like
-        ## the token writer (get_x_exp)
+        # token count per peak group incl. M-1 (for batching), capped like
+        # get_x_exp
         token_count_arr = sum_peak_count_arr + sum_neighborhood(
             m1_peak_count_arr, rt_window_radius, peak_group_arr
         )
@@ -400,7 +392,6 @@ def find_peak_groups(
             np.uint16
         )
 
-        ## save results
         # peak_group_arr += min_frame_index
         n_groups = peak_group_arr.shape[0]
         for k in range(n_groups):

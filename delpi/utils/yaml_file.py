@@ -35,7 +35,8 @@ def resolve_input_files(
     entries: Union[str, List[str]],
     allowed_extensions: Optional[Tuple[str, ...]] = None,
 ) -> List[Path]:
-    """Expand path/glob entries (explicit paths and/or glob patterns, including `**`) into a sorted, deduplicated list of absolute file paths."""
+    """Expand paths and glob patterns (``**`` allowed) into sorted, unique absolute
+    file paths."""
     if isinstance(entries, str):
         entries = [entries]
 

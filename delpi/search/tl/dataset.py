@@ -19,9 +19,10 @@ LABEL_DTYPE = np.dtype(
 
 
 class TransferLearningDataset(HdfDataset):
-    """
-    Unified Transfer Learning Dataset that automatically decides between memory and file access
-    based on dataset size. Uses in-memory storage for datasets with < 1M samples.
+    """Transfer-learning MS2 dataset.
+
+    Reads from `data_dict` when given (the caller does so for < 1M samples),
+    otherwise from the shared HDF5 file.
     """
 
     def __init__(
@@ -47,14 +48,13 @@ class TransferLearningDataset(HdfDataset):
         idx = self.labels["index"][index]
 
         if self.use_memory:
-            # Get data from pre-loaded numpy arrays (same structure as HDF)
+            # pre-loaded arrays, same layout as the HDF file
             x_aa = self.data_dict[n_tokens]["x_aa"][idx]
             x_mod = self.data_dict[n_tokens]["x_mod"][idx]
             x_meta = self.data_dict[n_tokens]["x_meta"][idx]
             y_intensity = self.data_dict[n_tokens]["x_intensity"][idx]
         else:
-            # Get data from the shared HDF5 file (single file, no per-run
-            # grouping).
+            # single shared HDF5 file, no per-run groups
             hf = self.get_hf(0)
             data_group = hf[str(n_tokens)]
 
@@ -63,7 +63,6 @@ class TransferLearningDataset(HdfDataset):
             x_meta = data_group["x_meta"][idx][...]
             y_intensity = data_group["x_intensity"][idx][...]
 
-        # Apply transformations
         x_mod = encode_modification_feature(x_mod, x_aa.shape[0])
 
         return {
@@ -86,10 +85,10 @@ class TransferLearningDataset(HdfDataset):
         )
 
     def make_subset_from_indices(self, indices: np.ndarray):
-        """Build a subset using explicit sample indices.
+        """Subset by explicit sample indices.
 
-        This is used by deterministic global-permutation chunk sampling so that
-        all distributed workers consume the same sample pool each epoch.
+        Used by the deterministic global-permutation chunk sampling, so all
+        distributed workers draw from the same sample pool each epoch.
         """
         return self.__class__(
             self.hdf_files,
@@ -118,12 +117,10 @@ class TransferLearningDatasetForRT(Dataset):
         n_tokens = self.labels["seq_len"][index]
         idx = self.labels["index"][index]
 
-        # Get data from pre-loaded numpy arrays (same structure as HDF)
         x_aa = self.data_dict[n_tokens]["x_aa"][idx]
         x_mod = self.data_dict[n_tokens]["x_mod"][idx]
         y_rt = self.data_dict[n_tokens]["x_rt"][idx]
 
-        # Apply transformations
         x_mod = encode_modification_feature(x_mod, x_aa.shape[0])
 
         return {

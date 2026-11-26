@@ -62,16 +62,14 @@ class Ms2SpectrumPredictor(LightningModule):
 
         self.encoder_type = encoder_type
 
-        # Embedding layer
+        # aa, mod and meta embeddings are concatenated to aa_embedding_dim
         self.aa_embedding = nn.Embedding(
             aa_vocab_size, aa_embedding_dim - mod_embedding_dim - meta_embedding_dim
         )
         self.mod_embedding = nn.Linear(MOD_FEATURE_MAP.shape[-1], mod_embedding_dim)
         self.meta_embedding = nn.Linear(4, meta_embedding_dim)
 
-        # Choose encoder architecture
         if encoder_type == "cnn_rnn":
-            # CNN + RNN encoder
             self.encoder = nn.Sequential(
                 Permute(0, 2, 1),  # [B, L, D] -> [B, D, L] for CNN
                 ResNet1D(
@@ -84,13 +82,12 @@ class Ms2SpectrumPredictor(LightningModule):
                 BiLSTM(
                     embedding_dim=embedding_dim,
                     num_layers=num_layers,
-                    return_sequences=True,  # Return all sequence outputs for MS2
+                    return_sequences=True,  # per-residue outputs
                 ),
             )
             encoder_output_dim = 2 * embedding_dim  # Bidirectional LSTM
 
         elif encoder_type == "transformer":
-            # Transformer encoder
             self.encoder = nn.Sequential(
                 nn.Linear(aa_embedding_dim, embedding_dim),
                 PositionalEncoding(embedding_dim),
@@ -100,7 +97,7 @@ class Ms2SpectrumPredictor(LightningModule):
                     num_heads=transformer_num_heads,
                     qkv_bias=transformer_qkv_bias,
                     drop_path_rate=transformer_drop_path_rate,
-                    return_sequences=True,  # Return all sequence outputs for MS2
+                    return_sequences=True,  # per-residue outputs
                 ),
             )
             encoder_output_dim = embedding_dim
@@ -110,8 +107,7 @@ class Ms2SpectrumPredictor(LightningModule):
                 f"Unknown encoder_type: {encoder_type}. Choose 'cnn_rnn' or 'transformer'"
             )
 
-        # Output layer for fragment intensities
-        # Input: (B, L-2, encoder_output_dim) -> Output: (B, L-2, 8)
+        # (B, L-1, encoder_output_dim) -> (B, L-1, 8)
         # No final ReLU: forward() clamps at 0 for inference, while the loss uses
         # the raw outputs so negative predictions keep their gradients.
         self.fragment_predictor = nn.Sequential(
@@ -172,18 +168,18 @@ class Ms2SpectrumPredictor(LightningModule):
         save_model(self, save_path, model_version=model_version)
 
     def forward(self, x_aa, x_mod, x_meta, *, return_raw: bool = False):
-        """
-        Forward pass for MS2 spectrum prediction.
+        """Predict fragment intensities.
 
         Args:
-            x_aa: Amino acid sequence tensor (B, L+2) where L is peptide length
-            x_mod: Modification tensor (B, max_mod_count, 2) with modification tuples
-            return_raw: Return the unclamped outputs (used by the training loss).
+            x_aa: residue indices (B, L+2): N-term token, L residues, C-term token
+            x_mod: per-residue modification features (B, L+2, MOD_FEATURE_MAP width)
+            x_meta: (B, 4) precursor charge, NCE, fragmentation, mass analyzer
+            return_raw: return unclamped outputs (used by the training loss)
 
         Returns:
-            Fragment intensities tensor (B, L-2, 8), clamped at 0 unless `return_raw`
+            (B, L-1, 8) per cleavage site in FRAG_TYPE_LIST order, clamped at 0
+            unless return_raw.
         """
-        # Pass through AA and Mod embedding layers
         x_aa_emb = self.aa_embedding(x_aa.to(torch.int32))
         x_mod_emb = self.mod_embedding(x_mod)
         x_meta_emb = self.meta_embedding(x_meta)[:, None, :].expand(
@@ -191,14 +187,12 @@ class Ms2SpectrumPredictor(LightningModule):
         )
         x_emb = torch.cat([x_aa_emb, x_mod_emb, x_meta_emb], dim=-1)
 
-        # Pass through encoder (both CNN+RNN and Transformer are now Sequential)
         x_emb = self.encoder(x_emb)
 
-        # Remove terminal residues: [B, L+2, D] -> [B, L-2, D]
-        # This assumes the first and last positions are terminal residues
+        # one position per cleavage site: drop the N-term token, the first
+        # residue and the C-term token, [B, L+2, D] -> [B, L-1, D]
         x_emb = x_emb[:, 2:-1, :]
 
-        # Predict fragment intensities
         y_pred = self.fragment_predictor(x_emb)
 
         return y_pred if return_raw else y_pred.clamp_min(0)
@@ -232,20 +226,10 @@ class Ms2SpectrumPredictor(LightningModule):
     def predict_batch(
         self, batch: Dict[str, torch.Tensor], include_modloss: bool = False
     ) -> pl.DataFrame:
-        """_summary_
+        """Predict a batch as one row per (precursor_index, cleavage_index).
 
-        Returns:
-            pl.DataFrame: _description_
-            ┌──────────┬──────────┬──────────┬──────────┬─────────────────┬────────────────┐
-            │ b_z1     ┆ y_z1     ┆ b_z2     ┆ y_z2     ┆ precursor_index ┆ cleavage_index │
-            │ ---      ┆ ---      ┆ ---      ┆ ---      ┆ ---             ┆ ---            │
-            │ f32      ┆ f32      ┆ f32      ┆ f32      ┆ i64             ┆ u8             │
-            ╞══════════╪══════════╪══════════╪══════════╪═════════════════╪════════════════╡
-            │ 0.0      ┆ 0.0      ┆ 0.0      ┆ 0.0      ┆ 7               ┆ 0              │
-            │ 0.331823 ┆ 0.0      ┆ 0.0      ┆ 0.024395 ┆ 7               ┆ 1              │
-            │ …        ┆ …        ┆ …        ┆ …        ┆ …               ┆ …              │
-            │ 0.016013 ┆ 0.0      ┆ 0.0      ┆ 0.0      ┆ 1761            ┆ 10             │
-            └──────────┴──────────┴──────────┴──────────┴─────────────────┴────────────────┘
+        Intensity columns follow FRAG_TYPE_LIST (the first 4 unless
+        include_modloss); each precursor is scaled to a maximum of 1.
         """
 
         precursor_index_arr = batch["precursor_index"].to(torch.uint32).numpy()
@@ -289,16 +273,9 @@ class Ms2SpectrumPredictor(LightningModule):
         return batch_ms2_df
 
     def _compute_loss(self, x_aa, x_mod, x_meta, y_true):
-        """
-        Compute loss for MS2 spectrum prediction.
+        """MSE between y_true (B, L-1, 4 or 8) and the raw (unclamped) outputs.
 
-        Args:
-            x_aa: Amino acid sequence tensor
-            x_mod: Modification tensor
-            y_true: True fragment intensities (B, L-2, 8)
-
-        Returns:
-            loss, y_true, raw (unclamped) y_pred
+        Returns (loss, y_true, y_pred), y_pred trimmed to y_true's channels.
         """
         y_pred = self(x_aa, x_mod, x_meta, return_raw=True)
         # if y_true.size(-1) < y_pred.size(-1):
@@ -307,7 +284,6 @@ class Ms2SpectrumPredictor(LightningModule):
         #     )
         y_pred = y_pred[..., : y_true.size(-1)]
 
-        # MSE on the raw outputs, so predictions below 0 still get gradients
         loss = nn.functional.mse_loss(y_pred, y_true)
 
         return loss, y_true, y_pred
@@ -318,13 +294,12 @@ class Ms2SpectrumPredictor(LightningModule):
         x_aa = batch["x_aa"]
         x_mod = batch["x_mod"]
         x_meta = batch["x_meta"]
-        y_true = batch["y_intensity"]  # Expected key for MS2 data
+        y_true = batch["y_intensity"]
         batch_size = len(y_true)
 
         loss, y_true, y_pred = self._compute_loss(x_aa, x_mod, x_meta, y_true)
         y_pred = y_pred.clamp_min(0)  # metrics use the inference outputs
 
-        # Flatten for correlation calculation
         y_true_flat = y_true.reshape(-1)
         y_pred_flat = y_pred.reshape(-1)
         self.train_corr.update(y_pred_flat, y_true_flat)

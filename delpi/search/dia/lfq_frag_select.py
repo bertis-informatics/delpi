@@ -6,10 +6,9 @@ from delpi.utils.numeric import rowwise_pearsonr, pearsonr
 
 @nb.njit(nogil=True, fastmath=True, cache=True)
 def get_consensus_xic(xic_arr):
-    """
-    xic_arr: [n_frag, n_time]
+    """Per-time median of fragment XICs, each scaled by its 95th percentile.
 
-    return: Median consensus XIC after 95th percentile normalization
+    `xic_arr`: (n_frag, n_time). Returns zeros if no fragment has signal.
     """
     n_frag, n_time = xic_arr.shape
     epsilon = 1e-9
@@ -21,21 +20,18 @@ def get_consensus_xic(xic_arr):
         if np.sum(row) < epsilon:
             continue
 
-        # 2. 95th Percentile
         sorted_row = np.sort(row)
         scale = sorted_row[int(0.95 * (n_time - 1))]
 
         if scale < epsilon:
             continue
 
-        # normalization
         norm_buf[valid_cnt] = row / scale
         valid_cnt += 1
 
     if valid_cnt == 0:
         return np.zeros(n_time, dtype=np.float32)
 
-    # 3. Column-wise median calculation
     consensus_xic = np.empty(n_time, dtype=np.float32)
     col_buf = np.empty(valid_cnt, dtype=np.float32)
 
@@ -56,20 +52,14 @@ def get_consensus_xic(xic_arr):
 
 @nb.njit(nogil=True, fastmath=True, cache=True)
 def get_representative_xic(xic_arr):
-    """
-    Select the fragment XIC with the highest average correlation to all other fragments.
-    Similar to DIA-NN's approach for finding representative XICs.
+    """Fragment XIC with the highest mean cubed correlation to the other fragments.
 
-    Args:
-        xic_arr: [n_frag, n_time] - Array of fragment XICs
-
-    Returns:
-        numpy.array: Representative XIC [n_time] - the fragment with highest avg correlation
+    Similar to DIA-NN's representative XIC. `xic_arr`: (n_frag, n_time); returns
+    a copy of one row, or zeros if every fragment is all-zero.
     """
     n_frag, n_time = xic_arr.shape
     epsilon = 1e-9
 
-    # Filter out zero-intensity fragments
     valid_indices = np.empty(n_frag, dtype=np.int32)
     valid_cnt = 0
 
@@ -84,7 +74,6 @@ def get_representative_xic(xic_arr):
     if valid_cnt == 1:
         return xic_arr[valid_indices[0]].copy()
 
-    # Calculate average correlation for each valid fragment
     avg_corr = np.zeros(valid_cnt, dtype=np.float32)
 
     for i in range(valid_cnt):
@@ -98,14 +87,11 @@ def get_representative_xic(xic_arr):
             frag_j = valid_indices[j]
             xic_j = xic_arr[frag_j]
 
-            # Compute Pearson correlation
             corr = pearsonr(xic_i, xic_j)
             total_corr += corr**3
 
-        # Average correlation (excluding self)
         avg_corr[i] = total_corr / (valid_cnt - 1)
 
-    # Find fragment with highest average correlation
     best_idx = 0
     best_corr = avg_corr[0]
 
@@ -114,7 +100,6 @@ def get_representative_xic(xic_arr):
             best_corr = avg_corr[i]
             best_idx = i
 
-    # Return the representative fragment XIC
     return xic_arr[valid_indices[best_idx]].copy()
 
 
@@ -127,33 +112,23 @@ def select_quantifiable_fragments_by_avg_corr(
     cube_corr=False,
     rep_type=0,
 ):
-    """
-    Select fragments based on average correlation with consensus XIC across runs.
+    """Select fragments by mean correlation with each run's reference XIC.
 
-    This approach computes the average Pearson correlation of each fragment
-    with the consensus XIC across all runs, then selects fragments with correlation
-    above threshold, bounded by min and max fragment counts.
+    `xic_arrays`: (n_runs, n_frags, n_time). Per run, each fragment's Pearson
+    correlation with the consensus (`rep_type` 0) or representative (1) XIC is
+    taken, optionally cubed with sign kept, and averaged over runs. If at least
+    `target_fragments` reach `corr_thresh`, up to `max_fragments` of them are
+    kept; otherwise the top `target_fragments` (at most `max_fragments`).
+    `target_fragments` is not a reporting cutoff; that is `min_quant_fragments`
+    in `filter_fragments_by_cross_run_intensity`.
 
-    Args:
-        xic_arrays (numpy.array): [n_runs, n_frags, n_time]
-        target_fragments (int, optional): number of fragments this selection
-            aims for -- NOT a hard cutoff for downstream quantity reporting
-            (see `filter_fragments_by_cross_run_intensity`'s
-            `min_quant_fragments` for that). Defaults to 9.
-        max_fragments (int, optional): maximum number of fragments to select. Defaults to 12.
-        corr_thresh (float, optional): minimum correlation threshold. Defaults to 0.9.
-        cube_corr (bool, optional): whether to cube correlations. Defaults to False.
-        rep_type (int, optional): 0 for consensus, 1 for representative. Defaults to 0.
-
-    Returns:
-        numpy.array: Indices of selected fragments sorted by average
-        correlation (descending); an empty array if there are no valid
-        (non-near-zero-intensity) fragments at all.
+    Returns fragment indices sorted by mean correlation (descending), empty if
+    every fragment has near-zero total intensity.
     """
     n_runs, n_frags, n_time = xic_arrays.shape
     epsilon = 1e-6
 
-    # 1. Initial Filtering: Remove fragments with near-zero total intensity across all runs
+    # 1. drop fragments with near-zero total intensity over all runs
     total_intensities = np.zeros(n_frags, dtype=np.float32)
     for frag_idx in range(n_frags):
         total = 0.0
@@ -162,7 +137,6 @@ def select_quantifiable_fragments_by_avg_corr(
                 total += xic_arrays[run_idx, frag_idx, t]
         total_intensities[frag_idx] = total
 
-    # Collect valid fragment indices
     valid_indices = np.empty(n_frags, dtype=np.int32)
     valid_len = 0
     for frag_idx in range(n_frags):
@@ -173,61 +147,49 @@ def select_quantifiable_fragments_by_avg_corr(
     if valid_len == 0:
         return np.empty(0, dtype=np.int32)
 
-    # 2. Calculate average correlation for each valid fragment across all runs
+    # 2. mean correlation with each run's reference XIC
     avg_correlations = np.zeros(valid_len, dtype=np.float32)
 
     for run_idx in range(n_runs):
-        # Get XICs for valid fragments in current run
         current_xics = xic_arrays[run_idx, valid_indices[:valid_len], :]
 
-        # Build consensus XIC from current run
         if rep_type == 0:
             consensus = get_consensus_xic(current_xics)
         else:
             consensus = get_representative_xic(current_xics)
 
-        # Compute correlations between each fragment and the consensus
         run_corrs = rowwise_pearsonr(current_xics, consensus)
 
-        # Apply penalty to negative correlations and optional cubing
         for i in range(valid_len):
             corr = run_corrs[i]
-            # Apply cubing if requested
             if cube_corr:
                 if corr < 0:
-                    # Preserve sign when cubing negative values
                     corr = -((-corr) ** 3)
                 else:
                     corr = corr**3
 
             avg_correlations[i] += corr
 
-    # Average across runs
     for i in range(valid_len):
         avg_correlations[i] = avg_correlations[i] / n_runs
 
-    # 3. Sort fragments by average correlation (descending)
-    sorted_order = np.argsort(-avg_correlations)  # negative for descending order
+    # 3. sort by mean correlation, descending
+    sorted_order = np.argsort(-avg_correlations)
 
-    # 4. Select fragments based on correlation threshold and bounds
-    # First, count how many fragments meet the threshold
+    # 4. count fragments at or above corr_thresh
     above_threshold_count = 0
     for i in range(valid_len):
         if avg_correlations[sorted_order[i]] >= corr_thresh:
             above_threshold_count += 1
         else:
-            break  # Since sorted, no more will meet threshold
+            break  # sorted: no more pass
 
     if above_threshold_count >= target_fragments:
-        # We have enough fragments above threshold
-        # Select up to max_fragments among those above threshold
         selected_count = min(above_threshold_count, max_fragments)
     else:
-        # Not enough fragments above threshold -- aim for target_fragments,
-        # bounded by both how many valid fragments exist and max_fragments
+        # too few pass: take the top target_fragments anyway
         selected_count = min(target_fragments, valid_len, max_fragments)
 
-    # Build the selected indices array
     selected_indices = np.empty(selected_count, dtype=np.int32)
     for i in range(selected_count):
         selected_indices[i] = valid_indices[sorted_order[i]]
@@ -245,59 +207,39 @@ def filter_fragments_by_cross_run_intensity(
     interference_z_threshold: float,
     epsilon: float,
 ) -> np.ndarray:
-    """Drop shape-correlated fragments whose relative intensity is an outlier in only some runs.
+    """Drop fragments whose run-relative intensity is an outlier in some runs.
 
-    Shape correlation (`select_quantifiable_fragments_by_avg_corr`) is scale
-    invariant, so a fragment can pass it even if one run's intensity is
-    contaminated (e.g. co-eluting interference, or partial signal loss) while
-    its XIC shape still looks normal. This detects that case using only
-    *relative*, run-centered fragment intensities (never a fragment's/run's
-    absolute level), so it never flags a fragment for being globally weak,
-    nor a run for having globally high/low precursor abundance (see the
-    module's fixed integration window -- `xic_arrays`'s last axis -- carried
-    over unchanged from the caller). Both unusually *high* and unusually
-    *low* run-specific relative fragment intensities are treated as
-    interference (two-sided); a fragment that is consistently high or low
-    across every run is never flagged, since that's absorbed by the
-    per-fragment cross-run reference (`B_k` below).
+    Shape correlation is scale invariant, so a fragment can pass
+    `select_quantifiable_fragments_by_avg_corr` while one run's intensity is
+    distorted by interference or signal loss. Only run-centered relative
+    intensities are compared, so neither a globally weak fragment nor a run
+    with high or low precursor abundance is flagged, nor a fragment that is
+    consistently high or low in every run (absorbed by ``B_k``).
 
-    ``xic_arrays``: this precursor's ``(n_runs, n_frags, n_time)`` XIC slice
-    (same array `select_quantifiable_fragments_by_avg_corr` was run on).
-    ``selected_indices``: fragment indices (into ``xic_arrays``'s 2nd axis)
-    already chosen by shape correlation.
+    `xic_arrays` is the precursor's (n_runs, n_frags, n_time) XIC slice and
+    `selected_indices` the fragments (axis 1) kept by shape correlation.
 
-    Steps (see module caller for the full per-precursor pipeline):
-    1. ``area[r, k] = sum_t xic_arrays[r, selected_indices[k], t]`` (fixed window).
-    2. Per run ``r``, over its positive-finite areas only: run-center
-       ``C_r = median_k log2(area[r, k] + epsilon)``, giving the
-       precursor-abundance-invariant ``R[r, k] = log2(area[r,k]+eps) - C_r``
-       (skipped entirely -- kept NaN -- for runs with < 2 such fragments,
-       since a median of 0-1 points can't be trusted).
-    3. Per fragment ``k``, over runs where ``R[r, k]`` is defined: reference
-       ``B_k = median_r R[r, k]``, residual ``E[r, k] = R[r, k] - B_k``, and
-       robust scale ``1.4826 * median_r |E[r, k]|``. Fragments observed in
-       fewer than `min_interference_runs` such runs are never flagged (not
-       enough evidence).
-    4. Fragment ``k`` is interference (dropped in *every* run for this
-       precursor, not just the offending run -- see module docstring) if any
-       ``abs(E[r, k]) > max(interference_min_log2_fold, interference_z_threshold
-       * scale_k)`` -- two-sided: both unusually *high* and unusually *low*
-       run-specific relative fragment intensities are treated as
-       interference. `interference_min_log2_fold` is an absolute log2-fold
-       threshold, independent of residual direction. A fragment that is
-       consistently high or low across *every* run is never flagged, since
-       that's exactly what the per-fragment reference ``B_k`` absorbs.
+    1. ``area[r, k] = sum_t xic_arrays[r, selected_indices[k], t]``.
+    2. Per run, over positive finite areas: ``C_r = median_k log2(area + eps)``
+       and ``R[r, k] = log2(area[r, k] + eps) - C_r``. Runs with fewer than 2
+       such fragments stay NaN.
+    3. Per fragment, over runs where ``R`` is defined: ``B_k = median_r R[r, k]``,
+       ``E[r, k] = R[r, k] - B_k`` and ``scale_k = 1.4826 * median_r |E[r, k]|``.
+       Fragments seen in fewer than `min_interference_runs` runs are never
+       flagged.
+    4. Fragment ``k`` is interference if any ``|E[r, k]|`` exceeds
+       ``max(interference_min_log2_fold, interference_z_threshold * scale_k)``
+       (two-sided), and is then dropped in every run.
 
-    Returns the surviving fragment indices (subset of `selected_indices`, in
-    the same order), or an empty array if fewer than `min_quant_fragments`
-    survive -- the caller must then treat this precursor's quantity as
-    missing rather than restoring any removed fragment.
+    Returns the surviving indices in `selected_indices` order, or an empty
+    array if fewer than `min_quant_fragments` survive; the caller then leaves
+    the precursor unquantified instead of restoring dropped fragments.
     """
     n_runs = xic_arrays.shape[0]
     n_time = xic_arrays.shape[2]
     m = selected_indices.shape[0]
 
-    # 1. fixed-window area per (run, selected fragment) -- unchanged window
+    # 1. area per (run, selected fragment)
     area = np.zeros((n_runs, m), dtype=np.float32)
     for r in range(n_runs):
         for k in range(m):
@@ -331,7 +273,7 @@ def filter_fragments_by_cross_run_intensity(
             if np.isfinite(a) and a > 0.0:
                 relative[r, k] = np.log2(a + epsilon) - center
 
-    # 3 & 4. per-fragment cross-run reference/residual/MAD -> interference flag
+    # 3-4. per-fragment reference, MAD and interference flag
     interference = np.zeros(m, dtype=np.bool_)
     vals_buf = np.empty(n_runs, dtype=np.float32)
     for k in range(m):
@@ -342,7 +284,7 @@ def filter_fragments_by_cross_run_intensity(
                 vals_buf[cnt] = v
                 cnt += 1
         if cnt < min_interference_runs:
-            continue  # not enough cross-run evidence -> never flagged
+            continue  # too few runs: never flagged
 
         sorted_vals = np.sort(vals_buf[:cnt])
         mid = cnt // 2

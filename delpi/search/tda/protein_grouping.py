@@ -26,10 +26,10 @@ def apply_protein_picker(
     protein_scoring: ProteinScoringMethod = DEFAULT_PROTEIN_SCORING,
     inference_column: str = "peptide_index",
 ) -> pl.DataFrame:
-    """Keep the winning target/decoy membership for each protein index.
+    """Keep the higher-scoring of target/decoy membership per protein index.
 
-    Ties favor targets; unpaired proteins are retained. Scoring uses the
-    shared scoring module and all supplied run/precursor evidence.
+    Ties favor targets; unpaired proteins are kept. Scores use all supplied
+    runs.
     """
     pair_df = (
         confident_pmsm_df.select(inference_column, "protein_index", "is_decoy")
@@ -90,8 +90,8 @@ def _infer_membership(
     fasta_id_df: pl.DataFrame,
     grouping_type: GroupingType,
 ) -> pl.DataFrame:
-    # One group per peptide for downstream FDR. Shared peptides select the
-    # lowest group_id (greedy-selection order), as in the existing workflow.
+    # one group per peptide for FDR: shared peptides take the lowest group_id
+    # (greedy-selection order)
     return (
         protein_group_mapping(
             confident_pmsm_df, fasta_id_df, grouping_type=grouping_type
@@ -111,13 +111,12 @@ def assign_protein_groups(
     protein_scoring: ProteinScoringMethod = DEFAULT_PROTEIN_SCORING,
     library_confidence_df: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
-    """Attach membership using precomputed ``global_precursor_q_value``.
+    """Attach protein-group membership, filtering on ``global_precursor_q_value``.
 
-    First-pass grouping uses the existing max(0.05, q_value_cutoff) filter
-    and optional protein picking. All run observations remain available to
-    the picker. In the second pass, reuse the library's target membership
-    and confidence, and freshly group decoys passing q_value_cutoff, without
-    picking against the fixed library targets. No q-values are computed here.
+    First pass: group PmSMs with q <= max(0.05, q_value_cutoff), after optional
+    protein picking. Second pass (`library_confidence_df` given): targets reuse
+    the library's membership and confidence; decoys passing q_value_cutoff are
+    grouped afresh without picking.
     """
     if library_confidence_df is None:
         confident_df = pmsm_df.filter(

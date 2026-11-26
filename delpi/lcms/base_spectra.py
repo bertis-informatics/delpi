@@ -19,21 +19,9 @@ def _readonly(arr: np.ndarray) -> np.ndarray:
 
 
 class BaseSpectra:
-    """
-    Base class for handling mass spectrometry spectra groups.
-
-    This class provides common functionality for managing groups of spectra
-    at different MS levels, including peak data, metadata, and analysis methods.
-    """
+    """Peaks and per-spectrum metadata of spectra at one MS level."""
 
     def __init__(self, meta_df: pl.DataFrame, peak_df: pl.DataFrame):
-        """
-        Initialize BaseSpectra.
-
-        Args:
-            meta_df: Metadata DataFrame containing spectrum information
-            peak_df: Peak DataFrame containing m/z, abundance, and other peak data
-        """
         assert peak_df["mz"].is_sorted(), "Peak DataFrame must be sorted by m/z"
         assert (
             meta_df["ms_level"].n_unique() == 1
@@ -45,20 +33,17 @@ class BaseSpectra:
 
     @property
     def ms_level(self) -> int:
-        """Get the MS level of this spectra group."""
+        """MS level of this spectra group."""
         return self.meta_df["ms_level"].first()
 
     @property
     def num_frames(self) -> int:
-        """Get the number of frames in this spectra group."""
+        """Number of frames (spectra)."""
         return self.meta_df.shape[0]
 
     def get_peak_container(self) -> PeakContainer:
-        # None of the njit code writes to these arrays, so force them
-        # read-only (no copy) instead of writable (forces a copy) -- this
-        # still gives numba a stable, single array type to compile against,
-        # since polars to_numpy() otherwise flips between a readonly
-        # zero-copy view and a writable copy depending on chunking.
+        # to_numpy() returns a readonly view or a writable copy depending on
+        # chunking; all read-only gives numba one array type (njit never writes)
         return PeakContainer(
             frame_num_arr=_readonly(self.peak_df["frame_num"].to_numpy()),
             mz_arr=_readonly(self.peak_df["mz"].to_numpy()),
@@ -78,16 +63,7 @@ class BaseSpectra:
         )
 
     def get_xic(self, mz: float, tolerance_in_ppm: float = 10) -> pl.DataFrame:
-        """
-        Extract ion chromatogram (XIC) for a specific m/z value.
-
-        Args:
-            mz: Target m/z value
-            tolerance_in_ppm: Mass tolerance in parts per million
-
-        Returns:
-            DataFrame containing peaks within the specified m/z tolerance
-        """
+        """XIC: all peaks within tolerance_in_ppm of mz."""
         experimental_peak_df = self.peak_df
         mz_tol = mz * tolerance_in_ppm * 1e-6
 
@@ -103,28 +79,11 @@ class BaseSpectra:
         return experimental_peak_df[exp_start:exp_stop]
 
     def get_spectrum(self, frame_num: int) -> pl.DataFrame:
-        """
-        Get all peaks for a specific frame/spectrum.
-
-        Args:
-            frame_num: Frame number to extract
-
-        Returns:
-            DataFrame containing all peaks in the specified frame
-        """
+        """All peaks of the spectrum with frame_num."""
         return self.peak_df.filter(pl.col("frame_num") == frame_num)
 
     def match(self, theoretical_peak_df, tolerance_in_ppm):
-        """
-        Match theoretical peaks against experimental peaks within tolerance.
-
-        Args:
-            theoretical_peak_df: DataFrame containing theoretical peak m/z values
-            tolerance_in_ppm: Mass tolerance in parts per million
-
-        Returns:
-            DataFrame containing start/stop indices for matching peaks
-        """
+        """Per theoretical mz, the [exp_start, exp_stop) peak_df rows in tolerance."""
         experimental_peak_df = self.peak_df
         mz_arr = theoretical_peak_df["mz"]
         mz_tol = mz_arr * tolerance_in_ppm * 1e-6
@@ -147,18 +106,7 @@ class BaseSpectra:
         ab_arr: np.ndarray,
         z_score_arr: Optional[np.ndarray] = None,
     ):
-        """
-        Create a peak DataFrame from arrays.
-
-        Args:
-            frame_num_arr: Array of frame numbers
-            mz_arr: Array of m/z values
-            ab_arr: Array of abundance/intensity values
-            z_score_arr: Optional array of z-scores
-
-        Returns:
-            DataFrame sorted by m/z containing peak data
-        """
+        """Peak DataFrame sorted by mz; z_score is added only if given."""
         data = {
             "frame_num": frame_num_arr,
             "mz": mz_arr,

@@ -5,7 +5,7 @@ from timm.models.vision_transformer import Block
 
 
 class Permute(nn.Module):
-    """Simple module for tensor permutation"""
+    """Module wrapper for Tensor.permute."""
 
     def __init__(self, *dims):
         super().__init__()
@@ -124,7 +124,7 @@ class BiLSTM(nn.Module):
         # final_hidden_dim = num_layers * num_directions * embedding_dim
         # self.fc = nn.Linear(final_hidden_dim, embedding_dim)
 
-        # Initialize the initial hidden and cell states as learnable parameters
+        # learnable initial hidden and cell states
         self.h0 = nn.Parameter(torch.zeros(2 * num_layers, 1, embedding_dim))
         self.c0 = nn.Parameter(torch.zeros(2 * num_layers, 1, embedding_dim))
 
@@ -132,20 +132,17 @@ class BiLSTM(nn.Module):
 
         batch_size = x_emb.shape[0]
 
-        # Initialize the initial hidden and cell states for each batch
         h0 = self.h0.repeat(1, batch_size, 1)
         c0 = self.c0.repeat(1, batch_size, 1)
 
-        # Pass through LSTM
         output, (hn, cn) = self.lstm(x_emb, (h0, c0))
 
         if self.return_sequences:
-            # Return all sequence outputs for MS2 prediction
-            # output shape: (batch_size, seq_len, 2 * hidden_dim)
+            # MS2 prediction: (batch_size, seq_len, 2 * hidden_dim)
             return output
         else:
-            # Return only final hidden state for RT prediction
-            # Reshape hn to concatenate the forward and backward hidden states
+            # RT prediction: final hidden states of all layers and both
+            # directions, concatenated
             hidden = hn.permute(1, 0, 2).reshape(batch_size, -1)
             return hidden
 
@@ -163,7 +160,7 @@ class Transformer(nn.Module):
         super().__init__()
         self.return_sequences = return_sequences
 
-        # Only add CLS token for RT prediction (when return_sequences=False)
+        # CLS token only for RT prediction (return_sequences=False)
         if not return_sequences:
             self.cls_token = torch.nn.Parameter(torch.zeros(1, 1, embed_dim))
             torch.nn.init.normal_(self.cls_token, std=0.02)
@@ -187,14 +184,14 @@ class Transformer(nn.Module):
         batch_size = x_emb.shape[0]
 
         if self.return_sequences:
-            # For MS2 prediction: return all sequence outputs
+            # MS2 prediction: per-residue outputs
             x = self.transformer(x_emb)
             x = self.layer_norm(x)
             return x
         else:
-            # For RT prediction: use CLS token and return single output
+            # RT prediction: CLS token output
             cls_tokens = self.cls_token.expand(batch_size, -1, -1)
             x = torch.cat((cls_tokens, x_emb), dim=1)
             x = self.transformer(x)
             x = self.layer_norm(x)
-            return x[:, 0]  # Return only CLS token output
+            return x[:, 0]

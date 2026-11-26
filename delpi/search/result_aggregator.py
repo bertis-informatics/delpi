@@ -15,9 +15,7 @@ from delpi.constants import QUANT_FRAGMENTS, RT_WINDOW_LEN
 class ResultsAggregator:
 
     def __init__(self, db_dir: Path, search_config: SearchConfig = None):
-        """
-        result_manager_factory: callable(h5_path:str) -> ResultManager instance
-        """
+        """With `search_config`, registers a ResultManager for every input run."""
         self.db_dir = db_dir
         self._results_dict: Dict[int, ResultManager] = dict()
 
@@ -57,12 +55,10 @@ class ResultsAggregator:
         return float(np.mean(values))
 
     def get_tl_label_df(self, tl_ms2_h5_path: Path) -> pl.DataFrame:
-        """Build the transfer-learning label DataFrame from the shared
-        ``transfer_learning_ms2.h5`` file (see
-        :class:`~delpi.search.tl.data_prep.TransferLearningDataPreparator`).
+        """Transfer-learning labels (seq_len, index, precursor_index) from the
+        shared ``transfer_learning_ms2.h5``.
 
-        The file is grouped as ``/<seq_len>/<array>`` (all runs share the
-        same arrays; there is no per-run grouping).
+        The file is grouped as ``/<seq_len>/<array>``, with all runs pooled.
         """
         tl_ms2_h5_path = Path(tl_ms2_h5_path)
         if not tl_ms2_h5_path.exists():
@@ -93,9 +89,8 @@ class ResultsAggregator:
     def get_tl_data(
         self, tl_ms2_h5_path: Path, data_keys: List[str]
     ) -> Dict[int, Dict[str, np.ndarray]]:
-        """Load all transfer-learning data from the shared HDF5 file into
-        memory as a single dict keyed by sequence length (there is no
-        per-run grouping)."""
+        """Load the shared transfer-learning HDF5 into memory, keyed by sequence
+        length (runs pooled)."""
         data_dict: Dict[int, Dict[str, np.ndarray]] = {}
 
         tl_ms2_h5_path = Path(tl_ms2_h5_path)

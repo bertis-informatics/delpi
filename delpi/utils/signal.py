@@ -7,35 +7,11 @@ def find_local_maxima(x: np.ndarray):
 
     # fork from https://github.com/scipy/scipy/blob/v1.15.1/scipy/signal/_peak_finding_utils.pyx
 
-    """
-    Find local maxima in a 1D array.
+    """Find local maxima, including plateaus, in a 1D array.
 
-    This function finds all local maxima in a 1D array and returns the indices
-    for their edges and midpoints (rounded down for even plateau sizes).
-
-    Parameters
-    ----------
-    x : ndarray
-        The array to search for local maxima.
-
-    Returns
-    -------
-    midpoints : ndarray
-        Indices of midpoints of local maxima in `x`.
-    left_edges : ndarray
-        Indices of edges to the left of local maxima in `x`.
-    right_edges : ndarray
-        Indices of edges to the right of local maxima in `x`.
-
-    Notes
-    -----
-    - Compared to `argrelmax` this function is significantly faster and can
-      detect maxima that are more than one sample wide. However this comes at
-      the cost of being only applicable to 1D arrays.
-    - A maxima is defined as one or more samples of equal value that are
-      surrounded on both sides by at least one smaller sample.
-
-    .. versionadded:: 1.1.0
+    A maximum is one or more equal samples with a smaller sample on both sides.
+    Returns uint32 index arrays (midpoints, left_edges, right_edges); plateau
+    midpoints are rounded down.
     """
     # cdef:
     #     np.intp_t[::1] midpoints, left_edges, right_edges
@@ -50,7 +26,6 @@ def find_local_maxima(x: np.ndarray):
     i = 1  # Pointer to current sample, first one can't be maxima
     i_max = x.shape[0] - 1  # Last sample can't be maxima
     while i < i_max:
-        # Test if previous sample is smaller
         if x[i - 1] < x[i]:
             i_ahead = i + 1  # Index to look ahead of current sample
 
@@ -68,8 +43,7 @@ def find_local_maxima(x: np.ndarray):
                 i = i_ahead
         i += 1
 
-    # Keep only valid part of array memory.
-    ## Not supported in numba
+    # Keep only valid part of array memory (resize is not supported in numba).
     # midpoints.resize(m, refcheck=False)
     # left_edges.resize(m, refcheck=False)
     # right_edges.resize(m, refcheck=False)
@@ -103,7 +77,7 @@ def cluster_peaks(all_peaks, dist_cutoff: int = 3, min_cluster_size: int = 2):
                 pk = int(np.median(current_cluster[:j]))
                 clustered_peaks[i] = pk
                 i += 1
-            ## peak group 을 averaging 하면 apex 위치가 아니게 됨
+            # peak group을 averaging하면 apex 위치가 아니게 됨
             # for k in range(0, j, dist_cutoff):
             #     clustered_peaks[i] = current_cluster[k]
             #     i += 1
@@ -126,23 +100,16 @@ def cluster_peaks_with_weights(
     min_cluster_size: int = 1,
     max_cluster_size: int = 3,
 ):
-    """
-    Cluster peaks by distance and select the peak with highest weight in each cluster.
+    """Cluster peak positions and keep the highest-weight peak of each cluster.
 
-    Args:
-        peak_groups: Array of peak positions
-        peak_group_weights: Array of weights corresponding to each peak
-        dist_cutoff: Maximum distance between peaks in same cluster
-        min_cluster_size: Minimum number of peaks required to form a cluster
-        max_cluster_size: Maximum number of peaks allowed in a single cluster
-
-    Returns:
-        Array of selected peak positions (one per cluster, with highest weight)
+    In position order, a peak joins the current cluster if it is within
+    dist_cutoff of the cluster's last peak and the cluster has fewer than
+    max_cluster_size peaks. Clusters smaller than min_cluster_size are dropped.
     """
     if len(peak_groups) < 2:
         return peak_groups
 
-    # Sort peaks by position (and align weights accordingly)
+    # sort by position
     ii = np.argsort(peak_groups)
     peak_groups = peak_groups[ii]
     peak_group_weights = peak_group_weights[ii]
@@ -158,19 +125,16 @@ def cluster_peaks_with_weights(
 
     for peak, w in zip(peak_groups[1:], peak_group_weights[1:]):
         if peak - current_cluster[j - 1] <= dist_cutoff and j < max_cluster_size:
-            # Add to current cluster
             current_cluster[j] = peak
             current_cluster_weight[j] = w
             j += 1
         else:
             # Finalize current cluster
             if j >= min_cluster_size:
-                # Select peak with highest weight in this cluster
                 max_weight_idx = np.argmax(current_cluster_weight[:j])
                 clustered_peaks[i] = current_cluster[max_weight_idx]
                 i += 1
 
-            # Start new cluster
             current_cluster[0] = peak
             current_cluster_weight[0] = w
             j = 1
@@ -186,23 +150,20 @@ def cluster_peaks_with_weights(
 
 @nb.njit(nogil=True, fastmath=True, cache=True)
 def find_bases(chrom: np.ndarray, peaks: np.ndarray):
-    """
-    chrom: 1D array of chromatogram intensities
-    peaks: 1D array of peak indices into chrom
-    returns: (left_mins, right_mins) two lists of same length as peaks
-    """
+    """Peak bases in a 1D chromatogram, found by walking downhill from each
+    peak index; returns (left_bases, right_bases) aligned with peaks."""
     n = len(chrom)
     left_bases = np.empty_like(peaks)
     right_bases = np.empty_like(peaks)
 
     for idx, p in enumerate(peaks):
-        # 왼쪽 기반점: p에서 출발해 i-1 <= i 인 동안 계속 이동
+        # 왼쪽 기반점: p에서 chrom[i-1] < chrom[i]인 동안 왼쪽으로 이동
         i = p
         while i > 0 and chrom[i - 1] < chrom[i]:
             i -= 1
         left_bases[idx] = i
 
-        # 오른쪽 기반점: p에서 출발해 i+1 <= i 인 동안 계속 이동
+        # 오른쪽 기반점: p에서 chrom[j+1] < chrom[j]인 동안 오른쪽으로 이동
         j = p
         while j < n - 1 and chrom[j + 1] < chrom[j]:
             j += 1

@@ -1,34 +1,22 @@
-"""
-Progress tracking module for DelPi search.
+"""Hierarchical progress tracking with tqdm, callback (GUI) or silent back-ends.
 
-Provides a hierarchical progress tracking framework with pluggable
-display back-ends (tqdm CLI, GUI callback, or silent dummy).
-
-Quick start
------------
 ::
 
     from delpi.search.progress import create_progress_tracker
 
-    # CLI: two tqdm bars (overall + subtask)
+    # CLI: overall and subtask tqdm bars
     tracker = create_progress_tracker("tqdm", total=100, description="Overall")
 
-    prep = tracker.create_child("Data-Prep", total=10, portion=20)
-    for i in range(10):
-        prep.advance(1)
-    prep.complete()
-
-    tracker.complete()
-    tracker.close()
-
-    # Callback mode: receive ProgressSnapshot on every update
+    # callback: receives a ProgressSnapshot on every update
     def on_progress(snap):
         print(f"{snap.overall_percent:.0f}% {snap.time_display}")
 
     tracker = create_progress_tracker("callback", total=100, callback=on_progress)
 
-    # Silent mode: no display
+    # silent
     tracker = create_progress_tracker("dummy")
+
+See `ProgressTracker` for the child/portion workflow.
 """
 
 from delpi.search.progress.tracker import ProgressTracker
@@ -58,22 +46,15 @@ def create_progress_tracker(
     Parameters
     ----------
     mode : str
-        ``"tqdm"`` for a CLI display with two tqdm bars,
-        ``"callback"`` for a headless tracker that fires *callback*
-        on every state change,
-        ``"dummy"`` (or ``"silent"``) for a no-op tracker.
+        ``"tqdm"`` (two CLI bars), ``"callback"`` (headless, calls `callback` on
+        every state change) or ``"dummy"``/``"silent"``/``"none"`` (no-op).
     total : int
-        Total steps for the root tracker.
+        Total steps of the root tracker.
     description : str
-        Label for the root progress bar.
+        Label of the root bar.
     callback : callable, optional
-        ``callback(snapshot: ProgressSnapshot) -> None``.
-        Used when *mode* is ``"callback"`` (or ``"tqdm"`` if you want
-        both CLI bars **and** a callback).
-
-    Returns
-    -------
-    ProgressTracker
+        ``callback(snapshot: ProgressSnapshot) -> None``; used by ``"callback"``
+        and also by ``"tqdm"``.
     """
     if mode == "tqdm":
         return TqdmProgressTracker(

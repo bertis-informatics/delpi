@@ -65,7 +65,7 @@ class Enzyme:
         max_missed_cleavages = self.max_missed_cleavages
         seq_len = len(protein_sequence)
 
-        # Search with endpos. because there could be a zero-length peptide, when sequence ends with 'K' or 'R'
+        # endpos avoids an empty last peptide when the sequence ends at a cleavage site
         cutpos = (
             [0]
             + [

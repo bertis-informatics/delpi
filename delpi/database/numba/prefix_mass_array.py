@@ -24,8 +24,7 @@ def get_prefix_mass_array(seq, mod_ids, mod_sites):
         mass_arr[i] = aa_mass_array[ord(aa)]
 
     for mod_id, site in zip(mod_ids, mod_sites):
-        # site =  0 or -1           if n-term or c-term
-        #         1-len(mass_arr)   otherwise
+        # site: 0 = N-term, -1 = C-term, otherwise 1-based residue position
         mass_arr_pos = site - 1 if site > 0 else site
         unimod_id = (mod_id >> 16) & 0xFFFF
         mass_arr[mass_arr_pos] += mod_mass_array[unimod_id]

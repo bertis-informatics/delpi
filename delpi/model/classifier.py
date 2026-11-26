@@ -49,11 +49,9 @@ class DelPiModel(pl.LightningModule):
             drop_path_rate=drop_path_rate,
         )
 
-        # "split": project [CLS; mean(theo); mean(exp)] → embed_dim.
-        # concat allows the projection to learn cross-stream interactions
-        # (CLS↔theo, CLS↔exp, theo↔exp), which is essential for evidence matching.
-        # LayerNorm is intentionally omitted here; the classifier head's leading
-        # LayerNorm normalizes uniformly across all pool modes.
+        # "split": project [CLS; mean(theo); mean(exp)] → embed_dim, so the
+        # projection can learn cross-stream interactions. No LayerNorm here; the
+        # classifier head's leading LayerNorm covers all pool modes.
         if global_pool == "split":
             self.split_proj = nn.Linear(embed_dim * 3, embed_dim, bias=False)
         else:
@@ -69,15 +67,10 @@ class DelPiModel(pl.LightningModule):
         self.classifier = nn.Sequential(*fc_layers)
 
     def _pool_features(self, x: torch.Tensor, n_theo_tokens: int) -> torch.Tensor:
-        """Pool encoder output according to self.global_pool.
+        """Pool encoder output by self.global_pool.
 
-        Token layout after encoder: [CLS | theo_tokens (n_theo_tokens) | exp_tokens]
-
-        Args:
-            x: encoder output of shape [B, 1 + n_theo + n_exp, embed_dim]
-            n_theo_tokens: number of theoretical peak tokens
-        Returns:
-            Pooled feature tensor of shape [B, embed_dim]
+        x is [B, 1 + n_theo + n_exp, embed_dim] laid out as [CLS | theo | exp];
+        returns [B, embed_dim].
         """
         if self.global_pool == "token":
             return x[:, 0]

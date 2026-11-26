@@ -7,12 +7,7 @@ from delpi.lcms.base_spectra import BaseSpectra
 
 
 class MS1Spectra(BaseSpectra):
-    """
-    MS1 spectra group for handling MS1 level mass spectrometry data.
-
-    This class manages MS1 spectra data including metadata and peak information,
-    providing functionality for precursor feature detection and analysis.
-    """
+    """MS1 spectra of a run."""
 
     def __init__(
         self,
@@ -22,16 +17,7 @@ class MS1Spectra(BaseSpectra):
         ab_arr: np.ndarray,
         z_score_arr: Optional[np.ndarray] = None,
     ):
-        """
-        Initialize MS1Spectra.
-
-        Args:
-            meta_df: Metadata DataFrame containing spectrum information
-            frame_num_arr: Array of frame numbers
-            mz_arr: Array of m/z values
-            ab_arr: Array of abundance/intensity values
-            z_score_arr: Optional array of z-scores for peak scoring
-        """
+        """meta_df may cover all MS levels; only MS1 rows are kept."""
         ms1_meta_df = meta_df.filter(pl.col("ms_level") == 1)
         peak_df = self.make_peak_df(frame_num_arr, mz_arr, ab_arr, z_score_arr)
         super().__init__(ms1_meta_df, peak_df)

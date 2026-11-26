@@ -1,8 +1,4 @@
-"""
-DIA Search Engine for DelPi
-
-This module provides the DIA-specific search engine implementation.
-"""
+"""DIA search engine."""
 
 from collections import defaultdict
 from typing import Dict
@@ -48,19 +44,12 @@ TOPK_PER_PRECURSOR = 5
 
 
 class DIASearchEngine(BaseSearchEngine):
-    """
-    Data-Independent Acquisition (DIA) search engine implementation.
+    """DIA search engine.
 
-    This engine implements the DIA-specific search pipeline:
-    1. DIA isolation scheme detection and window analysis
-    2. Quick search for initial retention time calibration
-    3. Full DIA search with deep learning scoring across windows
-    4. Multi-stage retention time calibration refinement
-    5. Quantitative fragment selection for label-free quantification
-
-    The engine processes DIA data by first understanding the isolation
-    scheme, then performing a rapid search to establish RT relationships,
-    followed by comprehensive scoring across all windows.
+    Detects the isolation scheme, calibrates RT before the full search (RT
+    bootstrap on the first search, earlier results otherwise), scores PmSMs per
+    isolation window with the DelPi model, clusters PmSMs that share fragment
+    peaks, and refits RT afterwards.
     """
 
     def get_acquisition_method(self) -> str:
@@ -122,10 +111,8 @@ class DIASearchEngine(BaseSearchEngine):
 
         if progress is None:
             progress = DummyProgressTracker()
-        # portion=0: this child reports its own bar but does NOT advance the
-        # parent automatically. _search_spectra is invoked once per
-        # (dia_win, speclib chunk); the parent (which counts dia_wins) is
-        # advanced manually in _perform_full_search when a dia_win completes.
+        # portion=0: called once per (dia_win, speclib chunk); the parent counts
+        # dia_wins and is advanced in _perform_full_search.
         batch_progress = progress.create_child("PmSMs", total=total_batches, portion=0)
 
         results = defaultdict(list)
@@ -180,8 +167,8 @@ class DIASearchEngine(BaseSearchEngine):
                 ms1_scale_arr = ms1_scale_t.numpy()[mask]
                 ms2_scale_arr = ms2_scale_t.numpy()[mask]
 
-                # cheap scalar per PmSM -- always saved, regardless of save_quant,
-                # so PmSM assignment never depends on whether xic_array was persisted
+                # cheap, so saved even without save_quant: PmSM assignment must
+                # not depend on whether xic_array was saved
                 results["median_intensity"].append(
                     get_pmsm_median_intensity(x_exp, x_rank, ms2_scale_arr)
                 )
@@ -296,7 +283,7 @@ class DIASearchEngine(BaseSearchEngine):
                             prev_dia_win, chunk_results, cluster_count
                         )
                         chunk_results = []
-                    # Previous dia_win fully processed -> advance parent by 1.
+                    # previous dia_win done
                     progress.advance(1)
                 prev_dia_win = dia_win
 
@@ -334,20 +321,10 @@ class DIASearchEngine(BaseSearchEngine):
     def perform_search(
         self, lcms_data: MassSpecData, progress: ProgressTracker = None
     ) -> ResultManager:
-        """
-        Perform the DIA search pipeline.
-
-        Args:
-            search_config: Search configuration
-            lcms_data: DIA LC-MS/MS data
-
-        Returns:
-            ResultManager with search results
-        """
+        """Run the DIA search pipeline on `lcms_data`."""
         if progress is None:
             progress = DummyProgressTracker()
 
-        # Prepare DIA data and return DIARun object
         run = DIARun(lcms_data)
         num_wins = run.dia_scheme_df.shape[0]
 
@@ -357,18 +334,15 @@ class DIASearchEngine(BaseSearchEngine):
             f"Detected DIA scheme: {num_wins} isolation windows for {iso_min_mz:.2f} - {iso_max_mz:.2f} m/z"
         )
 
-        # Data preparation (15% of overall)
         prep_progress = progress.create_child("Data-Prep", total=1, portion=5)
         run.load_windows(free_ms_data=False, progress=prep_progress)
         prep_progress.complete()
         logger.info("DIA data prepared")
 
-        # RT calibration with quick search or previous search results
         rt_cal_progress = progress.create_child("RT-Calibration", total=1, portion=1)
         rt_calibrator = self._perform_rt_calibration(run, before_full_search=True)
         rt_cal_progress.complete()
 
-        # Full search (70% of overall)
         st_t = time.perf_counter()
         logger.info("Search started")
 
@@ -389,7 +363,6 @@ class DIASearchEngine(BaseSearchEngine):
         elapsed = time.perf_counter() - st_t
         logger.info(f"Search completed. Elapsed: {elapsed:.1f} s")
 
-        # Post-search RT calibration (10% of overall)
         rt_cal2_progress = progress.create_child("RT-Refit", total=1, portion=1)
         rt_calibrator = self._perform_rt_calibration(run, before_full_search=False)
         rt_cal2_progress.complete()

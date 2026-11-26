@@ -84,12 +84,10 @@ class Composition:
 
         assert type(other) == self.__class__
 
-        # merge additional elements
         additional_elements = self.merge_additional_elements(
             self.additional_elements, other.additional_elements
         )
         
-        # return a new composition
         return Composition(
                 c = self._c + other._c,
                 h = self._h + other._h,

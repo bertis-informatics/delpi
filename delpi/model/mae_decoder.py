@@ -64,12 +64,11 @@ class Decoder(torch.nn.Module):
         # x_ = x_ + self.pos_encoder(x_in[:, :, -2], x_in[:, :, -1])
         x_ += self.input_meta_encoder(x_in[..., self.output_dim :])
 
-        # append theo_peak_tokens & cls token
+        # prepend cls token & theo_peak_tokens
         x = torch.cat([x[:, :n_extra_tokens, :], x_], dim=1)
 
         x = self.layer_norm(self.transformer(x))
 
-        # predictor projection
         x = self.predictor(x)
 
         # remove theo_peak_tokens & cls token

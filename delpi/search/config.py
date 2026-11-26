@@ -68,8 +68,9 @@ class SearchConfig:
 
     @property
     def tl_ms2_h5_path(self):
-        """Shared HDF5 file holding MS2/RT transfer-learning training data
-        for all runs (see :class:`~delpi.search.tl.data_prep.TransferLearningDataPreparator`).
+        """Shared HDF5 of MS2/RT transfer-learning data for all runs.
+
+        Written by :class:`~delpi.search.tl.data_prep.TransferLearningDataPreparator`.
         """
         return self.output_dir / "transfer_learning_ms2.h5"
 
@@ -101,18 +102,17 @@ class SearchConfig:
         return ResultManager(run_name=run_name, output_dir=self.output_dir)
 
     def check_params(self) -> None:
-        """
-        Validate essential configuration parameters.
+        """Validate the configuration and create the output directory.
 
         Raises:
-            ValueError: If required parameters are missing or invalid
+            ValueError: a required parameter is missing or invalid.
+            FileNotFoundError: an input file does not exist.
         """
         if "input_files" not in self.config:
             raise ValueError(
                 "Missing required parameter 'input_files' in configuration"
             )
 
-        # Check required parameters
         required_fields = ["output_directory", "database_directory"]
         for field in required_fields:
             if field not in self.config:
@@ -123,17 +123,14 @@ class SearchConfig:
         validate_protein_scoring(self.protein_scoring)
         _ = self.min_search_fragments  # validate early
 
-        # Create output directory
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Validate q-value cutoff
         q_value_cutoff = self.config.get("q_value_cutoff", 0.01)
         if not 0 <= q_value_cutoff <= 1:
             raise ValueError(
                 f"q_value_cutoff must be between 0 and 1, got {q_value_cutoff}"
             )
 
-        # Validate decoy method
         decoy_method = self.decoy_method
         if decoy_method not in DecoyGenerator.supported_methods:
             raise ValueError(
@@ -144,21 +141,14 @@ class SearchConfig:
         if len(self.input_files) < 1:
             raise ValueError("No input files specified.")
 
-        # Validate input files exist
         for input_file in self.input_files:
             if not input_file.exists():
                 raise FileNotFoundError(f"Input file not found: {input_file}")
 
     def get_db_params(self) -> dict:
-        """
-        Extract database-related parameters from configuration.
-
-        Returns:
-            dict: Dictionary containing only database-related parameters
-        """
+        """Return the config entries that define the library build."""
         db_params = {}
 
-        # Database-related parameter keys
         db_param_keys = [
             "fasta_file",
             "digest",
@@ -212,13 +202,10 @@ class SearchConfig:
 
     @property
     def enable_mbr(self) -> bool:
-        """Whether to run the 2-pass, Match-Between-Runs-guided search.
+        """Whether to run the two-pass, MBR-guided search.
 
-        When the ``enable_mbr`` option is not specified in the
-        configuration, the default depends on the acquisition method: DIA
-        defaults to enabled, DDA defaults to disabled. Also always disabled
-        when there is only a single input run, since the two-pass
-        MBR/propagation design requires cross-run global scoring.
+        ``enable_mbr`` defaults to on for DIA and off for DDA. Always off for
+        a single run, since the two-pass design needs cross-run global scoring.
         """
         if len(self.input_files) <= 1:
             return False
@@ -234,16 +221,7 @@ class SearchConfig:
         return False
 
     def _compare_mod_params(self, mod_params1: list, mod_params2: list) -> bool:
-        """
-        Compare modification parameter lists.
-
-        Args:
-            mod_params1: First modification parameter list
-            mod_params2: Second modification parameter list
-
-        Returns:
-            bool: True if parameters are identical, False otherwise
-        """
+        """True if both ``mod_param_set`` lists hold the same mods, in any order."""
         # yaml `null` (e.g. mod_param_set: null) loads as None, not []
         mod_params1 = mod_params1 or []
         mod_params2 = mod_params2 or []
@@ -257,16 +235,8 @@ class SearchConfig:
         return encoded1 == encoded2
 
     def _find_diff_keys(self, d1: dict, d2: dict, prefix: str = "") -> List[str]:
-        """
-        Find keys with different values between two dictionaries.
-
-        Args:
-            d1: First dictionary
-            d2: Second dictionary
-            prefix: Prefix for nested keys
-
-        Returns:
-            List[str]: List of keys with different values
+        """Return dotted paths of keys whose values differ, recursing into
+        dicts and lists. Keys missing from either dict are ignored.
         """
         diffs = []
         all_keys = set(d1.keys()) & set(d2.keys())
@@ -296,16 +266,7 @@ class SearchConfig:
         return diffs
 
     def compare_with_saved_params(self, db_dir: Path) -> List[str]:
-        """
-        Compare current database parameters with saved parameters.
-
-        Args:
-            db_dir: Database directory path
-
-        Returns:
-            List[str]: List of parameter keys that differ between current and saved params.
-                      Empty list if parameters are identical.
-        """
+        """Return the DB parameter keys that differ from ``db_dir/param.yaml``."""
         param_file = db_dir / "param.yaml"
 
         saved_params = load_yaml(param_file)
@@ -317,14 +278,12 @@ class SearchConfig:
         return self._find_diff_keys(saved_params, current_params)
 
     def check_database_exists(self) -> bool:
-        """
-        Check if database exists and parameters match current configuration.
+        """Return True if ``db_dir`` holds a library built with these parameters.
 
-        Returns:
-            bool: True if database exists and parameters match
+        Returns False if ``db_dir`` or its ``param.yaml`` is missing.
 
         Raises:
-            ValueError: If database exists but parameters don't match
+            ValueError: the saved library parameters differ from the config.
         """
         if not self.db_dir.exists():
             return False
@@ -343,7 +302,6 @@ class SearchConfig:
 
         diff_keys = self.compare_with_saved_params(self.db_dir)
         if len(diff_keys) > 0:
-            # For now, we will not raise an error, just issue a warning. In the future, we may want to enforce this check more strictly.
             raise ValueError(
                 f"Database files already exist, but parameters used for DB generation are different with current params: {diff_keys}"
             )

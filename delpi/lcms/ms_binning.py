@@ -2,11 +2,9 @@ import polars as pl
 
 
 class MassSpecBinning:
-    """
-    This class group mass values with bin widths
-    that increase proportionally to the mass.
-    The bin width can be specified in the unit of parts-per-million (ppm).
-    Measurement errors in mass-spec are proportional to the mass.
+    """m/z bins of constant ppm width, since mass errors scale with m/z.
+
+    Edges run from min_mz - 5 to the first edge >= max_mz + 5.
     """
 
     def __init__(self, min_mz, max_mz, bin_width_in_ppm):

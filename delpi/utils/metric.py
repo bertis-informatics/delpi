@@ -68,9 +68,7 @@ class SafePearsonCorrCoef(PearsonCorrCoef):
 
 
 class SpectralAngle(Metric):
-    """
-    Spectral Angle Similarity metric in [0, 1].
-    1.0 = identical spectra, 0.0 = orthogonal.
+    """Spectral angle similarity in [0, 1]: 1 identical, 0 orthogonal.
 
     With ignore_empty_targets=True, only spectra with an observed peak are
     averaged; a zero prediction for a nonzero target still scores 0.
@@ -88,7 +86,7 @@ class SpectralAngle(Metric):
             present = target.ne(0).any(dim=-1)
             preds, target = preds[present], target[present]
         cos_sim = F.cosine_similarity(preds, target, dim=-1, eps=1e-8)
-        # Robustness: treat negative cosine (angle > 90°) as 0 similarity
+        # negative cosine (angle > 90°) counts as 0 similarity
         cos_sim = cos_sim.clamp(min=0.0, max=1.0)
         angle = torch.acos(cos_sim)  # [0, π/2]
         score = 1.0 - angle / (math.pi / 2)  # [0, 1]

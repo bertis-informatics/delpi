@@ -1,9 +1,4 @@
-"""
-Second-pass selection utilities.
-
-This module implements the precursor/decoy selection logic used by the
-transfer-learning two-pass search:
-"""
+"""Precursor and decoy selection for the transfer-learning second pass."""
 
 import logging
 from pathlib import Path
@@ -23,7 +18,7 @@ def get_decoy_method(db_dir: Path) -> Optional[str]:
     """Read the decoy generation method recorded when the database was built."""
     param_file = Path(db_dir) / "param.yaml"
     params = load_yaml(param_file)
-    # Libraries built before the key rename store the method as "decoy".
+    # older libraries store it under "decoy"
     return params.get("decoy_method", params.get("decoy"))
 
 
@@ -50,12 +45,11 @@ def select_tl_training_pmsms(
     q_value_cutoff: float,
     top_k: int = 3,
 ) -> pl.DataFrame:
-    """Select target PmSM observations used to fine-tune RT/MS2 predictors.
+    """Target PmSMs used to fine-tune the RT/MS2 predictors.
 
-    Only targets that pass *both* the run-specific and the global FDR cutoff
-    are eligible.  When the same precursor is confidently identified in
-    multiple runs, at most ``top_k`` highest-scoring observations are kept.
-    Decoys are never used for fine-tuning.
+    Targets must pass both the run-specific and the global precursor q-value
+    cutoff; each precursor keeps at most its ``top_k`` highest-scoring PmSMs
+    across runs.
     """
     df = pmsm_df.filter(
         (pl.col("is_decoy") == False)
@@ -75,11 +69,8 @@ def select_second_pass_targets(
     pmsm_df: pl.DataFrame,
     q_value_cutoff: float,
 ) -> pl.DataFrame:
-    """Select unique target precursors confirmed at the experiment level.
-
-    Only targets passing the first-pass ``global_precursor_q_value`` cutoff
-    are eligible for the refined (second-pass) target-decoy library.  Targets
-    that fail the first-pass global cutoff are not searched in the second
+    """Best PmSM of each target precursor passing the first-pass
+    ``global_precursor_q_value`` cutoff; only these are searched in the second
     pass.
     """
     df = (
@@ -100,17 +91,13 @@ def select_paired_decoys(
 ) -> pl.DataFrame:
     """Pair each target precursor with one decoy precursor generated from it.
 
-    ``target_df`` must contain ONLY target rows (``is_decoy == False``) and
-    already carry ``precursor_index``, ``peptide_index``, ``peptidoform_index``
-    and ``precursor_charge`` (as produced by ``PeptideDatabase.join`` /
-    ``select_second_pass_targets``). The paired decoy must share the same
-    ``precursor_charge`` and ``var_mod_profile`` (per-variable-modification
-    occurrence counts) as the target. Ties are broken deterministically via
-    ``random_seed``.
-
-    Databases built before pair-preserving decoy generation lack a
-    ``target_peptide_index`` column on ``peptide_df``; for those, pairing
-    falls back to :func:`_select_paired_decoys_by_nearest_mz`.
+    `target_df` holds only targets, with ``precursor_index``,
+    ``peptide_index``, ``peptidoform_index`` and ``precursor_charge``. The
+    decoy must match the target's ``precursor_charge`` and ``var_mod_profile``
+    (count of each variable modification); ties are broken by ``random_seed``.
+    Databases without ``peptide_df.target_peptide_index`` (built before
+    pair-preserving decoy generation) fall back to
+    :func:`_select_paired_decoys_by_nearest_mz`.
     """
     db_dir = Path(db_dir)
 
@@ -140,13 +127,12 @@ def _select_paired_decoys_by_sequence(
     target_df: pl.DataFrame,
     random_seed: int = 42,
 ) -> pl.DataFrame:
-    """Pair via ``peptide_df.target_peptide_index`` (see :func:`select_paired_decoys`)."""
+    """Pair via ``peptide_df.target_peptide_index``; see `select_paired_decoys`."""
     var_mod_names = get_var_mod_names(db_dir)
 
     def _var_mod_profile_expr() -> pl.Expr:
-        # pl.struct requires at least one field; when there are no variable
-        # modifications, fall back to a constant field so every row shares
-        # the same (trivial) profile and the charge-only match still works.
+        # pl.struct needs a field: with no variable mods, use a constant one so
+        # pairing matches on charge only
         mod_count_exprs = [
             pl.col("mods")
             .str.split(";")
@@ -177,8 +163,7 @@ def _select_paired_decoys_by_sequence(
         .collect()
     )
 
-    # target_peptide_index -> decoy_peptide_index map, restricted to peptides
-    # that actually appear in target_df for efficiency
+    # target_peptide_index -> decoy_peptide_index, limited to target_df peptides
     target_peptides = target_df.lazy().select(pl.col("peptide_index").unique())
     decoy_map_df = (
         pl.scan_parquet(db_dir / "peptide_df.parquet")
@@ -195,8 +180,8 @@ def _select_paired_decoys_by_sequence(
         )
     )
 
-    # candidate decoy pool: every decoy precursor's own charge + var-mod
-    # profile, keyed by the target peptide it was generated from
+    # decoy precursors with their charge and var-mod profile, keyed by the
+    # target peptide they were generated from
     candidate_df = (
         precursor_df.join(modification_df, on="peptidoform_index", how="left")
         .with_columns(_var_mod_profile_expr())
@@ -241,11 +226,8 @@ def _select_paired_decoys_by_nearest_mz(
 ) -> pl.DataFrame:
     """Pair each target with the nearest-m/z decoy of same length/charge.
 
-    Legacy-database fallback used when ``peptide_df`` has no
-    ``target_peptide_index`` column to pair by sequence lineage: candidates
-    are restricted to the same ``sequence_length`` and ``precursor_charge``
-    only, so every target still gets a (best-effort) decoy count-matched to
-    it. Ties in m/z distance are broken deterministically via
+    Fallback for databases whose ``peptide_df`` has no
+    ``target_peptide_index``. Ties in m/z distance are broken by
     ``random_seed``.
     """
     peptide_df = pl.read_parquet(db_dir / "peptide_df.parquet").select(

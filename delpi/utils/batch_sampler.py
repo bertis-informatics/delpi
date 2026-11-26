@@ -61,7 +61,7 @@ class SeqDataBatchSampler(BatchSampler):
                 ]
             )
 
-        # shuffle list of batches, each of which contains the same length samples
+        # shuffle the batches; each holds samples of one group value
         if self.shuffle:
             self.random_state.shuffle(batch_keys)
 
@@ -86,9 +86,8 @@ class SeqDataBatchSampler(BatchSampler):
             return int(np.sum((counts + self.batch_size - 1) // self.batch_size))
 
     def __len__(self):
-        # https://pytorch.org/docs/stable/data.html
-        # The __len__() method isn’t strictly required by DataLoader,
-        # but is expected in any calculation involving the length of a DataLoader.
+        # optional for DataLoader, but needed wherever its length is used
+        # (https://pytorch.org/docs/stable/data.html)
         # return (self.label_df.shape[0] + self.batch_size - 1) // self.batch_size
         if self.batch_count is not None:
             return self.batch_count
@@ -97,18 +96,14 @@ class SeqDataBatchSampler(BatchSampler):
 
 
 class ChunkedSeqDataBatchSampler(BatchSampler):
-    """Inference-only batch sampler: batches are grouped by
-    ``batch_grouping_column`` (e.g. sequence length) like
-    :class:`SeqDataBatchSampler`, but are additionally constrained to never
-    span two contiguous ``chunk_size``-sized ranges of the dataset's global
-    index space. This lets a chunked-output writer detect chunk boundaries
-    purely from batch contents (e.g. ``index // chunk_size``), without ever
-    re-building the Dataset/DataLoader per chunk.
+    """Inference-only sampler grouping batches by ``batch_grouping_column``
+    like :class:`SeqDataBatchSampler`, but no batch spans two ``chunk_size``
+    ranges of the dataset index. A chunked writer can then find chunk
+    boundaries from batch indices (``index // chunk_size``) without rebuilding
+    the DataLoader per chunk.
 
-    Batches are produced lazily, one chunk at a time; the full batch list
-    for the whole dataset is never held in memory at once. Only
-    ``shuffle=False`` inference ordering is supported (no distributed/
-    training behavior, unlike SeqDataBatchSampler).
+    Batches are generated lazily, one chunk at a time, in a fixed order (no
+    shuffling or distributed support).
     """
 
     def __init__(
@@ -137,9 +132,8 @@ class ChunkedSeqDataBatchSampler(BatchSampler):
             chunk_end = min(chunk_start + self.chunk_size, n)
             chunk_groups = group_values[chunk_start:chunk_end]
 
-            # stable sort clusters same-length rows while preserving their
-            # relative (global-index) order; avoids rescanning the chunk
-            # once per unique group value.
+            # stable sort groups equal values in global-index order without
+            # rescanning the chunk per value
             order = np.argsort(chunk_groups, kind="stable")
             sorted_groups = chunk_groups[order]
             global_order = order.astype(np.int64) + chunk_start
@@ -155,8 +149,7 @@ class ChunkedSeqDataBatchSampler(BatchSampler):
                     yield group_indices[b_start : b_start + batch_size]
 
     def count_num_of_batches(self) -> int:
-        """Total batch count, derived only from the cached group-value
-        array (no Dataset/Sampler reconstruction)."""
+        """Total batch count, from the cached group values."""
         group_values = self._group_values
         n = self._n_samples
         total = 0
@@ -205,7 +198,7 @@ def get_batch_sampler_for_seq_data(
             batch_count_list.append(batch_sampler_.count_num_of_batches())
             if rank == local_rank:
                 batch_sampler = batch_sampler_
-        # reset batch_count
+        # __len__ reports the smallest per-rank batch count
         batch_sampler.batch_count = min(batch_count_list)
     else:
         batch_sampler = SeqDataBatchSampler(

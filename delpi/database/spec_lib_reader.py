@@ -60,7 +60,8 @@ class SpectralLibReader:
             raise ValueError("max_fragments must be an integer in [1, 255].")
         self.max_fragments = max_fragments
 
-        # load precursor_df and modification_df in memory
+        # precursor_df stays lazy (sliced per read); peptide/modification_df are
+        # loaded in memory
         precursor_scan = pl.scan_parquet(self.peptide_db_path / "precursor_df.parquet")
         precursor_schema = precursor_scan.collect_schema()
         if any(
@@ -182,10 +183,9 @@ class SpectralLibReader:
             max_precursor_isotopes=self.max_precursor_isotopes,
             max_fragment_isotopes=self.max_fragment_isotopes,
             ## peptide data
-            # Read-only (no copy) keeps the numpy array type stable for numba;
-            # otherwise polars' readonly zero-copy views vs. copies are seen
-            # as distinct types, forcing repeated njit recompilation. None of
-            # the njit code writes to these fields, so no copy is needed.
+            # all read-only, so numba sees one array type whether polars returned
+            # a zero-copy view or a copy (no njit recompiles); njit never writes
+            # these
             peptide_is_decoy_arr=_readonly(self.peptide_df["is_decoy"].to_numpy()),
             peptide_seq_len_arr=_readonly(
                 self.peptide_df["sequence_length"].to_numpy()
@@ -241,10 +241,9 @@ class SpectralLibReader:
     ) -> tuple:
         """Precursors with min <= precursor_mz <= max, by binary search.
 
-        Filtering every precursor took ~0.14 s per window for human_global and
-        ~1.1 s for human_phospho. Bounds are converted to the column dtype
-        (a mixed-dtype searchsorted copies the column), rounded inward so the
-        result matches a float64 comparison.
+        A full filter took ~0.14 s (human_global) to ~1.1 s (human_phospho) per
+        window. Bounds are cast to the column dtype (a mixed-dtype searchsorted
+        copies the column) and rounded inward to match a float64 comparison.
         """
         mz = self._precursor_mz_arr
         lower = mz.dtype.type(min_precursor_mz)

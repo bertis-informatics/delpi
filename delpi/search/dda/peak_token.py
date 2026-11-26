@@ -104,9 +104,8 @@ def _set_x_exp(
                     time_idx - time_index_val_arr.shape[0] // 2
                 )
 
-                # theoretical-intensity rank of this fragment (0 = library's most
-                # intense predicted fragment for this precursor), for any
-                # isotope; get_pmsm_median_intensity filters isotope via x_exp itself
+                # library intensity rank of the fragment (0 = most intense), set
+                # for every isotope; get_pmsm_median_intensity filters isotopes
                 if (x_rank is not None) and (is_precursor == False):
                     x_rank[counter] = num_fragments - theo_i - 1
 
@@ -219,7 +218,6 @@ def get_x_exp(
         x_rank=x_rank,
     )
 
-    # ms2_scale is the fragment-ion max ab used to rescale x_exp's AB column
-    # (normalized to max 1) back to absolute intensity -- see get_ms1_area_dda
-    # and get_pmsm_median_intensity, which are the only consumers of ms2_scale.
+    # ms1_scale / ms2_scale: max ab of the MS1 precursor / fragment peaks, to undo
+    # the AB normalization (get_ms1_area_dda / get_pmsm_median_intensity)
     return x_exp[:counter], ms1_scale, ms2_scale

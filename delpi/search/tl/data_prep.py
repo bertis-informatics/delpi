@@ -21,13 +21,11 @@ from delpi.model.spec_lib.aa_encoder import (
 
 
 class TransferLearningDataPreparator:
-    """MS2 intensity data preparation class for transfer learning.
+    """MS2 intensity / RT data preparation for transfer learning.
 
-    Extracts fragment-ion intensities/RT for identified PmSMs from a raw
-    LC-MS/MS file and persists them to a shared HDF5 file (grouped by
-    ``{run_index}/{sequence_length}/{array_name}``) so that transfer-learning
-    data from every run can live in a single file instead of each run's own
-    result file.
+    Extracts fragment-ion intensities and RT of identified PmSMs from a raw
+    LC-MS/MS file and appends them to one HDF5 file shared by all runs
+    (``/{sequence_length}/{array_name}``), not to each run's result file.
     """
 
     def __init__(
@@ -42,13 +40,9 @@ class TransferLearningDataPreparator:
     ):
         """
         Args:
-            nce: Normalized collision energy metadata value.
-            frag_method: Fragmentation method (0: HCD, 1: CID).
-            mass_analyzer: Mass analyzer type (0: FTMS, 1: ITMS).
-            tolerance_in_ppm: Fragment matching tolerance in ppm.
-            apply_phospho: Whether to include the phospho neutral loss.
-            min_charge: Minimum fragment charge.
-            max_charge: Maximum fragment charge.
+            nce: Normalized collision energy stored in ``x_meta``.
+            apply_phospho: Also match phospho neutral-loss fragments.
+            min_charge, max_charge: Fragment charge range.
         """
         self.nce = nce
         self.frag_method = frag_method
@@ -58,7 +52,6 @@ class TransferLearningDataPreparator:
         self.min_charge = min_charge
         self.max_charge = max_charge
 
-        # Initialize fragmentation and precursor generator
         self.precursor_gen = PrecursorGenerator()
         self._setup_fragmentation()
 
@@ -82,28 +75,17 @@ class TransferLearningDataPreparator:
         pmsm_df: pl.DataFrame,
         lcms_data: MassSpecData,
     ) -> Dict[int, Dict[str, np.ndarray]]:
-        """
-        Prepare training data for transfer learning from PMSM dataframe
+        """Training arrays of the PmSMs in `pmsm_df`, as
+        ``{sequence_length: {array_name: np.ndarray}}``."""
 
-        Args:
-            pmsm_df: Dataframe containing PMSM information
-            lcms_data: LCMS data object
-            output_path: Path to save results (optional)
-
-        Returns:
-            Training data grouped by sequence length
-        """
-
-        # Validate required columns
         self._validate_dataframe(pmsm_df)
 
-        ## [TODO] how to handle shared fragment peaks from different peptidoforms?
-        ## Prevent model to learn from multiple peptidoforms with same spectrum
+        # TODO: avoid learning several peptidoforms from one spectrum (shared
+        # fragment peaks), e.g. keep the best-scoring PmSM per frame
         # tl_pmsm_df = pmsm_df.group_by(["frame_num"]).agg(
         #     pl.all().sort_by("score").last()
         # )
 
-        # Collect data by sequence length
         collected_data = self._collect_ms2_intensity_data(pmsm_df, lcms_data)
 
         return collected_data
@@ -114,24 +96,18 @@ class TransferLearningDataPreparator:
         raw_file_path: Union[Path, str],
         h5_file_path: Union[Path, str],
     ) -> None:
-        """Extract MS2/RT training data for a single run and append it to a
-        shared HDF5 file.
+        """Extract one run's MS2/RT training data and append it to a shared
+        HDF5 file (see :meth:`save_to_hdf`).
 
         Parameters
         ----------
         pmsm_df:
-            A pre-filtered Polars DataFrame **or** a path to a parquet file
-            containing PSMs for the given run.
-            Required columns: ``precursor_index``, ``frame_num``, ``peptide``,
+            Pre-filtered PmSMs of this run, or a parquet path. Required
+            columns: ``precursor_index``, ``frame_num``, ``peptide``,
             ``mod_ids``, ``mod_sites``, ``precursor_charge``,
             ``sequence_length``.
         raw_file_path:
-            Path to the raw LC-MS/MS file (``.raw``, ``.mzml``, or
-            ``.mzml.gz``) for this run.
-        h5_file_path:
-            Destination shared HDF5 file. Created if it does not exist;
-            existing datasets are extended (append mode). Data from every
-            run is appended into the same arrays (no per-run grouping).
+            Raw LC-MS/MS file of this run (``.raw``, ``.mzml`` or ``.mzml.gz``).
         """
         raw_file_path = Path(raw_file_path)
         h5_file_path = Path(h5_file_path)
@@ -154,20 +130,16 @@ class TransferLearningDataPreparator:
         collected_data: Dict[int, Dict[str, np.ndarray]],
         h5_file_path: Union[Path, str],
     ) -> None:
-        """Append *collected_data* to a shared HDF5 file.
+        """Append `collected_data` to a shared HDF5 file (created if missing).
 
-        Layout: ``/<seq_len>/<array_name>``, LZF-compressed with an
-        unlimited first axis for incremental appending across runs (all
-        runs' data is appended into the same arrays; there is no per-run
-        grouping).
+        Layout: ``/<seq_len>/<array_name>``, LZF-compressed with an unlimited
+        first axis; all runs append to the same arrays (no per-run group).
 
         Parameters
         ----------
         collected_data:
-            Mapping ``{sequence_length: {array_name: np.ndarray}}``, as
-            returned by :meth:`prepare_training_data`.
-        h5_file_path:
-            Destination HDF5 file (opened in append mode).
+            ``{sequence_length: {array_name: np.ndarray}}`` from
+            :meth:`prepare_training_data`.
         """
         h5_file_path = Path(h5_file_path)
         h5_file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -231,7 +203,6 @@ class TransferLearningDataPreparator:
 
         collected_data = dict()
 
-        # Initialize by sequence length
         for seq_len in pmsm_df["sequence_length"].unique():
             collected_data[seq_len] = dict()
 
@@ -254,7 +225,6 @@ class TransferLearningDataPreparator:
             batch_data = self._process_sequence_length_batch(
                 sub_df, seq_len, lcms_data, frame_num_to_rt_arr
             )
-            # Store results
             for key, value in batch_data.items():
                 collected_data[seq_len][key] = value
 
@@ -272,7 +242,6 @@ class TransferLearningDataPreparator:
         num_cleavages = seq_len - 1
         sub_df = sub_df.sort(["frame_num"]).with_row_index("peptide_index")
 
-        # Generate prefix mass array
         flatten_mass_array, stop_row_indices = (
             self.precursor_gen._generate_prefix_mass_array(
                 peptide_df=sub_df.select(pl.col("peptide_index", "peptide")),
@@ -285,7 +254,6 @@ class TransferLearningDataPreparator:
             prefix_mass_array=flatten_mass_array, mass_array_stop_index=stop_row_indices
         )
 
-        # Initialize output arrays
         x_aa = np.empty((n, seq_len + 2), dtype=np.int8)
         x_mod = np.full((n, MAX_MOD_COUNT, 2), -1, dtype=np.int16)
         x_meta = np.empty((n, 4), dtype=np.float32)
@@ -295,12 +263,11 @@ class TransferLearningDataPreparator:
         )
         x_rt = np.empty((n,), dtype=np.float32)
 
-        # Set metadata
+        # x_meta columns: precursor charge, nce, frag_method, mass_analyzer
         x_meta[:, 1] = self.nce
         x_meta[:, 2] = self.frag_method
         x_meta[:, 3] = self.mass_analyzer
 
-        # Process each PMSM
         prev_frame_num = -1
         prev_peak_arr = None
         rt_in_seconds = 0.0
@@ -311,12 +278,10 @@ class TransferLearningDataPreparator:
                 )
             ).iter_rows()
         ):
-            # Encode sequence
             _ = encode_sequence(peptide, out_arr=x_aa[i])
             _ = encode_modification(mod_sites, mod_ids, out_arr=x_mod[i])
             x_meta[i, 0] = precursor_charge
 
-            # Generate intensity array
             prefix_mass_arr = prefix_mass_container.get_prefix_mass_array(i)
             if prev_frame_num == frame_num:
                 peak_arr = prev_peak_arr
@@ -362,12 +327,10 @@ class TransferLearningDataPreparator:
             stats["samples_per_length"][seq_len] = n_samples
             stats["total_samples"] += n_samples
 
-            # Charge state distribution
             charges = data_dict["x_meta"][:, 0]
             for charge in charges:
                 stats["charge_distribution"][int(charge)] += 1
 
-            # NCE distribution
             nces = data_dict["x_meta"][:, 1]
             for nce in nces:
                 stats["nce_distribution"][float(nce)] += 1

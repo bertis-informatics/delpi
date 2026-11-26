@@ -24,8 +24,7 @@ def _prepare_evidence(
     columns = [group_column, "is_decoy", inference_column, "score"]
     evidence_df = pmsm_df.select(columns)
     if isinstance(evidence_df.schema[group_column], pl.List):
-        # A repeated protein ID in a peptide's membership must not duplicate
-        # its evidence. Shared peptides still contribute to each protein.
+        # dedupe IDs within a row; shared peptides still count for each protein
         evidence_df = evidence_df.with_columns(
             pl.col(group_column).list.unique()
         ).explode(group_column, empty_as_null=True)
@@ -81,10 +80,8 @@ def score_protein_groups(
 ) -> pl.DataFrame:
     """Attach global and per-run protein-group scores to grouped PmSMs.
 
-    Global scoring sees all run observations; each run is scored separately.
-    Scores are joined by group and target/decoy status (and run for
-    run-specific scores); ungrouped rows keep null scores. This stage performs
-    no inference or FDR estimation.
+    Global scores use all runs; per-run scores use each run alone. Joined by
+    group and is_decoy (and run); ungrouped rows get null.
     """
     validate_protein_scoring(method)
     if pmsm_df.is_empty():

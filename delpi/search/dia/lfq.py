@@ -1,6 +1,4 @@
-"""
-Label-Free Quantification (LFQ) Module for DelPi DIA Search
-"""
+"""Label-free quantification (LFQ) of DelPi search results."""
 
 import logging
 
@@ -15,16 +13,10 @@ logger = logging.getLogger(__name__)
 
 
 class LabelFreeQuantifier:
-    """
-    Handles label-free quantification across multiple DIA search results.
+    """Cross-run label-free quantification of DIA or DDA PmSMs.
 
-    This class coordinates quantification workflow including:
-    - Loading search results from multiple HDF5 files
-    - MS1/MS2 area calculations
-    - Cross-run quantification matrix generation
-
-    It only quantifies whatever PmSMs it is given; FDR/q-value filtering is
-    the caller's responsibility (see :meth:`perform_quantification`).
+    Quantifies whatever PmSMs it is given; FDR/q-value filtering is the
+    caller's job.
     """
 
     def __init__(
@@ -38,20 +30,13 @@ class LabelFreeQuantifier:
         self.acq_method = acq_method.upper()
 
     def perform_quantification(self, pmsm_df: pl.DataFrame) -> pl.DataFrame:
-        """
-        Perform complete label-free quantification workflow.
-
-        `pmsm_df` must already be restricted to the PmSMs to quantify (e.g.
-        target-only, FDR-filtered) -- this class only computes quantities and
-        applies no FDR/q-value filtering of its own (that is the caller's
-        responsibility, same as TDAProcessor vs. FDRAnalyzer).
+        """Quantify `pmsm_df`, already restricted to the PmSMs to quantify.
 
         Returns:
-            A minimal DataFrame keyed by ``(run_index, precursor_index)`` with
-            only the columns computed here: `ms1_quantity`/`ms2_quantity` (and,
-            for DIA, `ms2_quantity_normalized` plus normalization QC columns).
-            No input column is passed through, so the caller can join every
-            non-key column back onto its own (typically larger) pmsm_df.
+            A DataFrame keyed by ``(run_index, precursor_index)`` with only the
+            columns computed here: `ms1_quantity` and, for DIA, `ms2_quantity`,
+            `ms2_quantity_normalized` and the normalization QC columns. No input
+            column is passed through, so the caller can join them back.
         """
         logger.debug("Starting label-free quantification")
 
@@ -62,9 +47,7 @@ class LabelFreeQuantifier:
             quant_df = quant_df.drop("observed_rt")
         elif self.acq_method == "DDA":
             quant_df = self._quantify_dda(pmsm_df)
-            # TODO: RT-dependent normalization for DDA still needs validation
-            # before enabling (abundance estimation -> RT-dependent normalization,
-            # matching the DIA order above).
+            # TODO: validate RT-dependent normalization for DDA before enabling
             # quant_df = self._normalize_ms2_quantity(quant_df)
         else:
             raise NotImplementedError()
@@ -113,26 +96,14 @@ class LabelFreeQuantifier:
     ) -> pl.DataFrame:
         """Calculate MS1/MS2 peak areas and run cross-run LFQ.
 
-        `pmsm_df` is expected to already contain at most one PmSM per
-        ``(run_index, precursor_index)`` (guaranteed by the per-run PmSM
-        assignment upstream of FDR control) and to already be FDR-filtered
-        by the caller, so no per-precursor re-selection or confidence
-        filtering is needed here.
+        `pmsm_df` must hold at most one PmSM per ``(run_index, precursor_index)``
+        (per-run PmSM assignment guarantees this) and be FDR-filtered already.
+        The fragment-selection and interference parameters are passed through to
+        :func:`delpi.search.dia.lfq_utils.perform_lfq`.
 
-        `target_fragments`/`max_fragments`/`corr_thresh` control the
-        shape-correlation-based fragment selection (`target_fragments` is a
-        selection *goal*, not a quantity-reporting cutoff), and
-        `min_quant_fragments`/`min_interference_runs`/
-        `interference_min_log2_fold`/`interference_z_threshold` control the
-        cross-run intensity-outlier removal and the minimum surviving
-        fragment count required to report a quantity at all -- see
-        :func:`delpi.search.dia.lfq_utils.perform_lfq` for exactly how each
-        is used. All are exposed here (rather than hardcoded) since the
-        right values are dataset-dependent.
-
-        Returns a minimal DataFrame keyed by ``(run_index, precursor_index)``
-        with `observed_rt` (needed by `_normalize_ms2_quantity`), `ms1_quantity`
-        and `ms2_quantity`.
+        Returns a DataFrame keyed by ``(run_index, precursor_index)`` with
+        `observed_rt` (for `_normalize_ms2_quantity`), `ms1_quantity` and
+        `ms2_quantity`.
         """
         logger.debug("Calculating MS1 and MS2 areas")
 
@@ -183,21 +154,20 @@ class LabelFreeQuantifier:
     ) -> pl.DataFrame:
         """RT-dependent cross-run normalization of ``ms2_quantity``.
 
-        Approach (inspired by DIA-NN/DIA-BERT/PIN/NormalyzerDE-style RT-local
-        normalization): pick a set of cross-run "normalization anchors" -
-        precursors whose relative abundance is most consistent across runs
-        after removing a preliminary global shift - then, for every run,
-        estimate a global log2 shift plus a smooth RT-local log2 correction
-        from those anchors and apply both to every precursor.
+        In the style of DIA-NN/DIA-BERT/PIN/NormalyzerDE RT-local normalization:
+        anchors are the precursors whose abundance is most consistent across
+        runs after a preliminary global shift; per run, a global log2 shift plus
+        a smooth RT-local log2 correction is estimated from the anchors and
+        applied to every precursor.
 
         Adds ``ms2_quantity_normalized`` (same null pattern as ``ms2_quantity``)
-        plus the QC columns ``normalization_factor``, ``global_log2_shift`` and
-        ``local_log2_shift``. Does not modify ``ms2_quantity`` or any other
-        existing column/row.
+        and, unless an early fallback returns, the QC columns
+        ``normalization_factor``, ``global_log2_shift`` and ``local_log2_shift``.
+        Existing columns and rows are unchanged.
         """
         n_runs = quant_df["run_index"].n_unique()
 
-        # Fallback 1: nothing to normalize against with a single run.
+        # single run: nothing to normalize against
         if n_runs < 2:
             return quant_df.with_columns(
                 pl.col("ms2_quantity").alias("ms2_quantity_normalized")
@@ -208,14 +178,13 @@ class LabelFreeQuantifier:
         ).with_columns(pl.col("ms2_quantity").log(2).alias("log_area"))
 
         if valid_df.height == 0:
-            # Fallback 3: no usable quantities to estimate anything from.
+            # no usable quantities
             return quant_df.with_columns(
                 pl.col("ms2_quantity").alias("ms2_quantity_normalized")
             )
 
-        # --- precursor median-reference across runs -------------------------
-        # reference_log_area = per-precursor cross-run median log2(ms2_quantity),
-        # only for precursors observed in >= min_run_fraction of all runs.
+        # reference_log_area: per-precursor cross-run median log2(ms2_quantity),
+        # for precursors observed in >= min_run_fraction of the runs
         min_runs_required = max(2, int(np.ceil(n_runs * min_run_fraction)))
         prec_ref_df = (
             valid_df.group_by("precursor_index")
@@ -227,7 +196,7 @@ class LabelFreeQuantifier:
         )
 
         if prec_ref_df.height == 0:
-            # Fallback 3: cannot estimate even a reference abundance.
+            # no reference abundance
             return quant_df.with_columns(
                 pl.col("ms2_quantity").alias("ms2_quantity_normalized")
             )
@@ -240,9 +209,8 @@ class LabelFreeQuantifier:
             (pl.col("log_area") - pl.col("reference_log_area")).alias("deviation")
         )
 
-        # preliminary global shift per run, used only to locate stable anchors
-        # (not the final normalization - avoids biasing anchor selection by
-        # runs that happen to be globally shifted).
+        # preliminary per-run global shift, only so that globally shifted runs
+        # do not bias anchor selection
         prelim_df = dev_df.group_by("run_index").agg(
             pl.col("deviation").median().alias("preliminary_global_shift")
         )
@@ -250,9 +218,8 @@ class LabelFreeQuantifier:
             (pl.col("deviation") - pl.col("preliminary_global_shift")).alias("residual")
         )
 
-        # --- stable-anchor selection -----------------------------------------
-        # anchors = precursors with the lowest cross-run MAD of `residual`,
-        # among precursors that are not in the weakest min_intensity_quantile.
+        # anchors: lowest cross-run MAD of `residual`, excluding the weakest
+        # min_intensity_quantile of precursors
         residual_center_df = dev_df.group_by("precursor_index").agg(
             pl.col("residual").median().alias("residual_center")
         )
@@ -274,7 +241,7 @@ class LabelFreeQuantifier:
         )
 
         if eligible_df.height == 0:
-            # Fallback 3: nothing survives the weak-precursor filter.
+            # nothing survives the weak-precursor filter
             return quant_df.with_columns(
                 pl.col("ms2_quantity").alias("ms2_quantity_normalized")
             )
@@ -287,7 +254,7 @@ class LabelFreeQuantifier:
             anchor_precursors, on="precursor_index", how="inner"
         )
 
-        # --- run-global median-ratio normalization (anchors only) -----------
+        # run-global median-ratio normalization over anchors
         global_shift_df = anchor_dev_df.group_by("run_index").agg(
             pl.col("deviation").median().alias("global_log2_shift")
         )
@@ -299,8 +266,7 @@ class LabelFreeQuantifier:
             prec_stats_df.height,
         )
 
-        # Fallback 2: too few anchors to ever support an RT curve in any run
-        # -> global median-ratio normalization only (local_log2_shift = 0).
+        # too few anchors for an RT curve in any run: global shift only
         if anchor_precursors.height < min_periods:
             result_df = quant_df.join(
                 global_shift_df, on="run_index", how="left"
@@ -309,7 +275,7 @@ class LabelFreeQuantifier:
                 pl.lit(0.0).alias("local_log2_shift"),
             )
         else:
-            # --- RT-local bias: centered rolling median of anchor residuals --
+            # RT-local bias: centered rolling median of anchor residuals
             anchor_dev_df = anchor_dev_df.join(
                 global_shift_df, on="run_index", how="left"
             ).with_columns(
@@ -327,7 +293,7 @@ class LabelFreeQuantifier:
                 run_rt_arr = run_quant_df[rt_column].to_numpy()
 
                 if run_anchor_df.height < min_periods:
-                    # too few anchors observed in this particular run
+                    # too few anchors in this run
                     local_shift_arr = np.zeros(run_quant_df.height, dtype=np.float64)
                 else:
                     win = min(window_size, run_anchor_df.height)

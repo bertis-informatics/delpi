@@ -15,14 +15,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Minimal LR schedulers: cosine with warmup & cosine with hard restarts (warmup).
+"""Cosine LR schedules with linear warmup, optionally with hard restarts.
 
-DelPi-local implementation (no HF dependency), extended to support:
-- min_lr (absolute) and/or min_lr_rate (ratio)
-- param-group-safe behavior (works even if groups have different base lr)
-
-DelPi advances these schedulers once per epoch, so step counts represent epochs.
-Warmup starts at base_lr / num_warmup_steps and reaches base_lr in its last epoch.
+Local version of the Hugging Face schedulers that adds min_lr (absolute, per
+param group) or min_lr_rate (ratio). DelPi steps them once per epoch, so step
+counts are epochs. Warmup starts at base_lr / num_warmup_steps and reaches
+base_lr in its last epoch.
 """
 
 from __future__ import annotations
@@ -42,7 +40,7 @@ __all__ = [
 MinLRType = Union[float, Sequence[float], None]
 
 
-# ---- Internal helpers --------------------------------------------------------
+# internal helpers
 
 
 def _as_min_lr_rates(
@@ -51,16 +49,11 @@ def _as_min_lr_rates(
     min_lr: MinLRType = None,
     min_lr_rate: Optional[float] = None,
 ) -> List[float]:
-    """Return per-param-group min_lr_rate in [0, 1].
+    """Per-param-group min_lr_rate in [0, 1].
 
-    Rules:
-      - If both provided -> error.
-      - If min_lr_rate provided -> same ratio applied to all groups.
-      - Else if min_lr provided:
-          * float -> same absolute min_lr for all groups
-          * sequence -> per-group absolute min_lr
-        converted to ratio per group: min_lr_i / base_lr_i.
-      - Else -> default 0.0 (classic cosine to zero).
+    min_lr_rate applies to every group; min_lr (a float, or one value per
+    group) becomes min_lr / base_lr per group. Both set raises ValueError;
+    neither gives 0 (cosine to zero).
     """
     if min_lr is not None and min_lr_rate is not None:
         raise ValueError("Only one of min_lr or min_lr_rate should be set.")
@@ -99,7 +92,7 @@ def _as_min_lr_rates(
     return rates
 
 
-# ---- Internal lambda helpers -------------------------------------------------
+# LR lambdas
 
 
 def _cosine_warmup_lambda(
@@ -110,7 +103,7 @@ def _cosine_warmup_lambda(
     num_cycles: float,
     min_lr_rate: float,
 ) -> float:
-    """Cosine annealing with linear warmup (no restarts), scaled to [min_lr_rate, 1]."""
+    """Linear warmup, then cosine annealing scaled to [min_lr_rate, 1]."""
     if current_step < num_warmup_steps:
         # LambdaLR initializes at step 0, which supplies the first epoch's LR.
         return float(current_step + 1) / float(max(1, num_warmup_steps))
@@ -135,7 +128,7 @@ def _cosine_hard_restarts_warmup_lambda(
     num_cycles: int,
     min_lr_rate: float,
 ) -> float:
-    """Cosine annealing with linear warmup + hard restarts, scaled to [min_lr_rate, 1]."""
+    """Linear warmup, then cosine with hard restarts scaled to [min_lr_rate, 1]."""
     if current_step < num_warmup_steps:
         return float(current_step + 1) / float(max(1, num_warmup_steps))
 
@@ -152,7 +145,7 @@ def _cosine_hard_restarts_warmup_lambda(
     return max(0.0, float(factor))
 
 
-# ---- Public factory functions ------------------------------------------------
+# public factories
 
 
 def get_cosine_schedule_with_warmup(
@@ -165,20 +158,16 @@ def get_cosine_schedule_with_warmup(
     min_lr: MinLRType = None,
     min_lr_rate: float | None = None,
 ) -> LambdaLR:
-    """Cosine annealing from initial LR → min_lr (default 0) with linear warmup.
+    """Linear warmup, then cosine annealing from the initial LR to min_lr
+    (default 0).
 
     Args:
-        optimizer: torch optimizer to schedule.
-        num_warmup_steps: warmup epochs (linear initial LR / warmup epochs → initial LR).
-            If zero, training starts at the initial LR without warmup.
+        num_warmup_steps: warmup epochs; 0 starts at the initial LR.
         num_training_steps: total training epochs.
-        num_cycles: number of cosine cycles (default 0.5 = single half-cycle).
-        last_epoch: PyTorch scheduler arg for resuming.
-        min_lr: absolute minimum LR (float) or per-param-group list; default None (=0).
-        min_lr_rate: ratio min LR to initial LR. If set, min_lr must be None.
-
-    Returns:
-        torch.optim.lr_scheduler.LambdaLR
+        num_cycles: cosine cycles (0.5 = one half-cycle).
+        last_epoch: for resuming.
+        min_lr: absolute minimum LR, a float or one value per param group.
+        min_lr_rate: minimum LR as a ratio of the initial LR; excludes min_lr.
     """
     min_lr_rates = _as_min_lr_rates(optimizer, min_lr=min_lr, min_lr_rate=min_lr_rate)
 
@@ -205,20 +194,16 @@ def get_cosine_with_hard_restarts_schedule_with_warmup(
     min_lr: MinLRType = None,
     min_lr_rate: float | None = None,
 ) -> LambdaLR:
-    """Cosine annealing with linear warmup and hard restarts, from initial LR → min_lr (default 0).
+    """Linear warmup, then cosine annealing with hard restarts from the initial
+    LR to min_lr (default 0).
 
     Args:
-        optimizer: torch optimizer to schedule.
-        num_warmup_steps: warmup epochs (linear initial LR / warmup epochs → initial LR).
-            If zero, training starts at the initial LR without warmup.
+        num_warmup_steps: warmup epochs; 0 starts at the initial LR.
         num_training_steps: total training epochs.
-        num_cycles: number of hard restarts (integer, >=1).
-        last_epoch: PyTorch scheduler arg for resuming.
-        min_lr: absolute minimum LR (float) or per-param-group list; default None (=0).
-        min_lr_rate: ratio min LR to initial LR. If set, min_lr must be None.
-
-    Returns:
-        torch.optim.lr_scheduler.LambdaLR
+        num_cycles: number of hard restarts (>= 1).
+        last_epoch: for resuming.
+        min_lr: absolute minimum LR, a float or one value per param group.
+        min_lr_rate: minimum LR as a ratio of the initial LR; excludes min_lr.
     """
     if num_cycles < 1:
         raise ValueError("num_cycles must be >= 1 for hard restarts schedule.")

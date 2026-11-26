@@ -21,7 +21,7 @@ class PeptideMultiSpectraMatchScaler(torch.nn.Module):
 
     def forward(self, x_theo, x_exp):
 
-        ## theoretical peaks
+        # theoretical peaks
         x_theo[..., TheoPeakInput.MZ.index] /= self.mz_denom
         x_theo[..., TheoPeakInput.CHARGE.index] /= self.charge_denom
         x_theo[..., TheoPeakInput.ISOTOPE_INDEX.index] /= self.isotope_denom

@@ -16,7 +16,6 @@ from delpi.search.tl.dataset import TransferLearningDataset, LABEL_DTYPE
 from delpi.search.result_aggregator import ResultsAggregator
 from delpi import MODEL_DIR
 
-# Default training parameters
 DEFAULT_TRAINING_PARAMS = {
     "max_epochs": 20,
     "num_warmup_steps": 10,
@@ -100,10 +99,8 @@ class TransferLearningTrainer:
             num_workers=0 if in_memory else self.training_params["num_workers"],
             fractions=fraction,
         )
-        # Setup callbacks
         callbacks = self._setup_callbacks()
 
-        # Setup trainer
         trainer = Trainer(
             max_epochs=max_epochs,
             accelerator=device.type,
@@ -114,7 +111,6 @@ class TransferLearningTrainer:
             enable_model_summary=False,
         )
 
-        # Train model
         trainer.fit(model=model)
         trained_model = (
             Ms2SpectrumPredictor.load_from_checkpoint(callbacks[1].best_model_path)

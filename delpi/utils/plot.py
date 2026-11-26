@@ -45,7 +45,7 @@ def plot_rt_mapping(
 ):
     # img_file_path = search_config.output_dir / f"{run.name}.RT_mapping.jpg"
 
-    """Plot and save the RT mapping."""
+    """Plot the RT mapping and return the figure."""
     x_rt = np.arange(0, 1.01, 0.01)
     pred_rt_df = rt_calibrator.predict(x_rt)
 

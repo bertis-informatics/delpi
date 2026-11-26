@@ -19,9 +19,9 @@ def param_groups_lrd(
     Parameter groups for layer-wise lr decay.
 
     Args:
-        max_lr: peak learning rate. When provided, each group's ``lr`` is set to
-            ``lr_scale * max_lr`` so that LambdaLR schedulers (which multiply
-            the stored ``lr`` by a lambda) automatically respect layer-wise decay.
+        max_lr: Peak learning rate. If given, each group's ``lr`` is
+            ``lr_scale * max_lr``, so LambdaLR schedulers (which scale the stored
+            ``lr``) keep the layer-wise decay.
     """
     param_group_names = {}
     param_groups = {}
@@ -84,9 +84,7 @@ def param_groups_lrd_for_rt_predictor(
     Parameter groups for layer-wise lr decay (RT predictor, cnn_rnn encoder).
 
     Args:
-        max_lr: peak learning rate. When provided, each group's ``lr`` is set to
-            ``lr_scale * max_lr`` so that LambdaLR schedulers automatically
-            respect layer-wise decay.
+        max_lr: Peak learning rate; see :func:`param_groups_lrd`.
     """
     assert (
         model.encoder_type == "cnn_rnn"

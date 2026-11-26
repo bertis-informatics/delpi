@@ -22,15 +22,15 @@ TERM_CHARS = [PROT_N_TERM_AA, PROT_C_TERM_AA, PEPT_N_TERM_AA, PEPT_C_TERM_AA]
 
 # Peptide strings carry one terminal marker on each side (peptide[0], peptide[-1]).
 def il_normalized_sequence(peptide: str) -> str:
-    """A peptide string's residues without the terminal markers, with I
-    written as L. Peptides with the same I/L-normalized sequence have
-    identical precursor and fragment masses."""
+    """Residues without the terminal markers, I written as L.
+
+    Peptides with the same key have identical precursor and fragment masses.
+    """
     return peptide[1:-1].replace("I", "L")
 
 
 def il_normalized_sequence_expr(column: str = "peptide") -> pl.Expr:
-    """Polars equivalent of :func:`il_normalized_sequence` for a column of
-    peptide strings."""
+    """Polars version of :func:`il_normalized_sequence` for a peptide column."""
     peptide = pl.col(column)
     return peptide.str.slice(1, peptide.str.len_chars() - 2).str.replace_all(
         "I", "L", literal=True
@@ -47,16 +47,10 @@ mod_name_array = np.asarray(mod_name_array, dtype=np.str_)
 def get_modified_sequence(
     seq: str, mod_ids: str, mod_sites: str, use_unimod_id: bool = True
 ) -> str:
-    """Create a peptide sequence string with modifications
+    """Insert modification tags into a peptide string with terminal markers.
 
-    Args:
-        seq (str): a plain peptide sequence with terminal residues
-        mod_ids (str): modification param indexes separated by `;`
-        mod_sites (str): modification sites separated by `;`
-        use_unimod_id (bool, optional): a flag to apply UniMod ID. Defaults to True.
-
-    Returns:
-        str: modified sequence string
+    mod_ids (encoded ModificationParam ids) and mod_sites are ';'-separated.
+    Tags are (UniMod:N) if use_unimod_id, else (name).
     """
     if mod_ids is None or len(mod_ids) < 1:
         return seq

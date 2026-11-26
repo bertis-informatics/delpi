@@ -83,14 +83,11 @@ class MassSpecData:
         peak_start: np.ndarray,
         peak_stop: np.ndarray,
     ):
-        """Like :meth:`create`, but accepts an already-built flat, contiguous
-        ``PeakArray`` plus the per-spectrum ``[peak_start, peak_stop)`` ranges
-        directly, instead of a list of per-spectrum ``PeakArray`` objects.
+        """Like :meth:`create`, but from one flat float32 ``PeakArray`` and the
+        per-spectrum ``[peak_start, peak_stop)`` ranges.
 
-        This avoids allocating one small array per spectrum and the large
-        ``np.concatenate`` call that :meth:`create` performs; callers that can
-        build the flat ``mz``/``ab`` buffers themselves (e.g. by writing
-        directly into a preallocated buffer) should prefer this method.
+        Avoids one small array per spectrum and the large ``np.concatenate``
+        of :meth:`create`; prefer it when the caller can fill flat buffers.
         """
         n = meta_df.shape[0]
         peak_start = np.asarray(peak_start, dtype=np.uint32)

@@ -12,8 +12,8 @@ BOLTZMANN = 1.380657e-23
 RESCALING_CONSTANT = 0.9995
 RESCALING_CONSTANT_HIGH_PRECISION = 274.335215
 
-# DDA precursor filtering around the isolation window
-# Allow M+2 isotopes below the window and small transmission margins.
+# DDA precursor filter around the isolation window; the tolerances admit M+2
+# isotopes below the window and small transmission margins.
 # I_min - ISOLATION_LOWER_TOL/charge < precursor_mz < I_max + ISOLATION_UPPER_TOL/charge
 # DIA uses the isolation window without tolerance.
 ISOLATION_LOWER_TOL = 3.5
@@ -30,12 +30,11 @@ MAX_FRAGMENTS = 16
 
 # Isotopes of theoretical peaks (precursor: averagine rows, fragment:
 # TheoreticalPeakContainer.fragment_mz_arr rows); a library reader keeps the
-# first max_{precursor,fragment}_isotopes entries. Non-negative isotopes come
-# first so the leading rows keep their previous layout (fragment row 0 is M;
-# quick search and RT bootstrap read only the first row). M-1 is last: its
-# peaks are model input tokens only, not counted for candidate filtering,
-# clustering or quantification. Precursor M..M+2 rows are ordered by
-# predicted averagine intensity; fragment rows follow the tuple order.
+# first max_{precursor,fragment}_isotopes entries. Fragment row 0 is M (quick
+# search and RT bootstrap read only the first row). M-1 is last: its peaks are
+# model input tokens only, not used for candidate filtering, clustering or
+# quantification. Precursor M..M+2 rows are ordered by predicted averagine
+# intensity; fragment rows follow the tuple order.
 PRECURSOR_ISOTOPE_INDICES = (0, 1, 2, -1)
 FRAGMENT_ISOTOPE_INDICES = (0, 1, -1)
 DEFAULT_PRECURSOR_ISOTOPES = len(PRECURSOR_ISOTOPE_INDICES)
@@ -65,7 +64,6 @@ TDA_MAX_FEATURE_MEMORY = 16 * 1024**3
 
 DEFAULT_REPORT_FORMAT = "parquet"  # tsv or parquet
 
-# Default number of top-scoring observations per precursor (across runs) used
-# to fine-tune the RT/MS2 predictors during the transfer-learning two-pass
-# search.
+# Top-scoring observations per precursor (across runs) used to fine-tune the
+# RT/MS2 predictors in the two-pass transfer-learning search
 DEFAULT_TL_TOP_K = 3

@@ -9,7 +9,7 @@ def _safe_mean(t: Tensor) -> Tensor:
 
 
 # PU risk
-#   https://arxiv.org/abs/1703.00593?utm_source=chatgpt.com
+#   https://arxiv.org/abs/1703.00593
 # PNU risk
 #   https://arxiv.org/pdf/1803.04663
 #   https://proceedings.mlr.press/v97/hsieh19c/hsieh19c.pdf
@@ -22,15 +22,16 @@ class PNURiskLoss(nn.Module):
         pi_p: float,
         eta: float = -0.3,
     ):
-        """_summary_
+        """PN risk mixed with PU (eta > 0) or NU (eta < 0) risk.
+
         Args:
-            pi_p (float): 전체 모집단에서 positive 비율( class prior, θ ).
-            eta (float, optional): _description_. Defaults to -0.3.
+            pi_p (float): 전체 모집단에서 positive 비율 (class prior θ).
+            eta (float, optional): mixing weight in [-1, 1]. Defaults to -0.3.
                 • 0   : PN risk
-                • 0-1 : PN과 PU convex combination (unlabeled가 negative 에 가깝다고 볼 때 )
-                • -1-0 → PN과 NU convex combination(unlabeled가 **positive 에 가깝다**고 볼 때 )
+                • 0-1 : PN과 PU convex combination (unlabeled가 negative에 가까울 때)
+                • -1-0: PN과 NU convex combination (unlabeled가 positive에 가까울 때)
         Raises:
-            ValueError: _description_
+            ValueError: eta가 [-1, 1] 밖일 때
         """
         super().__init__()
         if not -1.0 <= eta <= 1.0:
@@ -39,22 +40,22 @@ class PNURiskLoss(nn.Module):
         self.eta = float(eta)
 
     def forward(self, z, p_mask, n_mask, u_mask):
-        # ------ PN risk --------------------------------------------------
+        # PN risk
         rp = _safe_mean(F.softplus(-z[p_mask]))  # label 1
         rn = _safe_mean(F.softplus(z[n_mask]))  # label 0
         r_pn = self.pi_p * rp + (1 - self.pi_p) * rn
 
-        # ------ PU risk --------------------------------------------------
+        # PU risk
         r_bar_p = -_safe_mean(z[p_mask])  # E_P[ℓ₊ − ℓ₋] = −E_P[z]
         r_u_neg = _safe_mean(F.softplus(z[u_mask]))  # label 0
         r_pu = self.pi_p * r_bar_p + r_u_neg
 
-        # ------ NU risk --------------------------------------------------
-        r_bar_n = _safe_mean(z[n_mask])  #  E_N[ℓ₋ − ℓ₊] =  E_N[z]
+        # NU risk
+        r_bar_n = _safe_mean(z[n_mask])  # E_N[ℓ₋ − ℓ₊] = E_N[z]
         r_u_pos = _safe_mean(F.softplus(-z[u_mask]))  # label 1
         r_nu = (1 - self.pi_p) * r_bar_n + r_u_pos
 
-        # ------ η‑mix ----------------------------------------------------
+        # η-mix
         risk = (
             ((1 - self.eta) * r_pn + self.eta * r_pu)
             if self.eta >= 0
@@ -76,12 +77,12 @@ class PNURiskLoss(nn.Module):
         ones = torch.ones_like(logits)
         zeros = torch.zeros_like(logits)
 
-        # ---------- PN risk ---------------------------------------------- #
+        # PN risk
         rp = _safe_mean(base_loss(logits[p_mask], ones[p_mask]))
         rn = _safe_mean(base_loss(logits[n_mask], zeros[n_mask]))
         r_pn = self.pi_p * rp + (1.0 - self.pi_p) * rn
 
-        # ---------- PU risk  (unlabeled 를 negative 로 본다) -------------- #
+        # PU risk (unlabeled를 negative로 본다)
         # composite loss  l̄ = l(+1) − l(−1)
         l_pos_p = base_loss(logits[p_mask], ones[p_mask])
         l_neg_p = base_loss(logits[p_mask], zeros[p_mask])
@@ -90,17 +91,17 @@ class PNURiskLoss(nn.Module):
         r_u_neg = _safe_mean(base_loss(logits[u_mask], zeros[u_mask]))
         r_pu = self.pi_p * r_bar_p + r_u_neg
 
-        # ---------- NU risk  (unlabeled 를 positive 로 본다) -------------- #
+        # NU risk (unlabeled를 positive로 본다)
         l_pos_u = _safe_mean(base_loss(logits[u_mask], ones[u_mask]))
         l_neg_n = base_loss(logits[n_mask], zeros[n_mask])
         l_pos_n = base_loss(logits[n_mask], ones[n_mask])
         r_bar_n = _safe_mean(l_neg_n - l_pos_n)  # E_N[ l̄(−·) ]
         r_nu = (1.0 - self.pi_p) * r_bar_n + l_pos_u
 
-        # ---------- 최종 PNU risk ---------------------------------------- #
-        if self.eta >= 0:  # unlabeled 가 negative 성향
+        # 최종 PNU risk
+        if self.eta >= 0:  # unlabeled가 negative 성향
             risk = (1.0 - self.eta) * r_pn + self.eta * r_pu
-        else:  # unlabeled 가 **positive 성향**
+        else:  # unlabeled가 positive 성향
             risk = (1.0 + self.eta) * r_pn - self.eta * r_nu
 
         # Non-negative clip, Kiryo et al.(2017)
@@ -110,7 +111,7 @@ class PNURiskLoss(nn.Module):
 
 
 class NURiskLoss(nn.Module):
-    """Non‑negative NU risk with (optional) Asymmetric Focal Loss."""
+    """Non-negative NU risk over a configurable elementwise base_loss."""
 
     def __init__(
         self,
@@ -150,13 +151,13 @@ class NURiskLoss(nn.Module):
         y_pos = torch.ones_like(logits)
         y_neg = torch.zeros_like(logits)
 
-        # term 1: (1‑pi_p) * E_N[ℓ(g,0)]
+        # term 1: (1-pi_p) * E_N[ℓ(g,0)]
         Rn = _safe_mean(self.base_loss(logits[mask_neg], y_neg[mask_neg]))
 
         # helper for E_N[ℓ(g,1)]  (negatives fed as if y=1)
         Rn_pos = _safe_mean(self.base_loss(logits[mask_neg], y_pos[mask_neg]))
 
-        # term 2: E_U[ℓ(g,1)] - (1‑pi_p) * E_N[ℓ(g,1)]
+        # term 2: E_U[ℓ(g,1)] - (1-pi_p) * E_N[ℓ(g,1)]
         Ru = _safe_mean(self.base_loss(logits[mask_u], y_pos[mask_u]))
         unbiased = Ru - (1 - self.pi_p) * Rn_pos
 

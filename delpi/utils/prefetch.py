@@ -1,10 +1,7 @@
-"""
-Threading-based batch prefetcher for overlapping CPU batch preparation
-with GPU inference.
+"""Thread-based prefetcher overlapping CPU batch preparation with GPU inference.
 
-Numba's ``prange`` releases the GIL, so the CPU-bound
-``_make_batch_in_parallel`` truly runs in parallel with the main thread's
-GPU work when driven from a background ``threading.Thread``.
+Numba ``prange`` releases the GIL, so ``_make_batch_in_parallel`` on a
+background thread runs in parallel with the main thread's GPU work.
 """
 
 import threading
@@ -19,17 +16,12 @@ U = TypeVar("U")
 
 
 class Prefetcher(Iterable[U]):
-    """Thread-based prefetcher that eagerly evaluates items from an iterable
-    on a background thread, optionally applying a *transform* before buffering.
+    """Evaluate ``iterable`` on a background thread, buffering up to
+    ``prefetch_count`` items, each passed through ``transform`` if given.
 
     Args:
-        iterable: Source iterable whose ``__next__`` may do expensive CPU work.
-        transform: Optional function applied to each item before buffering.
-            When *None*, items are yielded as-is.
-        prefetch_count: How many transformed items to buffer ahead.
-        thread_initializer: Optional callable invoked once in the producer
-            thread before iteration begins.  Useful for setting thread-local
-            state such as ``numba.set_num_threads()``.
+        thread_initializer: called once in the producer thread before
+            iterating, e.g. to set ``numba.set_num_threads()``.
     """
 
     def __init__(
@@ -77,9 +69,7 @@ class Prefetcher(Iterable[U]):
             raise error_box[0]
 
 
-# ---------------------------------------------------------------------------
-# Built-in transforms for common use cases
-# ---------------------------------------------------------------------------
+# built-in transforms
 
 
 def pin_numpy_tuple(batch):

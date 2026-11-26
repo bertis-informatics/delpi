@@ -1,12 +1,4 @@
-"""
-CLI progress tracker using tqdm with a two-bar display.
-
-* Bar 0 (position 0): overall progress of the root tracker
-* Bar 1 (position 1): currently active subtask
-
-Inherits all hierarchical logic and time-tracking from
-``CallbackProgressTracker``; this file only adds the tqdm display layer.
-"""
+"""CLI progress tracker: a tqdm display on top of ``CallbackProgressTracker``."""
 
 from __future__ import annotations
 
@@ -16,11 +8,6 @@ from tqdm import tqdm as _tqdm
 
 from delpi.search.progress.callback_tracker import CallbackProgressTracker
 from delpi.search.progress.snapshot import ProgressSnapshot
-
-
-# ---------------------------------------------------------------------------
-# Internal display manager
-# ---------------------------------------------------------------------------
 
 
 class _TqdmDisplay:
@@ -34,10 +21,10 @@ class _TqdmDisplay:
             leave=True,
         )
         self.subtask_bar: Optional[_tqdm] = None
-        self._overall_n: float = 0.0  # float accumulator for precise tracking
+        self._overall_n: float = 0.0  # fractional progress; the bar holds ints
         self.active_child: Optional[TqdmProgressTracker] = None
 
-    # -- overall bar --------------------------------------------------------
+    # overall bar
 
     def update_overall(self, increment: float) -> None:
         """Advance the overall bar by a (possibly fractional) amount."""
@@ -57,7 +44,7 @@ class _TqdmDisplay:
         if remaining > 0:
             self.overall_bar.update(remaining)
 
-    # -- subtask bar --------------------------------------------------------
+    # subtask bar
 
     def set_subtask(self, total: int, description: str) -> None:
         """Create (or replace) the subtask bar."""
@@ -80,43 +67,21 @@ class _TqdmDisplay:
             self.subtask_bar = None
         self.active_child = None
 
-    # -- lifecycle ----------------------------------------------------------
+    # lifecycle
 
     def close(self) -> None:
         self.close_subtask()
         self.overall_bar.close()
 
 
-# ---------------------------------------------------------------------------
-# Public tracker
-# ---------------------------------------------------------------------------
-
-
 class TqdmProgressTracker(CallbackProgressTracker):
     """CLI progress tracker backed by two tqdm bars.
 
-    Inherits hierarchical progress propagation, time-tracking, and callback
-    support from :class:`CallbackProgressTracker`.  This subclass adds:
-
-    * **Bar 0** (``position=0``): overall progress of the *root* tracker.
-    * **Bar 1** (``position=1``): the most-recently created child tracker
-      (the *active subtask*).  Each call to ``create_child`` replaces
-      this bar.
-
-    Parameters
-    ----------
-    total : int
-        Number of steps for this tracker.
-    description : str
-        Label shown on the progress bar.
-    callback : callable, optional
-        Forwarded to ``CallbackProgressTracker``.
-
-    Notes
-    -----
-    The private keyword arguments ``_parent``, ``_display``, ``_portion``,
-    ``_root`` are used internally when spawning child trackers.  Callers
-    should not pass them.
+    Bar 0 (``position=0``) shows the root's overall progress; bar 1
+    (``position=1``) shows the most recently created child and is replaced on
+    each ``create_child``. ``callback`` is passed to
+    :class:`CallbackProgressTracker`. The private keyword arguments are only
+    for spawning children.
     """
 
     def __init__(
@@ -144,13 +109,12 @@ class TqdmProgressTracker(CallbackProgressTracker):
         else:
             self._display = _display
 
-    # -- hook overrides (display layer) -------------------------------------
+    # hook overrides (display layer)
 
     def _on_update(self) -> None:
         """Update tqdm bars, then fire the callback via super."""
         if self._display is not None:
-            # Sync overall bar to the root's accumulated value.
-            # All nodes share the same _display, so any node can trigger this.
+            # sync the overall bar to the root; all nodes share _display
             root = self._root
             delta = root._overall_current - self._display._overall_n
             if delta > 0:
@@ -174,13 +138,11 @@ class TqdmProgressTracker(CallbackProgressTracker):
             if self._display is not None and self._display.active_child is self:
                 self._display.close_subtask()
 
-    # -- override advance to also tick the subtask bar ----------------------
-
     def advance(self, n: int = 1) -> None:
         if self._completed:
             return
 
-        # Tick the subtask bar *before* the parent logic runs
+        # tick the subtask bar before the parent logic runs
         if (
             not self.is_root
             and self._display is not None
@@ -189,8 +151,6 @@ class TqdmProgressTracker(CallbackProgressTracker):
             self._display.update_subtask(n)
 
         super().advance(n)
-
-    # -- override create_child to produce TqdmProgressTracker instances -----
 
     def create_child(
         self, description: str, total: int, portion: float
@@ -203,19 +163,15 @@ class TqdmProgressTracker(CallbackProgressTracker):
             _display=self._display,
             _portion=portion,
         )
-        # _on_child_created hook is called by super().create_child, but
-        # we build the child ourselves so call hooks manually
+        # super().create_child is not called, so do its steps here
         self._on_child_created(child)
 
-        # Update root metadata
         root = self._root
         root._active_description = description
         root._active_current = 0
         root._active_total = total
         self._on_update()
         return child
-
-    # -- override close to release tqdm resources ---------------------------
 
     def close(self) -> None:
         """Release tqdm resources (only the root tracker should call this)."""

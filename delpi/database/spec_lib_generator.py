@@ -194,17 +194,11 @@ class SpectralLibGenerator:
         detectable_max_mz: float = None,
         progress: ProgressTracker = None,
     ) -> tuple[Path, pl.DataFrame]:
-        """Write MS2 Parquet and return (path, precursor_df with row indexing).
+        """Write save_dir/speclib_df.parquet; return (path, indexed precursor_df).
 
-        The caller saves the returned precursor_df with the other database
-        tables, e.g. via PeptideDatabase.save().
-
-        Unlike predict_ms2_spectra(), this never allocates output arrays for
-        the full library: only one chunk's worth of output rows
-        (chunk_size * max_fragments) is held in memory at a time. The input
-        pipeline (Dataset/Sampler/DataLoader/Prefetcher/GPU buffers) is
-        still built only once for the whole prediction; chunk boundaries
-        are detected from the batch stream itself.
+        The caller saves precursor_df with the other tables (PeptideDatabase.save).
+        Only one chunk of output rows (chunk_size * max_fragments) is held in
+        memory; the input pipeline is still built once for the whole run.
         """
 
         if batch_size <= 0:
@@ -216,18 +210,11 @@ class SpectralLibGenerator:
         output_path = Path(save_dir) / "speclib_df.parquet"
         n_precursors = precursor_df.shape[0]
 
-        # Built once from the schema so column order/dtype match speclib_df_schema.
         arrow_schema = pl.DataFrame(schema=self.speclib_df_schema).to_arrow().schema
 
-        # Owned (created + completed/closed here) only when the caller didn't
-        # supply a tracker; a single bar spans the whole task, not per-chunk.
-        # An externally-supplied tracker's own total is set arbitrarily by
-        # its creator, so a fresh child sized to the real precursor count is
-        # created here to drive the subtask bar (position 1); the caller's
-        # tracker only receives proportional progress via that child's
-        # advance()/complete() calls. Progress unit is precursors processed,
-        # not batches, since batch count would require a Dataset/Sampler
-        # pre-pass this refactor is specifically meant to avoid.
+        # One bar for the whole task. A caller's tracker has an arbitrary total,
+        # so a child sized to the precursor count is driven instead. Progress
+        # counts precursors because a batch count would need a sampler pre-pass.
         own_progress = progress is None
         if own_progress:
             progress = TqdmProgressTracker(
@@ -298,20 +285,16 @@ class SpectralLibGenerator:
         max_fragments = self.max_fragments
         n_precursors = precursor_df.shape[0]
 
-        # precursor_index must be contiguous/global (row position == ID):
-        # relied on below both for chunk-boundary detection from a batch's
-        # precursor_index values, and by update_speclib_chunk_arr's local-
-        # index math.
+        # chunk boundaries and update_speclib_chunk_arr's local indices assume
+        # precursor_index == row position
         self._assert_contiguous_precursor_index(precursor_df, 0, n_precursors)
 
-        # global mapping: indexed by global precursor_index throughout.
+        # indexed by global precursor_index
         peptidoform_index_arr = precursor_df["peptidoform_index"].to_numpy()
         ion_type_container = self.fragmentation.get_ion_types()
 
-        # Dataset/Sampler/DataLoader/Prefetcher are built exactly once for
-        # the whole prediction; ChunkedSeqDataBatchSampler groups batches by
-        # sequence_length while guaranteeing no batch spans two chunks, so
-        # chunk transitions can be detected from the batch stream alone.
+        # batches are grouped by sequence_length and never span two chunks, so
+        # chunk transitions can be detected from the batch stream
         precursor_ds = PeptideDataset(
             precursor_df, modification_df, peptide_df, level="precursor"
         )
@@ -339,8 +322,7 @@ class SpectralLibGenerator:
             (batch_size, 4), dtype=torch.float32, device=self.device
         )
 
-        # CPU output buffers are reused across chunks; sized once at the
-        # largest possible chunk so memory stays proportional to chunk_size.
+        # CPU output buffers for one chunk, reused across chunks
         effective_chunk_size = min(chunk_size, n_precursors)
         chunk_row_capacity = effective_chunk_size * max_fragments
         out_precursor_index_arr = np.empty(chunk_row_capacity, dtype=np.uint32)
@@ -396,9 +378,7 @@ class SpectralLibGenerator:
                     batch["precursor_index"].to(torch.uint32).numpy()
                 )
 
-                # Chunk boundaries are inferred from global precursor_index
-                # values; the sampler guarantees a batch never spans two
-                # chunks, so the first row's chunk is the whole batch's.
+                # the first row's chunk is the whole batch's
                 batch_chunk_start = (
                     int(batch_precursor_index_arr[0]) // chunk_size
                 ) * chunk_size
@@ -415,8 +395,7 @@ class SpectralLibGenerator:
                         current_chunk_end - current_chunk_start, dtype=np.bool_
                     )
 
-                # validate batch IDs are within the current chunk range
-                # before handing them to the JIT helper.
+                # bounds check before the njit helper writes by local index
                 if (
                     batch_precursor_index_arr.min() < current_chunk_start
                     or batch_precursor_index_arr.max() >= current_chunk_end
@@ -505,11 +484,8 @@ class SpectralLibGenerator:
             shuffle=False,
         )
 
-        # An externally-supplied tracker's own total is set arbitrarily by
-        # its creator, so a fresh child sized to the real batch count is
-        # created here to drive the subtask bar (position 1); the caller's
-        # tracker only receives proportional progress via that child's
-        # advance()/complete() calls.
+        # a caller's tracker has an arbitrary total; drive a child sized to the
+        # batch count instead
         total_batches = max(batch_sampler.count_num_of_batches(), 1)
         own_progress = progress is None
         if own_progress:
@@ -526,7 +502,7 @@ class SpectralLibGenerator:
             dataset=precursor_ds, batch_sampler=batch_sampler, num_workers=0
         )
 
-        # Pre-allocate GPU buffers for zero-allocation H2D transfer
+        # GPU buffers reused for every H2D copy
         max_token_len = peptide_df["sequence_length"].max() + 3
         mod_feat_dim = self.rt_predictor.mod_embedding.in_features
         X_aa_buf = torch.empty(
@@ -538,7 +514,6 @@ class SpectralLibGenerator:
             device=self.device,
         )
 
-        # Pre-allocate output arrays
         out_peptidoform_index = np.empty(modification_df.shape[0], dtype=np.uint32)
         out_ref_rt = np.empty(modification_df.shape[0], dtype=np.float32)
         offset = 0
@@ -591,13 +566,9 @@ class SpectralLibGenerator:
     ):
         """Return (MS2 result, modification_df, precursor_df with fragment indexing).
 
-        When precursor_chunk_size is None (default), MS2 spectra are
-        predicted in-memory via predict_ms2_spectra() and the first
-        returned value is a pl.DataFrame. When precursor_chunk_size is
-        given, MS2 spectra are instead streamed to ms2_output_path via
-        predict_ms2_spectra_to_parquet() (at most precursor_chunk_size
-        precursors held in memory at a time), and the first returned
-        value is the Path to that Parquet file instead.
+        The MS2 result is the speclib DataFrame, or, when precursor_chunk_size is
+        set, the Path of save_dir/speclib_df.parquet written in chunks of that
+        many precursors. modification_df gains ref_rt.
         """
         if precursor_chunk_size is not None and save_dir is None:
             raise ValueError("save_dir is required when precursor_chunk_size is set")
@@ -609,11 +580,8 @@ class SpectralLibGenerator:
             )
 
         try:
-            # RT and MS2 prediction split the parent's progress ~1:4. total=100
-            # here is a nominal placeholder: predict_rt()/predict_ms2_spectra()
-            # re-create their own child (sized to the real batch count) from
-            # whatever tracker they're given, so this total is never advanced
-            # against directly, only completed as a whole.
+            # MS2:RT progress is 80:20. total=100 is nominal: each predictor
+            # drives its own sized child, so these are only completed.
             ms2_progress = progress.create_child(
                 "Predicting MS2 spectra", total=100, portion=80
             )

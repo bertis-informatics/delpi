@@ -67,17 +67,15 @@ class Sequence:
 
     @classmethod
     def from_string(cls, sequence_str):
-        """
-        https://pyopenms.readthedocs.io/en/latest/user_guide/peptides_proteins.html
-        Args:
-            sequence_str (str): sequence string with specified modifications
+        """Build a Sequence from a modified sequence string.
+
+        See https://pyopenms.readthedocs.io/en/latest/user_guide/peptides_proteins.html
         """
         # residues, n_term_mod, c_term_mod = parse_sequence(sequence_str)
         # parsed_residues = parse_sequence_string('.(Dimethyl)DFPIAMGER.')
         parsed_residues = parse_sequence_string(sequence_str)
 
-        # Parsed residues may contain protein terminal characters. 
-        # Let's use peptide characters only from here:
+        # terminal characters (protein or peptide) are kept as parsed
         amino_acids = [
                 ModifiedAminoAcid.get(AminoAcid.get(residue), modification) 
                     for residue, modification in parsed_residues

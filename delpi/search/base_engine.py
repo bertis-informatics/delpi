@@ -1,9 +1,4 @@
-"""
-Base Search Engine for DelPi
-
-This module provides the base search engine class with common functionality
-for both DDA and DIA search pipelines.
-"""
+"""Base search engine shared by the DDA and DIA pipelines."""
 
 import logging
 from abc import ABC, abstractmethod
@@ -38,14 +33,10 @@ logger = logging.getLogger(__name__)
 
 
 class BaseSearchEngine(ABC):
-    """
-    Abstract base search engine class containing common functionality for DDA and DIA searches.
+    """Abstract base for the DDA and DIA search engines.
 
-    This class provides the foundation for peptide search engines with:
-    - Configuration validation and device management
-    - Target-decoy analysis pipeline
-    - Process-based execution for stability
-    - Result management and storage
+    Holds the search config, device and search state, runs one raw file per
+    child process and does the RT calibration shared by both engines.
     """
 
     def __init__(
@@ -54,12 +45,6 @@ class BaseSearchEngine(ABC):
         device: torch.device,
         state: SearchState = SearchState.INIT,
     ):
-        """
-        Initialize the base search engine.
-
-        Args:
-            search_config: Configuration object containing search parameters
-        """
         self.search_config = search_config
         self.device = device
         self.state = state
@@ -85,11 +70,10 @@ class BaseSearchEngine(ABC):
 
     @staticmethod
     def _limit_numba_threads():
-        """Limit numba thread count in the current (background) thread.
+        """Use half of the numba threads in the current (background) thread.
 
-        Called as ``thread_initializer`` for :class:`Prefetcher` so that
-        background ``find_peak_groups`` work uses only half of the available
-        cores, leaving the rest free for GPU-feeding data pipelines.
+        Passed as ``thread_initializer`` to :class:`Prefetcher`, so background
+        ``find_peak_groups`` work leaves cores free for the GPU data pipeline.
         """
         import numba
 
@@ -136,11 +120,11 @@ class BaseSearchEngine(ABC):
     def perform_rt_bootstrap(
         self, run: Union[DIARun, DDARun], figure_path: Path = None
     ):
-        """Optional hook for the RT-stratified, checkpointed initial DIA
-        bootstrap calibration (delpi.search.dia.rt_bootstrap). Engines that
-        don't support it (e.g. DDA) return None, and `_perform_rt_calibration`
-        falls back to the legacy `perform_quick_search()` + ordinary
-        RetentionTimeCalibrator.train() path.
+        """Hook for the initial DIA RT bootstrap (delpi.search.dia.rt_bootstrap).
+
+        `_perform_rt_calibration` calls it before the first full search and
+        uses the result without a fallback, so engines that take that path
+        (DIA) must override it. DDA never does and keeps this None default.
         """
         return None
 
@@ -148,29 +132,12 @@ class BaseSearchEngine(ABC):
     def perform_search(
         self, lcms_data: MassSpecData, progress: ProgressTracker = None
     ) -> ResultManager:
-        """
-        Perform the core search logic for a single LC-MS/MS run.
-
-        This method contains the acquisition-specific search implementation
-        and must be implemented by subclasses (DDA/DIA engines).
-
-        Args:
-            lcms_data: LC-MS/MS data
-            progress: Progress tracker for reporting status
-
-        Returns:
-            ResultManager with search results
-        """
+        """Run the acquisition-specific search on one LC-MS/MS run."""
         pass
 
     @abstractmethod
     def get_acquisition_method(self) -> str:
-        """
-        Get the acquisition method (DDA or DIA).
-
-        Returns:
-            Acquisition method string
-        """
+        """Return "DDA" or "DIA"."""
         pass
 
     def empty_device_cache(self):
@@ -184,22 +151,14 @@ class BaseSearchEngine(ABC):
         raw_path: Path,
         progress_queue=None,
     ) -> None:
-        """Run the full search pipeline for a single raw file.
+        """Run the full search pipeline for one raw file.
 
-        This method is designed to be called in a child process spawned by
-        :meth:`SearchManager.execute_batch`.
+        Called in a child process spawned by :meth:`SearchManager.execute_batch`.
 
-        Parameters
-        ----------
-        raw_path : Path
-            Path to the raw LC-MS/MS file.
-        progress_queue : multiprocessing.Queue, optional
-            When provided, a :class:`CallbackProgressTracker` is created
-            that puts :class:`ProgressSnapshot` objects onto the queue so
-            the parent process can forward them.  A ``None`` sentinel is
-            put on the queue when this method finishes (success or error).
-            When *not* provided, a :class:`TqdmProgressTracker` is used
-            for CLI output.
+        Args:
+            progress_queue: if given, :class:`ProgressSnapshot` objects are put
+                on it for the parent, then a ``None`` sentinel when the method
+                finishes (success or error). Otherwise progress goes to tqdm.
         """
 
         use_tqdm = progress_queue is None
@@ -220,7 +179,6 @@ class BaseSearchEngine(ABC):
 
         try:
             logger.info(f"Loading LC-MS data: {raw_path}")
-            # Load raw data (5% of overall)
             reader = ReaderFactory.get_reader(raw_path)
             num_scans = reader.num_spectra
             if num_scans is not None:
@@ -242,7 +200,6 @@ class BaseSearchEngine(ABC):
                 f"Loaded {lcms_data.meta_df.shape[0]} spectra. Max scan time: {max_rt_time/60:.1f} min"
             )
 
-            # Perform search (80% of overall)
             logger.info(f"Start {self.get_acquisition_method()} search")
             search_progress = progress.create_child("Search", total=100, portion=80)
             result_manager = self.perform_search(lcms_data, progress=search_progress)
@@ -258,7 +215,7 @@ class BaseSearchEngine(ABC):
         finally:
             progress.close()
             if progress_queue is not None:
-                progress_queue.put(None)  # sentinel — tells parent we're done
+                progress_queue.put(None)  # sentinel: the run is done
 
     def prepare_tl_data_for_run(
         self,
@@ -267,17 +224,14 @@ class BaseSearchEngine(ABC):
         tl_ms2_h5_path: Path,
         progress_queue=None,
     ) -> None:
-        """Extract MS2/RT transfer-learning training data for a single run
-        and append it to the shared ``transfer_learning_ms2.h5`` file.
+        """Extract MS2/RT transfer-learning data for one run into the shared
+        ``transfer_learning_ms2.h5``.
 
-        This is run *after* the first-pass global (cross-run) target-decoy
-        analysis, using the already dual-FDR-filtered and top-k-selected
-        target PmSMs for this run (see
-        :func:`delpi.search.tl.second_pass.select_tl_training_pmsms`).
-
-        Designed to be called in a child process spawned by
-        :meth:`SearchManager.prepare_transfer_learning_training_data`, for
-        the same GPU-memory isolation and raw-data reload reasons as
+        `target_pmsm_df` holds this run's target PmSMs after the first-pass
+        global target-decoy analysis, already dual-FDR filtered and top-k selected
+        (:func:`delpi.search.tl.second_pass.select_tl_training_pmsms`). Called
+        in a child process spawned by
+        :meth:`SearchManager.prepare_transfer_learning_training_data`, like
         :meth:`process_single_run`.
         """
         use_tqdm = progress_queue is None
@@ -303,7 +257,7 @@ class BaseSearchEngine(ABC):
             raise RuntimeError(f"TL data prep failed for {raw_path}") from e
         finally:
             if progress_queue is not None:
-                progress_queue.put(None)  # sentinel — tells parent we're done
+                progress_queue.put(None)  # sentinel: the run is done
 
     def _perform_rt_calibration(
         self, run: Union[DIARun, DDARun], before_full_search: bool
@@ -320,10 +274,11 @@ class BaseSearchEngine(ABC):
         else:
             fig_path = self.search_config.output_dir / f"{run.name}_rt_calib.jpg"
 
-        ## Before second full search, use first search results with original DB
+        # before a full search, use the first-search results
         if before_full_search:
             group_key = "first_results"
-            #### refined DB contains ref_rt predicted by fine-tuned RT model
+            # current DB, not the original: the refined DB's ref_rt comes from
+            # the fine-tuned RT model
             # db_dir = self.search_config.db_dir
             db_dir = self.get_db_dir()
         else:
@@ -341,7 +296,7 @@ class BaseSearchEngine(ABC):
                     f"anchors={bootstrap_result.n_unique_anchors})"
                 )
             return bootstrap_result.calibrator
-            # Legacy path: engines without RT-bootstrap support (e.g. DDA).
+            # legacy path, before the RT bootstrap:
             # q_value_cutoff = 0.05
             # pmsm_df = self.perform_quick_search(run)
             # target_df = pmsm_df.filter(pl.col("is_decoy") == False)
@@ -363,7 +318,7 @@ class BaseSearchEngine(ABC):
                 pmsm_df = calculate_q_value(
                     pmsm_df, score_column="logit", out_column="precursor_q_value"
                 )
-            else:  # SECND_SEARCH and before_full_search
+            else:  # SECOND_SEARCH, before the full search
                 results_dict = result_manager.read_dict(
                     group_key,
                     data_keys=[
@@ -379,7 +334,7 @@ class BaseSearchEngine(ABC):
                     .agg(pl.all().sort_by("score").last())
                 )
 
-                ## update precursor_index for refined DB
+                # map precursor_index to the refined DB
                 precursor_df = (
                     pl.scan_parquet(db_dir / "precursor_df.parquet")
                     .select(pl.col("g_precursor_index", "precursor_index"))

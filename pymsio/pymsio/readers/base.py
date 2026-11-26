@@ -87,35 +87,17 @@ class MassSpecFileReader(ABC):
 
     @abstractmethod
     def get_meta_df(self) -> pl.DataFrame:
-        """
-        Returns:
-            pl.DataFrame: shape of (num_frames, 8)
-        ┌───────────┬───────┬─────────────┬─────────────────┬──────────┬──────────────────┬──────────────────┬───────────────────┐
-        │ frame_num ┆ mz_lo ┆ mz_hi       ┆ time_in_seconds ┆ ms_level ┆ isolation_min_mz ┆ isolation_max_mz ┆ isolation_win_idx │
-        │ ---       ┆ ---   ┆ ---         ┆ ---             ┆ ---      ┆ ---              ┆ ---              ┆ ---               │
-        │ u32       ┆ f32   ┆ f32         ┆ f32             ┆ u8       ┆ f32              ┆ f32              ┆ u32               │
-        ╞═══════════╪═══════╪═════════════╪═════════════════╪══════════╪══════════════════╪══════════════════╪═══════════════════╡
-        │ 1         ┆ 380.0 ┆ 980.0       ┆ 0.0             ┆ 1        ┆ null             ┆ null             ┆ null              │
-        │ …         ┆ …     ┆ …           ┆ …               ┆ …        ┆ …                ┆ …                ┆ …                 │
-        │ 123456    ┆ 150.0 ┆ 1816.526367 ┆ 2148.360596     ┆ 2        ┆ 878.649292       ┆ 880.650146       ┆ 249               │
-        └───────────┴───────┴─────────────┴─────────────────┴──────────┴──────────────────┴──────────────────┴───────────────────┘
-
+        """One row per frame with the ``META_SCHEMA`` columns; the isolation
+        bounds are null for MS1 frames.
         """
         raise NotImplementedError()
 
     @abstractmethod
     def get_frame(self, frame_num: int) -> PeakArray:
-        """
-        Returns:
-            PeakArray: NamedTuple(mz=np.ndarray[float32], ab=np.ndarray[float32])
-        """
+        """Peaks of one frame, as float32 ``mz`` and ``ab`` arrays."""
         raise NotImplementedError()
 
     def get_frames(self, frame_nums: Sequence[int]) -> List[PeakArray]:
-        """
-        Returns:
-            List[PeakArray]
-        """
         return [self.get_frame(fn) for fn in frame_nums]
 
     @abstractmethod

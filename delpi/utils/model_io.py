@@ -1,16 +1,15 @@
-"""Shared helpers for exporting/loading inference-only model checkpoints.
+"""Export and load inference-only checkpoints without Lightning.
 
-The export format is a plain ``dict`` with three keys::
+The file is a plain dict::
 
     {
-        "model_state_dict": ...,   # weights restored via load_state_dict
-        "hyper_parameters": ...,   # kwargs accepted by the target class __init__
+        "model_state_dict": ...,   # weights for load_state_dict
+        "hyper_parameters": ...,   # kwargs for the target class __init__
         "meta": ...,               # free-form metadata (versions, timestamps, ...)
     }
 
-This avoids depending on Lightning at inference time and is shared by
-``DelPiModel`` / ``DelPiClassifier`` / ``Ms2SpectrumPredictor`` /
-``RetentionTimePredictor``.
+Used by DelPiModel, DelPiClassifier, Ms2SpectrumPredictor and
+RetentionTimePredictor.
 """
 
 from datetime import datetime, timezone
@@ -32,18 +31,14 @@ def save_model(
     model_version: str = "v1.0",
     extra_meta: dict | None = None,
 ) -> None:
-    """Export ``model`` weights + hyperparameters + meta to ``save_path``.
+    """Export ``model`` weights, hyperparameters and meta to ``save_path``.
 
     Args:
-        model: A LightningModule (or any ``nn.Module`` with ``.hparams``).
-        save_path: Destination ``.pth`` path.
-        inference_cls: Optional inference-only class used to (a) determine the
-            allowed ``__init__`` kwargs and (b) filter ``state_dict`` keys to
-            the inference subset. When ``None``, ``type(model)`` is used and
-            the full ``state_dict`` is saved.
-        model_version: Human-readable version string stored in ``meta``.
-        extra_meta: Optional dict merged into ``meta`` (e.g. acquisition_mode,
-            token schemas).
+        model: a LightningModule, or any ``nn.Module`` with ``.hparams``.
+        inference_cls: inference-only class whose ``__init__`` kwargs and
+            ``state_dict`` keys are kept. None uses ``type(model)`` and saves
+            the full ``state_dict``.
+        extra_meta: merged into ``meta`` (e.g. acquisition_mode, token schemas).
     """
     from delpi import __version__ as code_version
 
@@ -76,15 +71,11 @@ def save_model(
 
 
 def load_model(cls: Type[T], path: str | Path) -> T:
-    """Load a model previously exported via :func:`save_model`.
-
-    Reconstructs ``cls`` from the saved ``hyper_parameters``, restores the
-    ``model_state_dict``, attaches ``meta`` as an attribute, and switches the
-    model to eval mode on CPU.
+    """Load a model exported by :func:`save_model`, in eval mode on CPU, with
+    ``meta`` attached as an attribute.
 
     Raises:
-        ValueError: If ``meta["model_name"]`` does not match ``cls.__name__``,
-            indicating that the file was exported for a different model class.
+        ValueError: ``meta["model_name"]`` differs from ``cls.__name__``.
     """
     payload = torch.load(Path(path), weights_only=True)
     meta = payload.get("meta", {})

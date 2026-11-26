@@ -13,7 +13,7 @@ from delpi.utils.hdf import HdfDataset
 
 
 class DatasetSplitter:
-    """Handles splitting of datasets for training and testing."""
+    """Train/test split of PmSMs."""
 
     def __init__(self, test_size: float = 0.5, random_state: int = 928):
         self.test_size = test_size
@@ -23,13 +23,10 @@ class DatasetSplitter:
         self, pmsm_df: pl.DataFrame
     ) -> Tuple[pl.DataFrame, pl.DataFrame]:
         """
-        Split dataset by peptide to avoid data leakage.
-
-        Args:
-            pmsm_df: DataFrame with peptide-spectrum matches
+        Split decoy peptides between train and test; targets go to both.
 
         Returns:
-            Tuple of (training dataframe, testing dataframe)
+            (train_df, test_df)
         """
         target_id_df = (
             pmsm_df.filter(pl.col("is_decoy") == False)
@@ -60,12 +57,9 @@ class DatasetSplitter:
 
 class PMSMDataset(HdfDataset):
     """
-    각 bag = (run_index, precursor_index)
-    grouped_pmsm_df:
-        columns = ["run_index", "precursor_index", "pmsm_indices"]
-        pmsm_indices : List[int] (polars list column)
-    feature_fetcher:
-        Callable(run_index:int, pmsm_indices:List[int]) -> torch.Tensor[n_i, d]
+    각 item = pmsm_df 한 행 (PmSM 하나).
+    pmsm_df columns: run_index, pmsm_index, observed_rt, predicted_rt, is_decoy
+    x = HDF embedding + (observed_rt - predicted_rt) / rt_scale, y = 1 for target
     """
 
     PMSM_EMBEDDING_DIM = 193
@@ -91,7 +85,7 @@ class PMSMDataset(HdfDataset):
     def get_pmsm_embedding(
         self, run_index: int, pmsm_index: int, rt_diff: float
     ) -> torch.Tensor:
-        """Fetch features for given run and PMSM indices"""
+        """PmSM embedding with the scaled RT error as the last element."""
 
         pmsm_embedding = np.empty(self.PMSM_EMBEDDING_DIM, dtype=np.float32)
         pmsm_embedding[-1] = rt_diff / self.rt_scale

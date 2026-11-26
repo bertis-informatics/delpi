@@ -72,14 +72,11 @@ except Exception as exc:
 
 
 class _PeakBufferBuilder:
-    """Growable, contiguous ``float32`` (mz, ab) peak buffer with per-scan
-    ``[start, stop)`` bookkeeping.
+    """Growable contiguous float32 (mz, ab) buffer with per-scan
+    ``[start, stop)`` ranges.
 
-    Avoids building one small ``PeakArray`` per scan followed by a full-run
-    ``np.concatenate()``: peaks are written directly into a preallocated
-    buffer that grows geometrically (so most scans don't trigger a
-    reallocation), and the final arrays are returned as plain slices/views
-    (no trailing copy-to-shrink).
+    Scans are written straight into a buffer that grows geometrically, so
+    there is no per-scan ``PeakArray`` or full-run ``np.concatenate()``.
     """
 
     _GROWTH_FACTOR = 1.6
@@ -92,11 +89,8 @@ class _PeakBufferBuilder:
         self._mz = np.empty(self._capacity, dtype=np.float32)
         self._ab = np.empty(self._capacity, dtype=np.float32)
         self._used = 0
-        # The .NET array element type (System.Double[]) doesn't change scan
-        # to scan for a given RAW file/instrument, so validate it only once -
-        # profiling showed the GetType().GetElementType().Name reflection
-        # call is a real, measurable pythonnet boundary cost when repeated
-        # per scan (~0.46s / 5000 scans in this env).
+        # the .NET element type (System.Double[]) is the same for every scan,
+        # so check it once: the reflection call costs ~0.46 s per 5000 scans
         self._type_validated = False
 
     def _ensure_capacity(self, extra: int) -> None:
@@ -118,16 +112,12 @@ class _PeakBufferBuilder:
         self._capacity = new_capacity
 
     def append_from_dotnet(self, masses, intensities, spectrum_index: int) -> None:
-        """Filter (intensity > 0) and cast ``masses``/``intensities`` (.NET
-        ``double[]``) directly into this builder's final buffer, while the
-        arrays are pinned - no intermediate per-scan NumPy array is created.
+        """Copy one scan's positive-intensity peaks from the pinned .NET
+        ``double[]`` arrays into the buffer as float32.
 
-        Uses the low-level ``pin_dotnet_array``/``unpin_dotnet_array`` pair
-        directly (instead of the ``pinned_dotnet_array_view(s)`` context
-        managers) since this runs once per scan: profiling showed the
-        generator-based context manager protocol has measurable overhead of
-        its own at that call frequency (tens of microseconds/call, adding up
-        over tens of thousands of scans).
+        Calls ``pin_dotnet_array``/``unpin_dotnet_array`` directly: the
+        ``pinned_dotnet_array_view(s)`` context managers cost tens of
+        microseconds per call, which adds up over tens of thousands of scans.
         """
         validate = not self._type_validated
         mz_view, mz_handle = pin_dotnet_array(masses, validate=validate)
@@ -147,7 +137,7 @@ class _PeakBufferBuilder:
                 sub_ab = ab_view[:n]
 
                 if sub_ab.min() > 0:
-                    # Fast path: every peak retained, no boolean mask needed.
+                    # fast path: keep every peak, no mask
                     self._ensure_capacity(n)
                     ed = self._used + n
                     self._mz[self._used : ed] = sub_mz
@@ -170,9 +160,8 @@ class _PeakBufferBuilder:
             unpin_dotnet_array(mz_handle)
 
     def finish(self) -> Tuple[PeakArray, np.ndarray, np.ndarray]:
-        """Return ``(peaks, peak_start, peak_stop)``. The peak arrays are
-        contiguous views into the (possibly over-allocated) internal buffer -
-        no copy is made to "shrink" them.
+        """Return ``(peaks, peak_start, peak_stop)``; the peak arrays are views
+        into the over-allocated buffer, not shrunk copies.
         """
         return (
             PeakArray(self._mz[: self._used], self._ab[: self._used]),
@@ -189,14 +178,9 @@ class ThermoRawReader(MassSpecFileReader):
         filepath: Union[str, Path],
         num_workers: int = 0,
     ):
-        """Initialize the Thermo RAW reader.
-
-        Note:
-            ``num_workers`` is accepted for API compatibility but is
-            currently unused: the underlying RAW handle is not thread-safe
-            (see ``thread_safe = False``), so scans are read sequentially on
-            the calling thread. Do not share ``self._raw`` across threads or
-            processes.
+        """``num_workers`` is accepted for API compatibility but unused: the
+        RAW handle is not thread-safe, so scans are read sequentially. Do not
+        share ``self._raw`` across threads or processes.
         """
         if not LOADED_DLL:
             raise RuntimeError(f"Failed to load Thermo DLLs: {_DLL_LOAD_ERROR}")
@@ -211,32 +195,26 @@ class ThermoRawReader(MassSpecFileReader):
         self._closed = False
 
         self._meta_df: Optional[pl.DataFrame] = None
-        # Cached lightweight per-scan centroid flags, indexed by
-        # ``frame_num - first_scan_number`` (populated by get_meta_df()/load()).
+        # per-scan centroid flags by ``frame_num - first_scan_number``, set by
+        # get_meta_df()/load()
         self._is_centroid_by_index: Optional[np.ndarray] = None
-        # Validate the .NET array element type only once for get_frame()/
-        # get_frames() (see _PeakBufferBuilder._type_validated for why).
+        # check the .NET element type once, as in _PeakBufferBuilder
         self._peak_view_validated = False
 
-        # Optional call-count instrumentation for benchmarking/profiling
-        # only; ``None`` (disabled) has negligible overhead in the hot loop.
+        # Thermo API call counts for profiling; None (off) costs almost nothing
         self._debug_call_counts: Optional[Dict[str, int]] = None
         self._warning_counts: Dict[str, int] = {}
 
     @property
     def _raw(self):
-        """The underlying pythonnet RAW handle.
-
-        Routed through a property so every access point raises a clear
-        error once the reader has been closed, instead of failing deep
-        inside a .NET call with an opaque error.
-        """
+        """The pythonnet RAW handle; raises a clear error once closed instead
+        of failing inside a .NET call."""
         if self._closed or self._raw_handle is None:
             raise RuntimeError("ThermoRawReader is closed")
         return self._raw_handle
 
     def close(self):
-        """Idempotent: safe to call multiple times."""
+        """Dispose the RAW handle; safe to call more than once."""
         if self._closed:
             return
         if self._raw_handle is not None:
@@ -246,8 +224,8 @@ class ThermoRawReader(MassSpecFileReader):
         self._is_centroid_by_index = None
 
     def enable_call_counting(self) -> Dict[str, int]:
-        """Benchmarking/profiling helper: start counting calls to the
-        underlying Thermo API methods. Returns the live counts dict."""
+        """Start counting Thermo API calls, for profiling. Returns the live
+        counts dict."""
         self._debug_call_counts = defaultdict(int)
         return self._debug_call_counts
 
@@ -282,9 +260,7 @@ class ThermoRawReader(MassSpecFileReader):
             " -> ", self._raw.GetAllInstrumentNamesFromInstrumentMethod()
         )
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
+    # internal helpers
 
     def _warn(self, key: str) -> None:
         self._warning_counts[key] = self._warning_counts.get(key, 0) + 1
@@ -331,10 +307,8 @@ class ThermoRawReader(MassSpecFileReader):
             return None, None
 
     def _peak_array_from_dotnet(self, masses, intensities) -> PeakArray:
-        """Filter (intensity > 0) + cast to float32 a single scan's
-        masses/intensities into an independent :class:`PeakArray`, without
-        an intermediate per-scan NumPy array (values are copied directly
-        out of the pinned .NET buffers).
+        """One scan's positive-intensity peaks as a new float32
+        :class:`PeakArray`, copied straight out of the pinned .NET buffers.
         """
         validate = not self._peak_view_validated
         mz_view, mz_handle = pin_dotnet_array(masses, validate=validate)
@@ -377,9 +351,7 @@ class ThermoRawReader(MassSpecFileReader):
             counts["IsCentroidScanFromScanNumber"] += 1
         return bool(self._raw.IsCentroidScanFromScanNumber(frame_num))
 
-    # ------------------------------------------------------------------
-    # Metadata-only path
-    # ------------------------------------------------------------------
+    # metadata only
 
     def get_meta_df(self) -> pl.DataFrame:
         """Read metadata for all scans without retrieving any peak data."""
@@ -449,9 +421,7 @@ class ThermoRawReader(MassSpecFileReader):
         self._meta_df = meta_df
         return meta_df
 
-    # ------------------------------------------------------------------
-    # Single-scan access
-    # ------------------------------------------------------------------
+    # single-scan access
 
     def get_frame(self, frame_num: int) -> PeakArray:
         centroid = self._cached_centroid(frame_num)
@@ -475,9 +445,7 @@ class ThermoRawReader(MassSpecFileReader):
             for fn in self._progress(frame_nums, desc="load spectra")
         ]
 
-    # ------------------------------------------------------------------
-    # Bulk load
-    # ------------------------------------------------------------------
+    # bulk load
 
     def load(self, progress=None) -> MassSpecData:
         need_meta = self._meta_df is None
@@ -558,8 +526,8 @@ class ThermoRawReader(MassSpecFileReader):
                 nan_to_null=True,
             )
         else:
-            # Metadata already cached: reuse cached centroid flags and skip
-            # scan-stats/scan-event/reaction calls entirely.
+            # metadata cached: reuse the centroid flags and skip the scan
+            # stats/event/reaction calls
             centroid_flags = self._is_centroid_by_index
             is_centroid_available = centroid_flags is not None
 

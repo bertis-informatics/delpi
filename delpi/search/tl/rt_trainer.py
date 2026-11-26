@@ -13,7 +13,6 @@ from delpi.search.tl.dataset import TransferLearningDatasetForRT, LABEL_DTYPE
 from delpi.search.result_aggregator import ResultsAggregator
 from delpi import MODEL_DIR
 
-# Default training parameters
 DEFAULT_TRAINING_PARAMS = {
     "max_epochs": 40,
     "num_warmup_steps": 4,
@@ -60,7 +59,7 @@ class TransferLearningTrainerForRT:
             shuffle=True,
         )
 
-        ## to avoid too-long training time, limit the number of samples
+        # cap sample counts to bound training time
         rng = np.random.default_rng(self.training_params["random_seed"])
         if len(train_labels) > self.training_params["max_train_samples"]:
             idx = rng.choice(
@@ -103,10 +102,8 @@ class TransferLearningTrainerForRT:
             batch_size=self.training_params["batch_size"],
             num_workers=0,
         )
-        # Setup callbacks
         callbacks = self._setup_callbacks()
 
-        # Setup trainer
         trainer = Trainer(
             max_epochs=self.training_params["max_epochs"],
             accelerator=device.type,
@@ -117,7 +114,6 @@ class TransferLearningTrainerForRT:
             enable_model_summary=False,
         )
 
-        # Train model
         trainer.fit(model=model)
         trained_model = (
             RetentionTimePredictor.load_from_checkpoint(callbacks[1].best_model_path)

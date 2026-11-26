@@ -27,17 +27,15 @@ PEPTIDE_SEQ_REGEX = rf"^[{AminoAcid.peptide_n_term}{AminoAcid.protein_n_term}]?[
 
 
 def merge_il_variants(peptide_df: pl.DataFrame) -> pl.DataFrame:
-    """Merge peptides whose sequences differ only by I/L.
+    """Merge peptides whose sequences differ only by I/L (identical masses).
 
-    I and L have the same residue mass, so such peptides have identical
-    precursor and fragment masses and the search cannot tell them apart.
-    Each group keeps one sequence, the variant found in the most proteins
-    (then the alphabetically first), and the union of the group's
-    `protein_index`. A protein-terminal marker is kept if any variant is
-    protein-terminal (the same rule digestion uses). Groups keep the order of
-    their first peptide, so peptides without an I/L variant are unchanged.
+    Each group keeps the variant found in the most proteins (then the
+    alphabetically first) and the union of ``protein_index``. An end is
+    protein-terminal if it is in any variant, as in digestion. Groups keep the
+    order of their first peptide, so peptides without an I/L variant are
+    unchanged.
 
-    `peptide_df` holds digested target peptides: ``peptide`` (one terminal
+    ``peptide_df`` holds digested target peptides: ``peptide`` (one terminal
     marker on each side), ``protein_index`` and ``sequence_length``.
     """
     core = pl.col("peptide").str.slice(1, pl.col("peptide").str.len_chars() - 2)
@@ -148,7 +146,6 @@ class PeptideDatabase:
         parser = FastaParser(fasta_file)
         sequence_df = parser.parse().with_row_index("protein_index")
 
-        # digest FASTA sequences
         enzyme_ = Enzyme(
             name=enzyme,
             min_len=min_len,
@@ -170,10 +167,8 @@ class PeptideDatabase:
         # one target peptide per I/L-equivalent sequence (indistinguishable by mass)
         peptide_df = merge_il_variants(peptide_df)
 
-        # Parse modification params early (cheap/side-effect-free) so the
-        # decoy generator can make variable-modification-aware mutation
-        # position choices; `mod_handler.apply(...)` is still called below,
-        # in its original place.
+        # created before decoy generation so mutation decoys can respect
+        # variable modifications; applied below
         mod_handler = ModificationHandler(mod_param_set, max_mods=max_mods)
 
         # generate decoy peptides
@@ -353,17 +348,10 @@ class PeptideDatabase:
             # "protein_index",
         ],
     ) -> pl.DataFrame:
-        """Helpers to join pmsm_df with database tables.
+        """Left-join database columns onto pmsm_df by precursor_index.
 
-        Args:
-            db_dir (Path): _description_
-            pmsm_df (pl.DataFrame): _description_
-            precursor_columns (List[str], optional): _description_. Defaults to [ "precursor_charge", "precursor_mz", ].
-            modification_columns (List[str], optional): _description_. Defaults to [ "mod_ids", "mods", "mod_sites", "precursor_mass", "ref_rt", ].
-            peptide_columns (List[str], optional): _description_. Defaults to [ "peptide", "sequence_length", "is_decoy", ].
-
-        Returns:
-            pl.DataFrame: _description_
+        The *_columns lists name the columns taken from precursor_df,
+        modification_df and peptide_df in ``db_dir``.
         """
 
         precursor_df = pl.scan_parquet(db_dir / "precursor_df.parquet")
@@ -406,8 +394,7 @@ class PeptideDatabase:
         Like :meth:`join`, but also attaches a semicolon-joined ``fasta_id``
         column per precursor, derived from the protein sequence database.
         """
-        # Columns added by the join — drop them first if already present to
-        # avoid polars creating duplicate (_right) columns.
+        # drop columns the join adds, so polars does not create *_right duplicates
         _join_added = {
             "peptidoform_index",
             "peptide_index",

@@ -78,8 +78,8 @@ class Encoder(torch.nn.Module):
         x_theo = self.theo_peak_encoder(x_theo)
         x_exp = self.exp_peak_encoder(x_exp)
 
-        # append cls_token and theoretical_peak_tokens,
-        #       [B, len_keep, D] -> [B, len_keep+1+len_theo, D]
+        # prepend cls_token and theo tokens:
+        #   [B, len_keep, D] -> [B, 1+len_theo+len_keep, D]
         # cls_token = self.cls_token + self.pos_encoder.pos_embed[0, :]
         cls_tokens = self.cls_token.expand(x_theo.shape[0], -1, -1)
 

@@ -68,9 +68,10 @@ def parse_sequence_string(peptide_string):
 def parse_modified_sequence_string(
     modified_sequence,
 ) -> Tuple[str, List[Tuple[int, int]]]:
-    """
-    Optimized version using manual parsing instead of regex.
-    This is 3.5x faster than the original regex-based version.
+    """Return (sequence without modifications, [(site, unimod_id), ...]).
+
+    Terminal characters are kept and count as sites; only (UniMod:N) tags are
+    recorded. Manual parsing, about 3.5x faster than the regex-based original.
     """
     seq_chars = []
     mod_tuples = []
@@ -104,9 +105,7 @@ def parse_modified_sequence_string(
 def parse_modified_sequence_string_original(
     modified_sequence,
 ) -> Tuple[str, List[Tuple[int, int]]]:
-    """
-    Original regex-based version (kept for reference).
-    """
+    """Regex-based version, kept for reference."""
     residue_tuples = RESIDUE_RE.findall(modified_sequence)
 
     seq_chars = []
@@ -125,7 +124,6 @@ def parse_modified_sequence_string_original(
 def test_parse_modified_sequence_string():
     import time
 
-    # More comprehensive test sequences
     test_sequences = [
         "<(UniMod:737)(UniMod:1)DK(UniMod:737)FM(UniMod:35)K(UniMod:737)(UniMod:121)EATTNAPFR.(UniMod:2)",
         "_AEDQTESSC(UniMod:4)ESHR.",
@@ -172,7 +170,6 @@ def test_parse_modified_sequence_string():
     )
     print(f"Speedup: {original_avg/optimized_avg:.2f}x")
 
-    # Verify results are identical
     test_seq = test_sequences[0]
     result1 = parse_modified_sequence_string_original(test_seq)
     result2 = parse_modified_sequence_string(test_seq)

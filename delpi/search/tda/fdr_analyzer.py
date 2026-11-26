@@ -6,12 +6,10 @@ from delpi.utils.fdr import calculate_q_value
 
 
 class FDRAnalyzer:
-    """Calculate q-values without performing protein inference or scoring.
+    """q-values from precomputed scores (higher is better).
 
-    The caller supplies protein-group membership and scores, when protein
-    FDR is wanted. PmSM and protein-group score columns are independently
-    selectable on each analysis call; higher scores must mean better hits.
-    No sequence database or inference configuration is needed here.
+    No protein inference here: protein-group FDR needs ``protein_group`` and
+    its score supplied by the caller.
     """
 
     def perform_global_analysis(
@@ -21,13 +19,11 @@ class FDRAnalyzer:
         protein_group_score_column: str = "protein_group_score",
         target_to_decoy_size_ratio: float = 1.0,
     ) -> pl.DataFrame:
-        """Calculate global precursor, peptide and optional protein-group FDR.
+        """Global precursor, peptide and optional protein-group q-values.
 
-        Precursor/peptide confidence uses the maximum supplied PmSM score
-        across all runs. Protein-group confidence uses the supplied group
-        score, repeated on its member PmSMs. For independently calculated
-        global group scores, specify e.g. ``global_protein_group_score``.
-        Existing q-value columns are replaced when analysis is repeated.
+        Precursors/peptides use their best PmSM score across runs; protein
+        groups use `protein_group_score_column` (e.g.
+        ``global_protein_group_score``). Existing q-value columns are replaced.
         """
         pmsm_df = self.calculate_q_value(
             pmsm_df,
@@ -122,13 +118,12 @@ class FDRAnalyzer:
         out_column: str,
         target_to_decoy_size_ratio: float,
     ) -> pl.DataFrame:
-        """Calculate q-values per group and attach them to the original rows.
+        """Per-group q-values joined back onto every row.
 
-        Each group contributes its highest finite ``score_column`` value
-        and the corresponding ``is_decoy`` label. Rows with null keys or
-        scores are excluded from estimation. ``out_column`` is replaced if
-        already present; groups without valid evidence receive null q-values.
-        The supplied frame defines the analysis scope (all runs or one run).
+        Each group contributes its highest finite ``score_column`` value and
+        its ``is_decoy``; rows with null keys or scores are ignored and get a
+        null q-value if their group has no valid row. ``out_column`` is
+        replaced. The frame defines the scope (all runs or one run).
         """
         selected_columns = list(dict.fromkeys([*group_keys, score_column, "is_decoy"]))
         score_df = (
@@ -139,8 +134,7 @@ class FDRAnalyzer:
             .agg(pl.all().sort_by(score_column).last())
         )
         if "protein_group" in group_keys:
-            # Preserve the key order of the protein-scoring output when
-            # collapsing its scores repeated across member PmSM rows.
+            # keep the protein-scoring key order after collapsing member rows
             score_df = score_df.sort(group_keys)
         score_df = calculate_q_value(
             score_df,

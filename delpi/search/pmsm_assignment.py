@@ -1,39 +1,13 @@
-"""Joint, precursor-relative-intensity-aware PmSM assignment.
+"""One-run PmSM assignment by an order-preserving DP.
 
-Given a table of PmSMs (Peptide-multi-Spectra-Matches, the common match unit
-for both DDA and DIA search results in DelPi) for a **single run**, this
-module selects a final PmSM subset by solving a single joint,
-order-preserving dynamic program that simultaneously decides:
-
-- which precursors to use,
-- which PmSM ``cluster`` (a run-local fragment-peak-sharing competition group,
-  already defined upstream) to use,
-- the one-to-one precursor <-> cluster assignment, and
-- the final selected PmSM for each assigned pair.
-
-No precursor or cluster is preselected before the DP: every precursor and
-every cluster in an ``alignment_group`` (a connected component of the
-precursor_index <-> cluster bipartite graph, computed fresh in this module)
-is a DP candidate.
-
-When a precursor has several candidate PmSMs, `score` alone can favor a
-candidate whose ``median_intensity`` is far weaker than another candidate of
-the same precursor. To avoid that:
-
-- alignment groups with a **single** candidate precursor select the PmSM
-  with the highest `median_intensity` directly -- `score` is not used at all,
-  since there is no competing precursor to weigh it against.
-- alignment groups with **two or more** precursors run the joint DP over an
-  assignment utility that combines `score` with the PmSM's *precursor-relative*
-  log2 intensity (relative to the strongest candidate of the same
-  `precursor_index`). Because the normalization denominator is always the
-  precursor's own maximum intensity, absolute abundance differences between
-  *different* precursors never act as an assignment bonus.
-
-Callers processing multiple runs must invoke `assign_pmsms` once per run
-(this module has no cross-run, replicate, condition, or quantity awareness).
-Target and decoy PmSMs are treated identically (this runs before FDR
-control) -- ``is_decoy`` is never read (and need not be present).
+PmSM ``cluster`` is the run-local fragment-peak-sharing competition group
+defined upstream. Within each alignment group (connected component of the
+precursor-cluster graph), the DP picks a one-to-one precursor-cluster
+assignment and one PmSM per pair, preserving predicted-RT order; nothing is
+preselected. Groups with one precursor take the PmSM with the highest
+median_intensity. Otherwise the utility is score plus log2 intensity relative
+to the precursor's strongest candidate, so absolute abundance never favours one
+precursor over another. Runs before FDR control; is_decoy is not used.
 """
 
 import numba as nb
@@ -50,15 +24,13 @@ REQUIRED_COLUMNS = (
     "median_intensity",
 )
 
-# DP state ties (total_assignment_utility, total_raw_score) are compared with this tolerance
+# tolerance for comparing DP utility / raw-score totals
 _TIE_TOLERANCE = 1e-8
 # stabilizes the precursor-relative log2 intensity ratio when intensities are 0
 _INTENSITY_EPSILON = 1e-6
 
 
-# --------------------------------------------------------------------------- #
-# union-find (plain, no external graph library)
-# --------------------------------------------------------------------------- #
+# union-find
 
 
 @nb.njit(cache=True)
@@ -91,10 +63,10 @@ def _union_find_components(
     n_precursor_nodes: int,
     n_cluster_nodes: int,
 ) -> np.ndarray:
-    """Union-find over precursor nodes ``[0, n_precursor_nodes)`` and cluster
-    nodes ``[n_precursor_nodes, n_precursor_nodes + n_cluster_nodes)``, unioning
-    the two endpoints of every PmSM row. Returns, for every node, the (non-dense)
-    root id of its connected component.
+    """Connected components of the precursor-cluster graph.
+
+    Precursor nodes are ``[0, n_precursor_nodes)``, cluster nodes follow. Each
+    PmSM row is an edge. Returns the (non-dense) root id of every node.
     """
     n = n_precursor_nodes + n_cluster_nodes
     parent = np.arange(n).astype(np.uint32)
@@ -109,10 +81,7 @@ def _union_find_components(
 
 @nb.njit(cache=True)
 def _unique_inverse(values: np.ndarray) -> tuple:
-    """Sorted unique values and inverse indices, i.e. a numba-compatible
-    equivalent of ``np.unique(values, return_inverse=True)`` (numba's
-    ``np.unique`` does not support ``return_inverse``).
-    """
+    """``np.unique(values, return_inverse=True)``, which numba does not support."""
     sorted_values = np.sort(values)
     unique_values = np.empty(sorted_values.shape[0], dtype=values.dtype)
     cnt = 0
@@ -125,9 +94,7 @@ def _unique_inverse(values: np.ndarray) -> tuple:
     return unique_values, inverse
 
 
-# --------------------------------------------------------------------------- #
-# joint order-preserving assignment DP
-# --------------------------------------------------------------------------- #
+# order-preserving assignment DP
 
 
 @nb.njit(cache=True)
@@ -140,10 +107,8 @@ def _is_strictly_better(
     count_b: int,
     tol: float,
 ) -> bool:
-    """Whether DP state A beats B under (utility, then raw score, then count).
-    Utility/score are compared with tolerance `tol`, and count is exact.
-    Returns False on an exact
-    tie, so the caller's evaluation order decides the winner.
+    """Whether DP state A beats B by utility, then raw score (within `tol`),
+    then count. False on a full tie, so the caller's evaluation order decides.
     """
     # if count_a != count_b:
     #     return count_a > count_b
@@ -174,18 +139,15 @@ def _is_strictly_better(
 def _dp_assign(
     utility: np.ndarray, raw_score: np.ndarray, valid: np.ndarray, tol: float
 ) -> np.ndarray:
-    """Joint order-preserving assignment DP for one alignment group.
+    """Order-preserving assignment DP for one alignment group.
 
-    `utility`/`raw_score`/`valid` are ``(M, N)`` matrices over precursors
-    (rows, ``predicted_rt`` order) and clusters (cols, representative
-    ``frame_num`` order); `valid[i, j]` marks that a PmSM connects precursor
-    `i` and cluster `j` (skipping a precursor or a cluster always has utility
-    and raw score 0). Maximizes total `utility`, then total `raw_score`, then
-    the number of matches; remaining exact ties are broken
-    deterministically by preferring, in order, a match over a precursor skip
-    over a cluster skip.
+    Inputs are ``(M, N)`` over precursors (rows, ``predicted_rt`` order) and
+    clusters (cols, representative ``frame_num`` order); `valid[i, j]` marks a
+    PmSM linking them; a skip scores 0. Maximizes total utility, then raw
+    score, then match count; exact ties prefer match, then precursor skip,
+    then cluster skip.
 
-    Returns a ``(k, 2)`` array of 0-based ``(precursor_row, cluster_col)`` matches.
+    Returns a ``(k, 2)`` array of ``(precursor_row, cluster_col)`` matches.
     """
     m, n = utility.shape
     dp_utility = np.zeros((m + 1, n + 1), dtype=np.float64)
@@ -293,15 +255,12 @@ def _dp_assign_groups(
     pmsm_index: np.ndarray,
     tol: float,
 ) -> np.ndarray:
-    """Run `_dp_assign` once per alignment group over flat, group-sorted arrays.
+    """Run `_dp_assign` per alignment group over flat, group-sorted arrays.
 
-    `group_start`/`group_end` delimit each group's rows in the (already
-    sorted-by-group) `precursor_order`/`cluster_order`/`assignment_utility`/
-    `raw_score`/`pmsm_index` arrays. Returns the selected `pmsm_index` values
-    (all groups concatenated). Several PmSMs may connect the same precursor
-    and cluster; keep the best utility/score in that cell, then the smallest
-    PmSM index for ties. Intensity normalization and cluster ordering have
-    already been computed from all candidates.
+    `group_start`/`group_end` delimit each group's rows. When several PmSMs
+    link the same precursor and cluster, the cell keeps the best
+    utility/score, then the smallest `pmsm_index`. Returns the selected
+    `pmsm_index` values of all groups.
     """
     out = np.empty(precursor_order.shape[0], dtype=pmsm_index.dtype)
     out_cnt = 0
@@ -314,7 +273,7 @@ def _dp_assign_groups(
         utility = np.zeros((m, n), dtype=np.float64)
         raw = np.zeros((m, n), dtype=np.float64)
         valid = np.zeros((m, n), dtype=np.bool_)
-        # unfilled cells are never read (only `valid` positions get selected), so 0 is a safe filler
+        # only `valid` cells are read
         pmsm_grid = np.zeros((m, n), dtype=pmsm_index.dtype)
         for k in range(s, e):
             i, j = p_local[k - s], c_local[k - s]
@@ -345,25 +304,17 @@ def _dp_assign_groups(
     return out[:out_cnt]
 
 
-# --------------------------------------------------------------------------- #
 # Polars-level pipeline
-# --------------------------------------------------------------------------- #
 
 
 def _compute_intensity_utilities(
     pmsm_df: pl.DataFrame, intensity_weight: float
 ) -> pl.DataFrame:
-    """Add ``_relative_log_intensity`` and ``_assignment_utility`` columns to
-    every PmSM row; ``score`` and ``median_intensity`` themselves are never
-    modified.
+    """Add ``_relative_log_intensity`` and ``_assignment_utility`` columns.
 
-    ``_relative_log_intensity`` expresses a PmSM's ``median_intensity`` as a
-    log2 ratio to the strongest candidate of the same
-    ``(run_index, precursor_index)`` -- always <= 0, and exactly 0 for that
-    strongest candidate. Because the denominator is always the precursor's
-    own maximum, absolute intensity differences between *different*
-    precursors never enter the utility (precursor-relative normalization,
-    not raw ``log2(median_intensity)``).
+    ``_relative_log_intensity`` is log2 of ``median_intensity`` over the
+    maximum for the same ``precursor_index`` (input is one run): <= 0, and 0
+    for the strongest candidate.
     """
     max_intensity = pl.col("median_intensity").max().over("precursor_index")
     relative_log_intensity = (
@@ -380,11 +331,8 @@ def _compute_intensity_utilities(
 
 
 def _find_alignment_groups(run_df: pl.DataFrame) -> pl.DataFrame:
-    """Return `run_df` with an added ``_alignment_group`` column: the
-    (dense, run-local) connected component id of the
-    ``precursor_index <-> cluster`` bipartite graph built from every PmSM row
-    in this run (plain union-find; `cluster` and `_alignment_group` are
-    distinct concepts and never mixed).
+    """Add ``_alignment_group``: the (non-dense) connected component id of the
+    run's precursor_index-cluster graph. Not the same as `cluster`.
     """
     precursor_keys = (
         run_df.select("precursor_index")
@@ -420,11 +368,9 @@ def _find_alignment_groups(run_df: pl.DataFrame) -> pl.DataFrame:
 
 
 def _prepare_assignment_problem(run_df: pl.DataFrame) -> pl.DataFrame:
-    """Build the per-alignment-group DP input: one row per PmSM candidate
-    edge, with `alignment_group`, `precursor_order` (``predicted_rt`` asc,
-    then `precursor_index` asc) and `cluster_order` (median `frame_num` asc,
-    then `cluster` asc) attached. Every precursor and cluster in the run is a
-    candidate; there is no preselection step.
+    """DP input: one row per PmSM with `alignment_group`, `precursor_order`
+    (``predicted_rt``, then `precursor_index`) and `cluster_order` (median
+    `frame_num`, then `cluster`), ranked within the group.
     """
     precursor_order_df = (
         run_df.select(["_alignment_group", "precursor_index", "predicted_rt"])
@@ -478,11 +424,9 @@ def _solve_monotonic_assignment(
     raw_score: np.ndarray,
     pmsm_index: np.ndarray,
 ) -> np.ndarray:
-    """Solve the joint order-preserving assignment DP independently per
-    alignment group. `alignment_group` must be sorted ascending so each
-    group's rows are contiguous (as produced by `_prepare_assignment_problem`).
+    """Solve the DP per alignment group and return the selected `pmsm_index`.
 
-    Returns the selected `pmsm_index` values (all groups concatenated).
+    `alignment_group` must be sorted so each group's rows are contiguous.
     """
     group_boundary = np.flatnonzero(np.diff(alignment_group)) + 1
     group_start = np.concatenate(([0], group_boundary)).astype(np.int64)
@@ -502,10 +446,8 @@ def _solve_monotonic_assignment(
 
 
 def _select_single_precursor_groups(edge_candidates: pl.DataFrame) -> np.ndarray:
-    """For alignment groups with exactly one candidate precursor, there is no
-    competing precursor to weigh against, so `score` is not used at all: the
-    winning PmSM is simply the one with the highest `median_intensity` (ties
-    broken by `score` desc, then `pmsm_index` asc, for determinism).
+    """Single-precursor groups: pick the highest `median_intensity` PmSM
+    (ties: higher `score`, then lower `pmsm_index`).
     """
     best = (
         edge_candidates.sort(
@@ -519,13 +461,10 @@ def _select_single_precursor_groups(edge_candidates: pl.DataFrame) -> np.ndarray
 
 
 def _assign_run(run_df: pl.DataFrame) -> np.ndarray:
-    """Run the full per-run pipeline (alignment groups -> ordering -> PmSM
-    selection) and return the selected `pmsm_index` values for this run.
+    """Return the selected `pmsm_index` values for one run.
 
-    Alignment groups with a single candidate precursor are selected directly
-    by `median_intensity` (see `_select_single_precursor_groups`); groups with
-    two or more precursors are solved with the full order-preserving joint DP
-    over `_assignment_utility` (`score + intensity_weight * relative_log_intensity`).
+    Single-precursor groups pick by intensity; the rest run the DP over
+    `_assignment_utility` (score + intensity_weight * relative log intensity).
     """
     run_df = _find_alignment_groups(run_df)
     edge_candidates = _prepare_assignment_problem(run_df)
@@ -601,30 +540,19 @@ def assign_pmsms(
     pmsm_df: pl.DataFrame,
     intensity_weight: float = 4.0,
 ) -> np.ndarray:
-    """Select, for **one run**, which precursors and PmSM clusters to use and
-    the one-to-one PmSM assignment between them, via a single order-preserving
-    dynamic program (see module docstring).
+    """Select PmSMs for one run (see module docstring).
 
     Args:
-        pmsm_df: PmSM table for a single run, with at least the columns in
-            `REQUIRED_COLUMNS`. Each ``(precursor_index, cluster)``
-            combination may contain multiple PmSMs at different centers.
-            Multi-precursor groups choose the best utility/score for each pair;
-            single-precursor groups retain the intensity-first selection rule.
-            Each `precursor_index`
-            must have exactly one `predicted_rt` value, and `median_intensity`
-            must be non-null, finite, and >= 0 for every row. Any
-            ``run_index``, ``observed_rt`` or ``is_decoy`` column, if
-            present, is ignored.
-        intensity_weight: Amount subtracted from `score` per 2x decrease in a
-            candidate's intensity relative to the strongest candidate of the
-            same precursor. ``0.0`` disables intensity entirely (raw-score-
-            only joint assignment). Must be ``>= 0``.
+        pmsm_df: PmSMs of a single run with `REQUIRED_COLUMNS`. A
+            ``(precursor_index, cluster)`` pair may have several PmSMs. Each
+            `precursor_index` needs one `predicted_rt`; `median_intensity` must
+            be finite and >= 0.
+        intensity_weight: Utility subtracted per 2x drop in intensity relative
+            to the precursor's strongest candidate. ``0.0`` makes the DP
+            raw-score only; single-precursor groups still pick by intensity.
 
     Returns:
-        The selected `pmsm_index` values for this run as a 1D NumPy array
-        (same dtype as the input `pmsm_index` column). Every value is unique
-        and present in `pmsm_df`. Empty input yields an empty array.
+        Unique selected `pmsm_index` values (input dtype).
     """
     if intensity_weight < 0:
         raise ValueError(f"intensity_weight must be >= 0, got {intensity_weight}")
@@ -641,29 +569,12 @@ def assign_pmsms_across_runs(
     scored_pmsm_df: pl.DataFrame,
     intensity_weight: float = 4.0,
 ) -> pl.DataFrame:
-    """Convenience wrapper that runs `assign_pmsms` for every run in
-    `scored_pmsm_df` (grouped by `run_index`).
+    """Run `assign_pmsms` per `run_index` and return the selected rows.
 
-    `median_intensity` is expected to already be a column of
-    `scored_pmsm_df` (computed once, per PmSM, at search time -- see
-    ``get_pmsm_median_intensity`` calls in the DIA/DDA search engines --
-    rather than recomputed here from XIC traces, which may not even be
-    persisted for every search pass). This is the only place in the
-    assignment pipeline that is aware of multiple runs; `assign_pmsms`
-    itself always processes a single run in isolation.
-
-    Args:
-        scored_pmsm_df: Scored PmSMs for one or more runs, with at least
-            `REQUIRED_COLUMNS` plus `run_index`.
-        intensity_weight: Forwarded to `assign_pmsms` (see its docstring).
-
-    Returns:
-        The subset of `scored_pmsm_df` rows selected by the per-run
-        assignment (all original columns preserved).
+    `median_intensity` comes from search time (``get_pmsm_median_intensity``);
+    XIC traces are not persisted for every pass, so it is not recomputed here.
     """
-    # a PmSM with no matched fragment at the RT center has no defined median
-    # (get_pmsm_median_intensity returns NaN for it); treat it as zero
-    # intensity rather than rejecting it in `_validate_pmsm_df`.
+    # NaN median (no matched fragment at the RT center) counts as zero intensity
     scored_pmsm_df = scored_pmsm_df.with_columns(
         pl.col("median_intensity").fill_nan(0.0).fill_null(0.0)
     )

@@ -173,7 +173,7 @@ class DDARun:
             .alias("peak_ed_idx"),
         )
 
-        # ── Pre-extract everything to numpy – eliminates per-iteration polars overhead ──
+        # numpy arrays avoid per-iteration polars overhead
         ms1_times = ms1_meta_df["time_in_seconds"].to_numpy()  # (n_ms1,)
         ms1_frame_nums = ms1_meta_df["frame_num"].to_numpy()  # (n_ms1,)
         n_ms1 = len(ms1_times)
@@ -185,7 +185,7 @@ class DDARun:
         ms2_peak_st = ms2_meta_df["peak_st_idx"].to_numpy()  # (n_ms2,)
         ms2_peak_ed = ms2_meta_df["peak_ed_idx"].to_numpy()  # (n_ms2,)
 
-        # Pre-allocate a max-size XIC buffer; reuse across iterations.
+        # max-size XIC buffer, reused across iterations
         xic_buf = np.zeros(n_ms1, dtype=np.float32)
 
         lc_peak_width_list: list = []
@@ -198,7 +198,6 @@ class DDARun:
             st = int(ms2_peak_st[i])
             ed = int(ms2_peak_ed[i])
 
-            # np.searchsorted instead of polars .search_sorted per iteration
             min_frame_idx = max(
                 int(np.searchsorted(ms1_times, rt - lc_win_radius, side="left")), 0
             )
@@ -211,7 +210,7 @@ class DDARun:
             min_frame_num = ms1_frame_nums[min_frame_idx]
             max_frame_num = ms1_frame_nums[max_frame_idx]
 
-            # Replace polars filter/group_by/agg with numpy masking + np.add.at
+            # XIC of MS1 peaks in the isolation m/z range within the RT window
             fn_slice = peak_fn[st:ed]
             ab_slice = peak_ab[st:ed]
             mask = (fn_slice >= min_frame_num) & (fn_slice <= max_frame_num)

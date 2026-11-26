@@ -24,10 +24,10 @@ MAX_THEO_INDEX = MAX_FRAGMENTS - 1
 
 @nb.njit(parallel=True, cache=True)
 def pmsm_median_intensity(xic_array, neighbor_window=0):
-    """Median of matched (>0), center-window fragment intensities per PmSM,
-    computed directly from an already-materialized ``(N, M, T)`` xic_array
-    (e.g. from `ResultsAggregator.get_xic_arrays`) -- already on absolute
-    intensity scale, so no rescaling is needed here.
+    """Per-PmSM median of positive fragment intensities near the center bin.
+
+    `xic_array`: (N, M, T) on absolute scale, e.g. from
+    `ResultsAggregator.get_xic_arrays`. NaN where no value is positive.
     """
     N, M, T = xic_array.shape
     center = T // 2
@@ -62,21 +62,13 @@ def get_pmsm_median_intensity(
     neighbor_window: int = 1,
     top_k: int = 6,
 ) -> np.ndarray:
-    """Median intensity of matched, center-window, monoisotopic, top-
-    ``QUANT_FRAGMENTS``-ranked fragment ion peaks, computed directly from
-    ``x_exp``'s peak annotations -- no separate XIC array needed. Shared by
-    DIA and DDA, since both build ``x_exp``/``x_rank`` with the same
-    conventions (time_index == 0 at the center; ``x_rank`` only set, and
-    always >= 0, for fragment peaks -- see `_set_x_exp`).
+    """Per-PmSM median intensity of monoisotopic top-ranked fragment peaks.
 
-    Restricting to ``0 <= x_rank < QUANT_FRAGMENTS`` keeps this consistent
-    with `get_xic_array`, which only ever holds those same ranked channels.
-
-    ``x_exp``'s AB column is normalized to a per-PmSM max of 1 (see
-    `_set_x_exp`'s fragment-ion scaling), so the median computed from it must
-    be rescaled by ``ms2_scale_arr`` (that same call's fragment-ion max ab,
-    as returned by `get_x_exp`) to recover the original intensity scale --
-    the same role ``ms1_scale_arr`` plays in `get_ms1_area`.
+    Uses peaks with ``0 <= x_rank < top_k`` and ``|time_index| <=
+    neighbor_window``, read from ``x_exp`` (DIA and DDA share the token
+    conventions; ``x_rank`` is set only for fragment peaks). The AB column is
+    normalized to a per-PmSM max of 1, so the median is rescaled by
+    ``ms2_scale_arr`` from `get_x_exp`. NaN where no peak qualifies.
     """
     N, M = x_exp.shape[:2]
     out = np.empty(N, dtype=np.float32)
@@ -104,9 +96,7 @@ def get_pmsm_median_intensity(
             med = vals[mid]
         else:
             med = (vals[mid - 1] + vals[mid]) * 0.5
-        # median of a positively-scaled sample == scale * median(sample),
-        # so rescaling once at the end is equivalent to (and cheaper than)
-        # rescaling every value before taking the median
+        # median(s * x) == s * median(x) for s > 0
         out[n] = med * ms2_scale_arr[n]
 
     return out
@@ -116,22 +106,13 @@ def get_pmsm_median_intensity(
 def get_xic_array(
     x_exp: np.ndarray, x_rank: np.ndarray, ms2_scale_arr: np.ndarray
 ) -> np.ndarray:
-    """Build a ``(QUANT_FRAGMENTS, RT_WINDOW_LEN)`` max-held fragment-intensity
-    array per PmSM directly from ``x_exp``, channel-indexed by ``x_rank``
-    (each matched fragment peak's theoretical-intensity rank, as set by
-    `delpi.search.dia.peak_token._set_x_exp` -- 0 == the library's most
-    intense predicted fragment for this precursor; -1 == not ranked).
+    """Per-PmSM fragment XICs, shape (N, QUANT_FRAGMENTS, RT_WINDOW_LEN).
 
-    Rank, not peak position, is required downstream: cross-run MaxLFQ
-    (`perform_lfq`) selects fragment channels once per precursor group and
-    reuses the same channel indices for every run's row, so the same
-    theoretical fragment must always land in the same channel.
-
-    ``x_exp``'s AB column is normalized to a per-PmSM max of 1, so the result
-    is rescaled by ``ms2_scale_arr`` (see `get_pmsm_median_intensity`) to
-    recover absolute intensity -- max-hold then scale is equivalent to scale
-    then max-hold for a positive per-row factor, so it's applied once per row
-    after the max-hold loop.
+    Each monoisotopic fragment peak goes to channel ``x_rank`` (library
+    intensity rank, 0 = most intense; -1 = unranked, skipped), max-held per
+    time bin, then rescaled to absolute intensity by ``ms2_scale_arr``.
+    Channels are ranks, not peak positions, because `perform_lfq` picks
+    channels once per precursor and uses them for every run.
     """
     N, M = x_exp.shape[:2]
     xic = np.zeros((N, QUANT_FRAGMENTS, RT_WINDOW_LEN), dtype=np.float32)
@@ -233,15 +214,13 @@ def _nb_build_L_b(
     min_ratio_count: int,
 ):
     n_pairs = n_runs * (n_runs - 1) // 2
-    # n_pairs/offsets are bounded by n_runs^2 and per-pair ratio counts by
-    # peptides-per-protein, both always well within int32 range
+    # pair counts and offsets are far below the int32 limit
     counts = np.zeros(n_pairs, dtype=np.int32)
 
     N = pep_idx.shape[0]
 
-    # per-run anchor target: max observed log-intensity for this run, over
-    # every row (not just paired ones) - used as a weak fallback reference
-    # for runs left disconnected from the rest by the pairwise ratios below
+    # weak anchor target per run: max log-intensity over all rows, so runs
+    # with no pairwise ratios stay solvable
     ref = np.full(n_runs, -np.inf, dtype=np.float32)
     for idx in range(N):
         r = run_idx[idx]
@@ -315,10 +294,8 @@ def _nb_build_L_b(
                     write[p] += 1
         start = end
 
-    # 3rd pass: median and accumulate L, b
-    # run pairs with fewer than min_ratio_count shared-precursor ratios are
-    # left disconnected (no L/b contribution) rather than weighted down, so
-    # connectivity - not weight - reflects how well-supported a pair is.
+    # 3rd pass: median ratio per pair, added to L, b with unit weight. Pairs
+    # with fewer than min_ratio_count ratios are left out, not down-weighted.
     L = np.zeros((n_runs, n_runs), dtype=np.float32)
     b = np.zeros(n_runs, dtype=np.float32)
 
@@ -364,25 +341,16 @@ def _nb_maxlfq_all_proteins(
     min_peptides_per_protein: int,
     min_ratio_count: int,
 ):
-    """
-    Vectorized MaxLFQ over all proteins in one compiled pass.
+    """MaxLFQ for all proteins in one compiled pass.
 
-    Inputs must already be sorted by (protein_idx, peptide_idx); run_idx is a
-    dense global run code aligned with the other arrays. For each protein,
-    `_nb_build_L_b` builds the run/peptide pairwise-ratio Laplacian `L`/`b`
-    plus a per-run anchor target `ref`; a single weakly-anchored linear
-    system is then solved for all of the protein's observed runs at once
-    (no per-connected-component splitting), and the result is rescaled once
-    to the protein's total observed intensity - all without any per-protein
-    Python/Polars round trip.
+    Inputs are sorted by (protein_idx, peptide_idx); run_idx is a dense global
+    run code. Index arrays are int32, logI/intensity float32. Per protein, one
+    weakly anchored system over the pairwise-ratio Laplacian (`_nb_build_L_b`)
+    is solved for all observed runs, and abundances are scaled to sum to the
+    protein's total intensity. Proteins with fewer than
+    `min_peptides_per_protein` peptides are skipped.
 
-    protein_idx/peptide_idx/run_idx are expected as int32 and logI/intensity
-    as float32 (dense codes/observed values never need 64-bit range or
-    precision here). The per-protein L/b/ref/solve buffers are promoted to
-    float64: mixing tiny anchor weights with unit-weight pairwise edges in
-    the same Laplacian is more ill-conditioned than the plain pairwise-only
-    system float32 previously handled, so the solve needs the extra
-    precision.
+    Returns (protein, run, abundance) arrays, one row per observed run.
     """
     N = protein_idx.shape[0]
 
@@ -448,15 +416,10 @@ def _nb_maxlfq_all_proteins(
             min_ratio_count,
         )
 
-        # solve all of the protein's observed runs as one global system rather
-        # than per connected component: splitting by component and rescaling
-        # each independently (old behavior) lets components with different
-        # precursor composition drift to an arbitrary relative scale. A weak
-        # anchor per run toward its own max observed log-intensity (`ref`)
-        # keeps the system solvable even when some runs are disconnected from
-        # the rest by the pairwise ratios, while barely perturbing runs that
-        # already have strong pairwise support (anchor_weight is tiny next to
-        # the unit-weight pairwise edges already accumulated on L's diagonal).
+        # One system for all runs: solving connected components separately
+        # lets them drift to arbitrary relative scales. The weak anchor toward
+        # `ref` keeps runs without pairwise ratios solvable and barely moves
+        # runs with pairwise support.
         L64 = L.astype(np.float64)
         b64 = b.astype(np.float64)
         ref64 = ref.astype(np.float64)
@@ -466,13 +429,10 @@ def _nb_maxlfq_all_proteins(
             L64[i, i] += w
             b64[i] += w * ref64[i]
 
-        # float64 solve: mixing tiny anchor weights with unit-weight pairwise
-        # edges is more ill-conditioned than the anchor-free system, so the
-        # extra precision (vs. the float32 arrays used everywhere else) matters
+        # float64: tiny anchor weights next to unit pairwise edges make the
+        # system ill-conditioned
         x = np.linalg.solve(L64, b64)
 
-        # rescale once for the whole protein (not once per component) so all
-        # of its runs share one consistent abundance scale
         max_x = np.max(x)
         relative = np.exp(x - max_x)
         rel_sum = np.sum(relative)
@@ -548,8 +508,7 @@ def _perform_lfq_numba(
     interference_z_threshold,
     epsilon,
 ):
-    # NaN (not 0) marks precursors left unquantified because too few
-    # fragments survived shape-correlation + interference filtering
+    # NaN, not 0, for precursors left with too few fragments
     all_ab_arr = np.full(all_xic_arr.shape[0], np.nan, dtype=np.float32)
 
     for i in nb.prange(precursor_index_arr.shape[0]):
@@ -577,8 +536,7 @@ def _perform_lfq_numba(
         )
 
         if final_indices.shape[0] == 0:
-            # too few fragments survived interference removal -> leave NaN
-            # for every run of this precursor, don't restore removed fragments
+            # NaN in every run; dropped fragments are not restored
             continue
 
         for j in range(sub_xic_arr.shape[0]):
@@ -607,23 +565,19 @@ def perform_lfq(
 ):
     """Per-precursor cross-run MS2 fragment-area quantification.
 
-    For every precursor group (delimited by `precursor_stop_index_arr` into
-    `all_xic_arr`'s rows): pick fragments via
-    `select_quantifiable_fragments_by_avg_corr` (aiming for `target_fragments`,
-    bounded by `max_fragments`/`corr_thresh`), drop any of those flagged by
-    `filter_fragments_by_cross_run_intensity` as cross-run intensity
-    interference, then sum the survivors' fixed-window areas per run.
+    For each precursor (its rows of `all_xic_arr`, delimited by
+    `precursor_stop_index_arr`), selects fragments with
+    `select_quantifiable_fragments_by_avg_corr`, drops cross-run intensity
+    outliers with `filter_fragments_by_cross_run_intensity`, and sums the
+    remaining fragments' areas per run. Returns one float32 per row.
 
-    `target_fragments` is only a *selection* target -- it never determines
-    whether a precursor's quantity is reported. That's `min_quant_fragments`'s
-    sole job: if fewer than `min_quant_fragments` fragments survive both
-    filters, every run of that precursor gets ``ms2_quantity = NaN`` instead
-    of quantifying from a shrunken (but still valid) fragment set.
+    `target_fragments` only steers selection; whether a quantity is reported
+    depends on `min_quant_fragments`: with fewer survivors, every run of the
+    precursor gets NaN.
 
-    Raises ``ValueError`` (before running any Numba code) if
-    `min_quant_fragments`/`target_fragments`/`max_fragments` aren't a
-    consistent ``min_quant_fragments <= target_fragments <= max_fragments``
-    chain, or if any other parameter is out of range.
+    Raises ValueError, before any numba code runs, unless
+    ``min_quant_fragments <= target_fragments <= max_fragments`` and the other
+    parameters are in range.
     """
     _validate_perform_lfq_params(
         target_fragments,

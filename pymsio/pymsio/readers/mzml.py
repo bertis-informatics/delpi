@@ -1,7 +1,4 @@
-"""
-Optimized mzML reader for DelPi with targeted performance improvements.
-Focus on the actual bottlenecks: XML parsing, zlib decompression, and peak processing.
-"""
+"""Streaming mzML (plain or gzipped) reader."""
 
 from pathlib import Path
 from typing import Optional, Union, List, Tuple, Dict, Any, Sequence
@@ -46,7 +43,7 @@ from pymsio.readers.ms_data import MassSpecData, PeakArray, META_SCHEMA
 
 _EMPTY_F32 = np.array([], dtype=np.float32)
 
-# PSI-MS CV accession codes used for single-pass, order-independent parsing.
+# PSI-MS CV accessions
 MS_LEVEL = "MS:1000511"
 SCAN_TIME = "MS:1000016"
 SCAN_WINDOW_LOWER = "MS:1000501"
@@ -68,12 +65,10 @@ MINUTE_UNIT = "UO:0000031"
 
 
 def fast_process_peaks(mz_arr, int_arr):
-    """Filter peaks with positive intensity. Returns (mz, ab) 1-D float32 arrays.
+    """Keep peaks with positive intensity, as (mz, ab) 1-D float32 arrays.
 
-    Vectorized with NumPy instead of an element-by-element JIT loop: this
-    avoids JIT dispatch overhead for the (typically small) per-spectrum
-    arrays and includes a fast path when every intensity is already
-    positive (the common case), which skips filtering entirely.
+    NumPy rather than a JIT loop: per-spectrum arrays are small, so JIT
+    dispatch overhead would dominate.
     """
 
     if mz_arr is None or int_arr is None or mz_arr.size == 0 or int_arr.size == 0:
@@ -103,11 +98,12 @@ def fast_process_peaks(mz_arr, int_arr):
 def binary_decode(
     binary_text: str, precision: int, compression: Optional[str] = None
 ) -> np.ndarray:
-    """Optimized binary decoding with zero-copy and memory efficiency."""
-    # Early validation to avoid exceptions in normal path. Avoid `.strip()`
-    # here: it would scan the (potentially large) base64 payload just to
-    # check for blankness; a2b_base64/pybase64 already tolerate embedded
-    # whitespace/newlines.
+    """Decode a base64, optionally zlib-compressed, binary array (zero-copy).
+
+    Returns an empty array on any decoding error.
+    """
+    # no `.strip()`: it would scan the whole payload, and both base64
+    # decoders tolerate whitespace
     dtype = np.float64 if precision == 64 else np.float32
     if not binary_text:
         return np.array([], dtype=dtype)
@@ -115,31 +111,22 @@ def binary_decode(
     try:
         binary_data = _b64decode(binary_text)
 
-        # Fast decompression with Intel ISA-L acceleration
         if compression == "zlib":
             binary_data = fast_zlib.decompress(binary_data)
 
-        # Zero-copy conversion using memoryview
         mv = memoryview(binary_data)
 
-        # Use frombuffer with determined dtype
         return np.frombuffer(mv, dtype=dtype)
     except Exception:
-        # Safe fallback for any decoding errors
         return np.array([], dtype=dtype)
 
 
 class MzmlFileReader(MassSpecFileReader):
-    """
-    Optimized mzML file reader.
+    """mzML reader that parses each <spectrum> in one pass by CV accession.
 
-    Performance improvements over a naive implementation:
-    - Single-pass, accession-based cvParam/binary-array extraction (no
-      repeated subtree traversal).
-    - Metadata-only parsing never decodes binary (m/z/intensity) arrays.
-    - ``load()`` decodes peaks and collects metadata in one XML pass.
-    - Peaks are written directly into preallocated flat float32 buffers
-      instead of building/concatenating many small per-spectrum arrays.
+    Metadata-only parsing never decodes the binary arrays, ``load()`` collects
+    metadata and peaks in one XML pass, and peaks go straight into
+    preallocated flat float32 buffers.
     """
 
     def __init__(
@@ -148,17 +135,10 @@ class MzmlFileReader(MassSpecFileReader):
         num_workers: int = 1,
         build_index: bool = False,
         index_regex: Optional[str] = None,
-        buffer_size_mb: int = 8,  # Configurable buffer size in MB
+        buffer_size_mb: int = 8,  # read buffer size
     ):
-        """Initialize optimized mzML reader.
-
-        Note:
-            ``num_workers`` is accepted for API compatibility but is
-            currently unused: parsing is single-threaded (streaming XML
-            parsing does not parallelize well due to sequential decompression
-            and element ordering). It is kept as a constructor argument so
-            existing callers/config do not break; it may be wired up to a
-            real parallel strategy in the future if profiling justifies it.
+        """``num_workers`` is accepted for API compatibility but unused:
+        streaming XML parsing with sequential decompression is single-threaded.
         """
         super().__init__(file_path, num_workers)
         self._meta_df: Optional[pl.DataFrame] = None
@@ -169,9 +149,7 @@ class MzmlFileReader(MassSpecFileReader):
         self._num_spectra: Optional[int] = None
         self._num_spectra_resolved = False
 
-    # ------------------------------------------------------------------
-    # Fast spectrum-count extraction
-    # ------------------------------------------------------------------
+    # spectrum count without a full parse
 
     _RE_OFFSET = re.compile(rb"<offset\b")
     _RE_INDEX_SPECTRUM = re.compile(
@@ -204,7 +182,7 @@ class MzmlFileReader(MassSpecFileReader):
     def _count_from_spectrum_list(self) -> Optional[int]:
         """Read enough of the file header to find <spectrumList count="...">."""
         try:
-            read_size = 1 << 16  # 64 KB — header is small
+            read_size = 1 << 16  # 64 KB; the header is small
             opener = self._open_file_handle
             with opener() as f:
                 head = f.read(read_size)
@@ -225,11 +203,9 @@ class MzmlFileReader(MassSpecFileReader):
         return self._num_spectra
 
     def _open_file_handle(self):
-        """Open file handle with configurable buffering for both regular and gzipped files."""
+        """Open the file, gzipped or not, with a ``buffer_size`` read buffer."""
         if self._is_gzipped:
-            # Wrap with a configurable large buffer (default 8MB). Uses
-            # isal's IGzipFile (much faster DEFLATE) when python-isal is
-            # installed, falling back to the stdlib gzip.GzipFile.
+            # isal's IGzipFile (much faster DEFLATE) if installed, else gzip
             return io.BufferedReader(
                 _GzipFile(self.file_path, "rb"), buffer_size=self.buffer_size
             )
@@ -238,34 +214,21 @@ class MzmlFileReader(MassSpecFileReader):
 
     @lru_cache(maxsize=128)
     def _get_local_tag(self, tag: str) -> str:
-        """Extract local tag name efficiently with caching and optimized string ops."""
-        # Fast path for tags without namespace (most common case)
+        """Tag name without its ``{namespace}`` prefix (cached)."""
         if "}" not in tag:
             return tag
-        # Optimized namespace extraction - only split once
         return tag.split("}", 1)[1]
 
     def _parse_spectrum_element(
         self, spectrum_elem, *, decode_peaks: bool
     ) -> Optional[Dict[str, Any]]:
-        """Parse a single <spectrum> element in a single traversal.
+        """Parse one <spectrum> element in a single ``iter()`` traversal.
 
-        cvParam values are matched by CV accession (not by ``name``, and not
-        by tracking which structural element we are nested inside) since the
-        accessions used here are each unique to their context in the mzML
-        schema. This lets metadata and (optionally) the mz/intensity binary
-        arrays be extracted in one pass over ``spectrum_elem.iter()``,
-        instead of the 3 separate subtree traversals the naive
-        implementation would need (one for metadata, one to collect
-        <binaryDataArray> elements, one per array for its cvParams/<binary>).
-
-        Binary arrays are identified by their array-type cvParam accession
-        (``MZ_ARRAY``/``INTENSITY_ARRAY``), not by assuming the first two
-        <binaryDataArray> elements are mz/intensity - so additional arrays
-        (e.g. ion mobility) before or between them are handled safely.
-
-        When ``decode_peaks`` is False, no base64/zlib decoding happens at
-        all - only cheap XML attribute access.
+        cvParams are matched by accession alone, without tracking the parent
+        element: each accession used here is unique to its context in the
+        mzML schema. The mz and intensity arrays are found by their array-type
+        accession, not position, so other arrays (e.g. ion mobility) may come
+        before or between them. With ``decode_peaks=False`` nothing is decoded.
         """
         if spectrum_elem is None:
             return None
@@ -289,7 +252,7 @@ class MzmlFileReader(MassSpecFileReader):
         intensity_precision = 32
         intensity_compression = None
 
-        # State for whichever <binaryDataArray> we're currently inside.
+        # state of the current <binaryDataArray>
         cur_array_type: Optional[str] = None
         cur_precision = 32
         cur_compression: Optional[str] = None
@@ -369,7 +332,6 @@ class MzmlFileReader(MassSpecFileReader):
 
             elif tag == "binaryDataArray":
                 if decode_peaks and arrays_found < 2:
-                    # Reset per-array state for this new <binaryDataArray>.
                     cur_array_type = None
                     cur_precision = 32
                     cur_compression = None
@@ -390,8 +352,7 @@ class MzmlFileReader(MassSpecFileReader):
                         arrays_found += 1
                     cur_array_type = None
                     # binaryDataArrayList is the last child of <spectrum> in
-                    # valid mzML, so once both required arrays are found
-                    # there is nothing else left to extract.
+                    # valid mzML, so nothing is left once both arrays are found
                     if arrays_found >= 2:
                         break
 
@@ -449,13 +410,11 @@ class MzmlFileReader(MassSpecFileReader):
     ) -> Tuple[
         List[Dict[str, Any]], List[Tuple[Optional[np.ndarray], Optional[np.ndarray]]]
     ]:
-        """Single streaming pass over all <spectrum> elements.
+        """Stream once over all <spectrum> elements.
 
-        Args:
-            collect_meta: collect one metadata row per spectrum.
-            decode_peaks: decode and return the *raw* (not yet filtered or
-                cast to float32) mz/intensity arrays for each spectrum. When
-                ``False``, no base64/zlib decoding happens at all.
+        Returns ``(meta_rows, raw_peaks)``, each filled only if `collect_meta`
+        or `decode_peaks` is set. raw_peaks holds each spectrum's decoded
+        mz/intensity arrays, not yet filtered or cast to float32.
         """
         meta_rows: List[Dict[str, Any]] = []
         raw_peaks: List[Tuple[Optional[np.ndarray], Optional[np.ndarray]]] = []
@@ -498,7 +457,7 @@ class MzmlFileReader(MassSpecFileReader):
 
                 idx += 1
 
-                # Efficient memory cleanup
+                # free the parsed element
                 elem.clear()
                 parent = elem.getparent() if hasattr(elem, "getparent") else None
                 if parent is not None:
@@ -536,9 +495,8 @@ class MzmlFileReader(MassSpecFileReader):
     def _build_peak_array(
         raw_peaks: List[Tuple[Optional[np.ndarray], Optional[np.ndarray]]],
     ) -> Tuple[np.ndarray, np.ndarray, PeakArray]:
-        """Filter+cast raw per-spectrum (mz, intensity) arrays directly into
-        one preallocated flat float32 ``PeakArray``, instead of building one
-        ``PeakArray`` per spectrum and concatenating them afterwards.
+        """Copy the positive-intensity peaks of all spectra into one
+        preallocated flat float32 ``PeakArray``.
 
         Returns ``(peak_start, peak_stop, peaks)``.
         """
@@ -552,8 +510,7 @@ class MzmlFileReader(MassSpecFileReader):
             mask = int_arr > 0
             if mask.all():
                 counts[i] = int_arr.size
-                # No filtering needed later; leave masks[i] as None as a
-                # sentinel meaning "take everything".
+                # masks[i] stays None: take every peak
             else:
                 masks[i] = mask
                 counts[i] = int(mask.sum())
@@ -581,12 +538,7 @@ class MzmlFileReader(MassSpecFileReader):
         return peak_start, peak_stop, PeakArray(mz_out, ab_out)
 
     def load(self, progress=None) -> MassSpecData:
-        """Load complete mass spectrometry data.
-
-        Metadata and peaks are collected in the same XML pass when metadata
-        has not already been loaded (i.e. this does not re-parse the file
-        just because ``get_meta_df()`` wasn't called first).
-        """
+        """Load all spectra; uncached metadata is read in the same XML pass."""
         need_meta = self._meta_df is None
         meta_rows, raw_peaks = self._parse_spectra(
             collect_meta=need_meta, decode_peaks=True, progress=progress
@@ -628,7 +580,6 @@ class MzmlFileReader(MassSpecFileReader):
                     elem.clear()
                     continue
 
-                # Parse exactly one spectrum here
                 spectrum_data = self._parse_spectrum_element(elem, decode_peaks=True)
                 elem.clear()
                 parent = getattr(elem, "getparent", lambda: None)()

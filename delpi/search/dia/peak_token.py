@@ -162,9 +162,8 @@ def _set_x_exp(
                 x_exp[counter, EXP_REV_CLEAVAGE_INDEX_IDX] = theo_rev_cleavage_index
                 x_exp[counter, EXP_TIME_INDEX_IDX] = time_index
 
-                # theoretical-intensity rank of this fragment (0 = library's most
-                # intense predicted fragment for this precursor), for any
-                # isotope; get_xic_array filters to monoisotopic via x_exp itself
+                # library intensity rank of the fragment (0 = most intense), set
+                # for every isotope; get_xic_array filters isotopes
                 if (x_rank is not None) and (is_precursor == False):
                     x_rank[counter] = num_fragments - theo_i - 1
 
@@ -283,7 +282,6 @@ def get_x_exp(
         x_rank=x_rank,
     )
 
-    # ms2_scale is the fragment-ion max ab used to rescale x_exp's AB column
-    # (normalized to max 1) back to absolute intensity -- see get_ms1_area and
-    # get_pmsm_median_intensity, which are the only consumers of ms2_scale.
+    # ms1_scale / ms2_scale: max ab of the MS1 precursor / fragment peaks, to undo
+    # the AB normalization (get_ms1_area / get_xic_array, get_pmsm_median_intensity)
     return x_exp[:counter], ms1_scale, ms2_scale

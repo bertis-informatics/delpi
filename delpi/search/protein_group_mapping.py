@@ -1,31 +1,18 @@
 """Peptide-level greedy parsimony protein grouping.
 
-Design overview
----------------
-Evidence unit
-    ``peptide_index`` (stripped peptide sequence identifier, shared across
-    charge states / modifications).
+Evidence unit is ``peptide_index`` (stripped sequence, shared across charge
+states and modifications).
 
-Pipeline
-    1. Build equivalence classes of proteins that share the *exact same*
-       observed peptide set.  One representative per class enters greedy
-       selection; all class members are tracked alongside it.
-    2. Run greedy set-cover (Numba) on the equivalence-class representatives.
-       Ties are broken deterministically by a BLAKE2b digest of the FASTA
-       accession – independent of FASTA row order, protein_index, or Python's
-       randomised hash().
-    3. Assemble *group-centric* output: each selected equivalence class becomes
-       exactly one ``ProteinGroupingResult`` group.  A shared peptide maps to
-       *all* groups that contain it (many-to-many), never causing independent
-       groups to be merged.
+1. Proteins with the same observed peptide set form an equivalence class; one
+   representative per class enters greedy selection.
+2. Greedy set cover (Numba) over representatives. Ties are broken by a BLAKE2b
+   digest of the FASTA accession, so results do not depend on FASTA order,
+   protein_index or Python's randomised hash().
+3. Each selected class becomes one group. A shared peptide maps to every group
+   containing it; groups are never merged.
 
-Grouping types
-    ``lead_only``
-        Each group contains only the selected representative protein.
-    ``parsimonious_grouping`` (default)
-        Each group contains all proteins whose observed peptide set is
-        *exactly identical* to the selected representative's set (i.e. all
-        members of the same equivalence class).
+``lead_only`` groups hold only the representative; ``parsimonious_grouping``
+(default) groups hold the whole equivalence class.
 """
 
 import hashlib
@@ -36,10 +23,6 @@ import numba as nb
 import numpy as np
 import polars as pl
 
-# ---------------------------------------------------------------------------
-# Public result containers
-# ---------------------------------------------------------------------------
-
 
 @dataclass
 class ProteinGroup:
@@ -48,16 +31,14 @@ class ProteinGroup:
     Attributes
     ----------
     group_id:
-        Stable integer identifier for this group within one inference run.
+        Group id, stable within one inference run.
     lead_protein_index:
-        Original ``protein_index`` of the selected parsimony lead.
+        Original ``protein_index`` of the parsimony lead.
     member_protein_indices:
-        Sorted list of all ``protein_index`` values belonging to this group.
-        For ``lead_only`` this is always ``[lead_protein_index]``.
-        For ``parsimonious_grouping`` this includes every protein whose
-        observed peptide set equals the lead's set exactly.
+        Sorted ``protein_index`` values; ``[lead_protein_index]`` for
+        ``lead_only``, the whole equivalence class otherwise.
     peptide_indices:
-        Sorted unique list of ``peptide_index`` values observed for this group.
+        Sorted unique ``peptide_index`` values of this group.
     """
 
     group_id: int
@@ -68,28 +49,24 @@ class ProteinGroup:
 
 @dataclass
 class ProteinGroupingResult:
-    """Full output of the protein-grouping algorithm.
+    """Output of protein grouping.
 
     Attributes
     ----------
     groups:
-        One row per inferred protein group.
-        Columns: ``group_id``, ``master_protein_index``, ``master_protein``,
-        ``protein_group_indices`` (list[int]), ``protein_group`` (str),
-        ``peptide_indices`` (list[int]).
+        One row per group: ``group_id``, ``master_protein_index``,
+        ``master_protein``, ``protein_group_indices`` (list[int]),
+        ``protein_group`` (str), ``peptide_indices`` (list[int]).
     peptide_to_group:
-        One row per **(peptide_index, group_id)** edge.  A shared peptide
-        appears once per group that covers it.
-        Columns: ``peptide_index``, ``group_id``, ``master_protein_index``.
+        One row per (peptide_index, group_id) edge: ``peptide_index``,
+        ``group_id``, ``master_protein_index``.
     """
 
     groups: pl.DataFrame
     peptide_to_group: pl.DataFrame
 
 
-# ---------------------------------------------------------------------------
-# Step 1 – CSR graph construction
-# ---------------------------------------------------------------------------
+# step 1: CSR graph
 
 
 def _build_csr(
@@ -98,17 +75,12 @@ def _build_csr(
 ) -> Tuple[
     np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, int
 ]:
-    """Build CSR adjacency lists for the bipartite protein <-> peptide graph.
-
-    All protein and peptide identifiers are remapped to dense local indices
-    (0..P-1, 0..N-1) so that the Numba kernel sees compact integer arrays.
-    The mapping back to original ids is provided by the returned
-    ``protein_ids`` / ``peptide_ids`` arrays.
+    """Build CSR adjacency for the protein-peptide graph on dense local indices.
 
     Returns
     -------
     protein_ids, peptide_ids
-        Sorted unique original ids; local_index → original_id.
+        Sorted unique original ids; local index -> original id.
     prot_offsets, prot_peptides
         CSR for protein → peptides.
     pep_offsets, pep_proteins
@@ -147,9 +119,7 @@ def _build_csr(
     )
 
 
-# ---------------------------------------------------------------------------
-# Step 2 – Equivalence classes
-# ---------------------------------------------------------------------------
+# step 2: equivalence classes
 
 
 def _build_equivalence_classes(
@@ -162,14 +132,12 @@ def _build_equivalence_classes(
     Returns
     -------
     repr_to_members
-        Mapping from representative local protein index → frozenset of all
-        local protein indices with the same peptide set (including the
-        representative itself).
+        Representative local index -> all local indices with the same peptide
+        set (including itself).
     protein_to_repr
-        Mapping from every local protein index → its representative.
+        Local protein index -> its representative.
     repr_arr
-        Sorted array of representative local protein indices (the nodes that
-        enter greedy selection).
+        Sorted representative local indices.
     """
     sig_to_repr: Dict[FrozenSet[int], int] = {}
     repr_to_members: Dict[int, FrozenSet[int]] = {}
@@ -192,24 +160,14 @@ def _build_equivalence_classes(
     return repr_to_members, protein_to_repr, repr_arr
 
 
-# ---------------------------------------------------------------------------
-# Step 3 – Deterministic tie-break ranks
-# ---------------------------------------------------------------------------
+# step 3: deterministic tie-break ranks
 
 
 def _blake2b_rank(fasta_ids: np.ndarray) -> np.ndarray:
-    """Compute a stable integer rank for each FASTA accession.
+    """Rank FASTA accessions by BLAKE2b digest (then accession bytes).
 
-    The rank is derived from the BLAKE2b digest of each accession string so
-    that it is independent of FASTA row order, ``protein_index``, target/
-    entrapment labels, and Python's randomised built-in ``hash()``.
-
-    Lower rank = preferred in tie-breaking (wins greedy selection when
-    uncovered-peptide counts are equal).
-
-    Implementation note: sorting is done on (digest_bytes, accession_bytes)
-    tuples using Python's built-in ``sorted()`` with a key function to avoid
-    NumPy's dtype restrictions on object arrays.
+    Independent of FASTA order, ``protein_index``, target/entrapment labels and
+    Python's ``hash()``. Lower rank wins ties.
     """
     n = len(fasta_ids)
     if n == 0:
@@ -219,7 +177,6 @@ def _blake2b_rank(fasta_ids: np.ndarray) -> np.ndarray:
         hashlib.blake2b(str(fid).encode(), digest_size=8).digest() + str(fid).encode()
         for fid in fasta_ids
     ]
-    # Use Python sorted (stable, works on bytes) to get the sorted order
     order = sorted(range(n), key=lambda i: keys[i])
     rank = np.empty(n, dtype=np.int64)
     for out_rank, orig_idx in enumerate(order):
@@ -227,9 +184,7 @@ def _blake2b_rank(fasta_ids: np.ndarray) -> np.ndarray:
     return rank
 
 
-# ---------------------------------------------------------------------------
-# Step 4 – Numba greedy set cover on equivalence-class representatives
-# ---------------------------------------------------------------------------
+# step 4: greedy set cover on representatives
 
 
 @nb.njit(cache=True)
@@ -245,36 +200,29 @@ def _greedy_parsimony(
     priority_score: np.ndarray,
     num_peptides: int,
 ) -> np.ndarray:
-    """Greedy set cover over the equivalence-class representative proteins.
+    """Greedy set cover over equivalence-class representatives.
 
-    Selection criterion (lexicographic, lower is better for rank):
-        1. Maximize currently uncovered peptide count.
-        2. Maximize ``priority_score`` (e.g. protein evidence; 0 if unused).
-        3. Minimize ``tie_break_rank`` (BLAKE2b-derived; independent of DB order).
+    Each step picks the max uncovered peptide count, then max
+    ``priority_score`` (0 if unused), then min ``tie_break_rank``.
 
     Parameters
     ----------
     repr_indices:
         Local protein indices of the equivalence-class representatives.
-    prot_offsets, prot_peptides:
-        CSR: protein → peptides (over the *full* protein set).
-    pep_offsets, pep_proteins:
-        CSR: peptide → proteins (over the *full* protein set).
+    prot_offsets, prot_peptides, pep_offsets, pep_proteins:
+        CSR adjacency over all proteins.
     repr_to_repr_local:
-        Maps each global local protein index to its position in ``repr_indices``
-        (or -1 if it is not a representative).
+        Local protein index -> position in ``repr_indices``, -1 if not a
+        representative.
     uncovered_counts:
-        Mutable working copy of the uncovered-peptide count per representative.
+        Uncovered-peptide count per representative; modified in place.
     tie_break_rank, priority_score:
-        Per-representative arrays aligned with ``repr_indices``.
-    num_peptides:
-        Total number of distinct local peptide indices.
+        Aligned with ``repr_indices``.
 
     Returns
     -------
     selected_repr_positions : np.ndarray
-        Positions in ``repr_indices`` of the selected representatives, in
-        greedy-selection order.
+        Positions in ``repr_indices``, in selection order.
     """
     n_repr = repr_indices.shape[0]
     covered = np.zeros(num_peptides, dtype=nb.boolean)
@@ -282,7 +230,6 @@ def _greedy_parsimony(
     n_selected = 0
 
     for _ in range(n_repr):
-        # Lexicographic argmax: (uncovered_count, priority_score, -tie_break_rank)
         best_pos = -1
         best_count = np.int64(0)
         best_prio = priority_score[0] - priority_score[0]  # typed zero
@@ -310,7 +257,7 @@ def _greedy_parsimony(
         selected[n_selected] = best_pos
         n_selected += 1
 
-        # Mark all newly covered peptides and update counts of affected reprs
+        # cover the lead's peptides and decrement counts of affected reprs
         p_global = repr_indices[best_pos]
         for e in range(prot_offsets[p_global], prot_offsets[p_global + 1]):
             pep = prot_peptides[e]
@@ -325,9 +272,7 @@ def _greedy_parsimony(
     return selected[:n_selected]
 
 
-# ---------------------------------------------------------------------------
-# Step 5 – Assemble group-centric output
-# ---------------------------------------------------------------------------
+# step 5: assemble output
 
 
 def _assemble_groups(
@@ -341,31 +286,20 @@ def _assemble_groups(
     fasta_id_map: Dict[int, str],
     grouping_type: Literal["lead_only", "parsimonious_grouping"],
 ) -> "ProteinGroupingResult":
-    """Build a ProteinGroupingResult from the greedy-selected representatives.
+    """Build a ProteinGroupingResult, one group per selected representative.
 
-    Each selected equivalence-class representative produces *exactly one*
-    protein group.  The many-to-many peptide→group mapping is preserved: a
-    peptide shared by two independent groups appears twice in
-    ``peptide_to_group``, once per group.
+    A peptide shared by several groups gets one ``peptide_to_group`` row per
+    group.
 
     Parameters
     ----------
-    selected_repr_positions:
-        Positions in ``repr_indices`` chosen by greedy selection.
-    repr_indices:
-        Local protein indices of all equivalence-class representatives.
     repr_to_members:
-        Mapping from representative local index → frozenset of all member
-        local protein indices (used only for ``parsimonious_grouping``).
-    prot_offsets, prot_peptides:
-        CSR protein → peptides (local index space).
+        Representative local index -> member local indices (used only for
+        ``parsimonious_grouping``).
     protein_ids, peptide_ids:
-        Dense-to-original id lookup arrays.
+        Local-to-original id lookup.
     fasta_id_map:
-        Mapping from original protein_index → FASTA accession string.
-    grouping_type:
-        ``"lead_only"``  – group members = {lead only}.
-        ``"parsimonious_grouping"`` – group members = entire equivalence class.
+        Original protein_index -> FASTA accession.
     """
     groups_rows: List[dict] = []
     pep2grp_peptide: List[int] = []
@@ -378,7 +312,6 @@ def _assemble_groups(
         lead_local = int(repr_indices[pos])
         lead_orig = int(protein_ids[lead_local])
 
-        # Determine group member original protein indices
         if grouping_type == "parsimonious_grouping":
             member_locals = sorted(repr_to_members[lead_local])
         else:
@@ -392,7 +325,6 @@ def _assemble_groups(
             for e in range(prot_offsets[lead_local], prot_offsets[lead_local + 1])
         )
 
-        # FASTA accessions
         member_accessions = sorted(
             fasta_id_map.get(orig, str(orig)) for orig in member_orig
         )
@@ -409,7 +341,6 @@ def _assemble_groups(
             }
         )
 
-        # Many-to-many peptide → group edges (deduplicated)
         for pep_o in pep_orig:
             key = (pep_o, group_id)
             if key not in seen_pep_group:
@@ -444,9 +375,7 @@ def _assemble_groups(
     )
 
 
-# ---------------------------------------------------------------------------
-# Top-level inference function (returns ProteinGroupingResult)
-# ---------------------------------------------------------------------------
+# top-level inference
 
 
 def infer_protein_groups(
@@ -458,29 +387,18 @@ def infer_protein_groups(
     ] = "parsimonious_grouping",
     priority_score: Optional[np.ndarray] = None,
 ) -> "ProteinGroupingResult":
-    """Run full peptide-level greedy parsimony protein inference.
+    """Peptide-level greedy parsimony protein inference.
 
     Parameters
     ----------
     peptide_index_arr, protein_index_arr:
-        Parallel arrays of (peptide_index, protein_index) edges after
-        exploding the per-precursor protein list.  One edge = one observed
-        peptide for one protein.
+        Parallel arrays of observed (peptide_index, protein_index) edges.
     fasta_ids:
-        Array of FASTA accession strings, indexed by *original*
-        ``protein_index`` (i.e. ``fasta_ids[protein_index]`` → accession).
-        Must cover every protein_index present in ``protein_index_arr``.
-    grouping_type:
-        ``"lead_only"`` or ``"parsimonious_grouping"`` (default).
+        FASTA accessions indexed by original ``protein_index``; must cover
+        every protein in ``protein_index_arr``.
     priority_score:
-        Optional float array indexed by *original* ``protein_index``.
-        Higher score = preferred in greedy tie-breaking.  When ``None``,
-        all proteins receive score 0.
-
-    Returns
-    -------
-    ProteinGroupingResult
-        See the dataclass docstring for the output schema.
+        Optional, indexed by original ``protein_index``; higher wins greedy
+        ties. ``None`` means all 0.
     """
     if len(peptide_index_arr) == 0:
         empty_groups = pl.DataFrame(
@@ -513,21 +431,19 @@ def infer_protein_groups(
         num_peptides,
     ) = _build_csr(peptide_index_arr, protein_index_arr)
 
-    # Build equivalence classes (initial representative = lowest local index)
+    # initial representative = lowest local index
     repr_to_members, _protein_to_repr, repr_arr = _build_equivalence_classes(
         prot_offsets, prot_peptides, num_proteins
     )
     n_repr = len(repr_arr)
 
-    # Build fasta_id lookup over original protein indices
     fasta_id_map: Dict[int, str] = {
         int(protein_ids[local]): str(fasta_ids[protein_ids[local]])
         for local in range(num_proteins)
     }
 
-    # Re-elect representatives using BLAKE2b rank so that the choice is
-    # independent of protein_index / FASTA row order.
-    # For each equivalence class, pick the member with the smallest rank.
+    # re-elect each class's representative by BLAKE2b rank so it does not
+    # depend on protein_index / FASTA order
     new_repr_to_members: Dict[int, FrozenSet[int]] = {}
     for old_repr, members in repr_to_members.items():
         member_locals = sorted(members)
@@ -544,7 +460,6 @@ def infer_protein_groups(
     repr_arr = np.array(sorted(repr_to_members.keys()), dtype=np.int64)
     n_repr = len(repr_arr)
 
-    # Tie-break ranks over original protein ids of representatives
     repr_orig_ids = np.array(
         [int(protein_ids[int(r)]) for r in repr_arr], dtype=np.int64
     )
@@ -554,7 +469,6 @@ def infer_protein_groups(
     )
     tie_break_rank = _blake2b_rank(repr_fasta_ids)
 
-    # Priority scores aligned to repr_arr
     if priority_score is not None:
         prio_arr = np.array(
             [float(priority_score[int(protein_ids[int(r)])]) for r in repr_arr],
@@ -563,13 +477,12 @@ def infer_protein_groups(
     else:
         prio_arr = np.zeros(n_repr, dtype=np.float64)
 
-    # Initial uncovered counts per representative
     uncovered_counts = np.array(
         [int(prot_offsets[int(r) + 1] - prot_offsets[int(r)]) for r in repr_arr],
         dtype=np.int64,
     )
 
-    # repr_to_repr_local: maps each local protein index → position in repr_arr (-1 if not a repr)
+    # local protein index -> position in repr_arr, -1 if not a representative
     repr_to_repr_local = np.full(num_proteins, -1, dtype=np.int64)
     for pos, r in enumerate(repr_arr):
         repr_to_repr_local[int(r)] = pos
@@ -600,9 +513,7 @@ def infer_protein_groups(
     )
 
 
-# ---------------------------------------------------------------------------
-# Public peptide-to-group mapping wrapper
-# ---------------------------------------------------------------------------
+# public wrapper
 
 
 def protein_group_mapping(
@@ -612,13 +523,10 @@ def protein_group_mapping(
         "lead_only", "parsimonious_grouping"
     ] = "parsimonious_grouping",
 ) -> pl.DataFrame:
-    """Map confident peptide identifications to protein groups.
+    """Map peptides to protein groups, targets and decoys separately.
 
-    This is the public API consumed by the protein grouping stage. It processes
-    target and decoy peptides independently (preserving the existing
-    target/decoy split behaviour) and returns a flat DataFrame with one row
-    per **(peptide_index, group_id)** edge so that shared peptides correctly
-    appear in multiple groups.
+    Returns one row per (peptide_index, group_id) edge, so shared peptides
+    appear in every group that contains them.
 
     Parameters
     ----------
@@ -636,19 +544,13 @@ def protein_group_mapping(
     pl.DataFrame
         Columns: ``peptide_index``, ``group_id``, ``protein_group`` (str),
         ``master_protein`` (str), ``master_protein_index`` (int).
-
-        One row per (peptide_index, group_id) edge.  A peptide shared by two
-        independent protein groups produces two rows with distinct ``group_id``
-        values and therefore distinct ``protein_group`` values.
     """
-    # Build a fast protein_index -> fasta_id lookup
     fasta_lookup: Dict[int, str] = dict(
         zip(
             fasta_id_df["protein_index"].to_list(),
             fasta_id_df["fasta_id"].to_list(),
         )
     )
-    # Max protein_index for array indexing
     if len(fasta_id_df) == 0:
         fasta_arr = np.array([], dtype=object)
     else:
@@ -680,7 +582,7 @@ def protein_group_mapping(
         if result.peptide_to_group.is_empty():
             continue
 
-        # Shift group_ids so they don't collide across target/decoy halves
+        # keep group_ids unique across target/decoy
         p2g = result.peptide_to_group.with_columns(
             (pl.col("group_id") + group_id_offset).alias("group_id")
         )
@@ -689,7 +591,6 @@ def protein_group_mapping(
         )
         group_id_offset += result.groups.height
 
-        # Attach protein_group / master_protein strings to the edge table
         p2g = p2g.join(
             grp.select("group_id", "protein_group", "master_protein"),
             on="group_id",

@@ -35,15 +35,15 @@ def get_matched_peak_cutoff(pept_len: int):
 
 @nb.njit(nogil=True, fastmath=True, cache=True)
 def _assign_spectra_to_bins(rt_window_center, rt_window_half, rt_bin_count, rt_array):
-    """
-    For each of `rt_bin_count` bins, choose the spectrum with the highest score
-    whose RT falls inside [centre ± rt_window_half].
-    Returns uint32 indices; 0xFFFFFFFF means “no spectrum in that bin”.
+    """Pick one spectrum per RT bin.
+
+    `rt_bin_count` bins are evenly spaced over [center ± rt_window_half]; each
+    takes the spectrum (sorted `rt_array`) closest to its center, within half a
+    bin. Returns int32 indices into `rt_array`; -1 = no spectrum in that bin.
     """
     n_spec = rt_array.shape[0]
     assigned = np.full(rt_bin_count, -1, dtype=np.int32)
 
-    # Edge-case: no spectra or bins
     if n_spec == 0 or rt_bin_count <= 0:
         return assigned
 
@@ -54,7 +54,7 @@ def _assign_spectra_to_bins(rt_window_center, rt_window_half, rt_bin_count, rt_a
             assigned[0] = i
         return assigned
 
-    # Bin spacing so the last bin's centre hits max(rt_array)
+    # last bin's center is at rt_window_center + rt_window_half
     # max_rt = rt_array[n_spec - 1]
     bin_size = (rt_window_half * 2) / (rt_bin_count - 1)
     bin_half = bin_size * 0.5
@@ -68,7 +68,7 @@ def _assign_spectra_to_bins(rt_window_center, rt_window_half, rt_bin_count, rt_a
         for i in range(left, right):
             rt_diff = np.abs(centre - rt_array[i])
             if rt_diff < best_rt_diff[b]:
-                assigned[b] = i  # cast to uint32
+                assigned[b] = i
                 best_rt_diff[b] = rt_diff
 
     return assigned
@@ -207,18 +207,10 @@ def _find_ms2_spectra(
     min_peak_count: int,
     topk: int = 10,
 ) -> np.ndarray:
-    """Find MS2 spectra with at least `min_peak_count` matched peaks
+    """Find MS2 spectra with at least `min_peak_count` matched fragment peaks.
 
-    Args:
-        ms2_meta_df (MetaContainer): _description_
-        ms2_peak_df (PeakContainer): _description_
-        st_indices (np.ndarray): _description_
-        ed_indices (np.ndarray): _description_
-        ms2_frame_indexes (np.ndarray): _description_
-        min_peak_count (int): _description_
-
-    Returns:
-        np.ndarray: _description_
+    Returns positions in `ms2_frame_indexes` (uint32), limited to the `topk`
+    spectra with the most matched peaks.
     """
 
     ms2_frame_num_to_index = ms2_meta_df.frame_num_to_index_arr
@@ -298,7 +290,7 @@ def find_peak_groups(
         dtype=np.uint32,
     )
 
-    #### pre-allocated arrays for peak groups
+    # per-precursor peak group arrays, filled in the prange loop
     frame_num_results = [np.empty(0, dtype=np.uint32)] * num_precursors
     peak_count_results = [np.empty(0, dtype=np.uint16)] * num_precursors
 
@@ -320,7 +312,7 @@ def find_peak_groups(
             min_peak_count, get_matched_peak_cutoff(theo_peaks.sequence_length)
         )
 
-        ## 1. Find candidate MS2 spectra
+        # 1. candidate MS2 spectra whose isolation window covers the precursor
         ms2_frame_indexes = np.where(
             (
                 ms2_meta_df.isolation_min_mz_arr
@@ -337,7 +329,7 @@ def find_peak_groups(
         if ms2_frame_indexes.shape[0] < 1:
             continue
 
-        ## 2. Peak matching
+        # 2. fragment peak matching
         ms2_st, ms2_ed = find_peak_index(
             ms2_peak_df.mz_arr, theo_peaks.fragment_mz_arr.flatten(), ms2_mass_tol
         )
@@ -362,7 +354,6 @@ def find_peak_groups(
         pc_ms2_st, pc_ms2_ed = find_peak_index(
             ms2_peak_df.mz_arr, theo_peaks.precursor_mz_arr, ms2_mass_tol
         )
-        # store matching results
         fragment_ms2_indices[precursor_index0, 0, : ms2_st.size] = ms2_st
         fragment_ms2_indices[precursor_index0, 1, : ms2_ed.size] = ms2_ed
         precursor_ms1_indices[precursor_index0, 0] = pc_ms1_st
@@ -370,7 +361,7 @@ def find_peak_groups(
         precursor_ms2_indices[precursor_index0, 0] = pc_ms2_st
         precursor_ms2_indices[precursor_index0, 1] = pc_ms2_ed
 
-        ## 3. Generate RT groups
+        # 3. RT bins around each selected spectrum
         (
             frame_num_arr,
             frame_num_key_arr,

@@ -34,14 +34,12 @@ def _quick_match(
     fragment_mz_tol: float = 10.0,
     # similarity_cutoff=0.8,
 ):
-    """Quick-match a (possibly strict subset of) local precursor indices.
+    """Best frame and quick score for each precursor in `precursor_index0_arr`.
 
-    ``precursor_index0_arr`` selects which local precursors (0-based, into
-    ``speclib_container``) to evaluate; outputs are aligned 1:1 with it
-    (not with the full container). ``valid_arr[i]`` is False when precursor
-    ``precursor_index0_arr[i]`` has no usable RT/XIC window (empty or
-    inverted RT range, or an out-of-bounds frame index) -- callers must
-    filter by ``valid_arr`` before using ``frame_index_arr``/``score_arr``.
+    `precursor_index0_arr` holds 0-based indices into `speclib_container`, and
+    the outputs align with it. ``valid_arr[i]`` is False when the precursor is
+    skipped (too few fragments, no usable RT/XIC window, apex too close to the
+    window edge); filter by it before using ``frame_index_arr``/``score_arr``.
     """
 
     n_ms2_frames = frame_num_map.ms2_rt_arr.shape[0]
@@ -133,18 +131,17 @@ def run_quick_search(
     min_matches: int = 500000,
     q_value_cutoff: float = 0.05,
 ):
-    """Legacy match-count-based quick search (kept for backward compatibility
-    and as the fallback path for engines that don't implement
-    ``perform_rt_bootstrap``). The primary initial-DIA-calibration path now
-    uses the RT-stratified, checkpointed bootstrap in
-    :mod:`delpi.search.dia.rt_bootstrap`, which calls :func:`_quick_match`
-    per round on sampled precursor subsets.
+    """Legacy match-count quick search for the initial DIA RT calibration.
+
+    Only reachable through `DIASearchEngine.perform_quick_search`; the pipeline
+    uses :mod:`delpi.search.dia.rt_bootstrap`, which also calls `_quick_match`
+    window by window.
     """
 
     num_wins = run.dia_scheme_df.shape[0]
     win_indices = np.random.RandomState(seed=1226).permutation(num_wins)
 
-    ############# first (coarse) pass for RT mapping ####################
+    # first (coarse) pass for RT mapping
     spec_reader = SpectralLibReader(
         peptide_db_path=db_dir,
         max_fragments=6,
@@ -152,7 +149,7 @@ def run_quick_search(
         max_fragment_isotopes=1,
     )
 
-    ## Set initial retention time tolerance
+    # initial RT tolerance
     rt_calibrator = LinearProjectionCalibrator(
         min_rt_in_seconds=0,
         max_rt_in_seconds=run.gradient_length_in_seconds,
@@ -160,7 +157,7 @@ def run_quick_search(
     ).fit(spec_reader.modification_df["ref_rt"])
     spec_reader.calibrate_rt(rt_calibrator)
 
-    ## Fitting reference RT to observed RT
+    # collect matches window by window until min_matches
     match_results = defaultdict(list)
     num_matches = 0
     for win_idx in win_indices:

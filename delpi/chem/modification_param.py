@@ -39,10 +39,7 @@ def _encode(
     unimod_id: int, loc: ModificationLocation, residue: str, fixed: bool
 ) -> int:
 
-    # unimod_id = self.modification.accession_num # 0-65535 (16 bit)
-    # loc = self.location # 0-8       (3 bit)
-    # residue = self.residue # 0-128  (7 bit)
-    # fixed = self.fixed # 0-1        (1 bit)
+    # bit layout: unimod_id 16-31, loc 13-15, residue (ASCII) 6-12, fixed 0
     if not (0 <= unimod_id <= 65535):
         raise ValueError("unimod_id must be in the range 0-65535")
     if not (0 <= int(loc) <= 7):

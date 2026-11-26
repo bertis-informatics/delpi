@@ -45,13 +45,11 @@ class PeptideDataset(Dataset):
             peptidoform_index_arr = np.arange(modification_df.shape[0], dtype=np.uint32)
 
         self.peptidoform_index_arr = peptidoform_index_arr
-        # one-time array for batch grouping only; not kept per-item (that's
-        # re-derived from peptide_index_by_peptidoform_arr in __getitem__).
         sequence_length_arr = sequence_length_by_peptide[
             self.peptide_index_by_peptidoform_arr[peptidoform_index_arr]
         ]
 
-        # only what SeqDataBatchSampler needs for grouping/counting batches.
+        # used only by SeqDataBatchSampler to group and count batches
         self.label_df = pl.DataFrame({"sequence_length": sequence_length_arr})
 
     @property

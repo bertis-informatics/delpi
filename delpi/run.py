@@ -53,34 +53,26 @@ def run_search(
     batch_size: Union[str, int] = "auto",
     progress=None,
 ):
-    """
-    Run DelPi search with given parameters.
+    """Run a DelPi search from a configuration YAML file.
 
     Args:
-        config_path: Path to configuration YAML file
-        device: Device to use for computation
-        log_level: Logging level
-        batch_size: Batch size for inference ('auto' to set based on GPU memory)
-        progress: Optional ProgressTracker instance.  When provided the
-            engine runs in-process so that tracker callbacks (e.g. for a
-            GUI) fire normally.  When ``None`` (default) a tqdm progress
-            bar is shown in the terminal.
+        batch_size: inference batch size, or 'auto' to set it from GPU memory
+        progress: optional CallbackProgressTracker; progress from the search
+            child processes is forwarded to its callback (e.g. for a GUI).
+            None shows a tqdm bar instead.
     """
 
     config_file = Path(config_path)
     if not config_file.exists():
         raise FileNotFoundError(f"Configuration file not found: {config_path}")
 
-    # Initialize search configuration
     search_config = SearchConfig(config_path)
     search_config.config["batch_size"] = batch_size
     search_config.check_params()
 
-    # Configure logging
     log_level_num = getattr(logging, log_level.upper())
     configure_logging(logfile_path=search_config.log_file_path, level=log_level_num)
 
-    # Run search
     search_mgr = SearchManager(
         search_config, specified_device=device, progress=progress
     )

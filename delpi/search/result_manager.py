@@ -1,9 +1,4 @@
-"""
-Result Manager for DelPi
-
-This module provides the ResultManager class for reading and writing
-search results in HDF5 format with database integration.
-"""
+"""Per-run HDF5 storage of search results."""
 
 from pathlib import Path
 from typing import Union, List, Dict
@@ -18,19 +13,9 @@ logger = logging.getLogger(__name__)
 
 
 class ResultManager:
-    """
-    Manages reading and writing of search results in HDF5 format.
-
-    This class provides a unified interface for:
-    - Loading search results with database joins
-    - Writing search results to HDF5
-    - Managing features and metadata
-    """
+    """Reads and writes one run's results in ``<output_dir>/<run_name>.delpi.h5``."""
 
     def __init__(self, run_name: str, output_dir: Path):
-        """
-        Initialize ResultManager.
-        """
         self.run_name = run_name
         self.hdf_file_path = self.get_hdf_file_path(output_dir, run_name)
         self.hdf_file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -74,15 +59,10 @@ class ResultManager:
     #     return pl.from_pandas(pd.read_hdf(self.hdf_file_path, key=key))
 
     def read_dict(self, group_key: str, data_keys: List[str]) -> Dict[str, np.ndarray]:
-        """
-        Load search results from HDF5 file.
+        """Read `data_keys` from `group_key`; keys absent from the group are skipped.
 
-        Args:
-            data_keys: List of data keys to load
-            hdf_path: Path to HDF5 file (uses instance path if None)
-            mode: File opening mode (uses instance mode if None)
-        Returns:
-            Dictionary of loaded data arrays
+        Raises:
+            KeyError: the group does not exist.
         """
 
         with h5py.File(self.hdf_file_path, mode="r") as hdf_file:
@@ -107,27 +87,17 @@ class ResultManager:
         out: np.ndarray = None,
         row_indices: np.ndarray = None,
     ) -> np.ndarray:
-        """Read embedding features from HDF into a (N, feature_dim) array.
+        """Read the ``features`` embeddings of a group into a (N, feature_dim) array.
 
-        Parameters
-        ----------
-        group_key : str
-            HDF group name (e.g. "second_results").
-        feature_dim : int
-            Width of the output array (embedding + extra columns).
-        out : np.ndarray, optional
-            Pre-allocated destination array.  When provided, embeddings are
-            written into the rows given by *row_indices* (or all rows if
-            *row_indices* is ``None``).  Columns beyond the embedding dim
-            are left untouched.
-        row_indices : np.ndarray, optional
-            HDF row indices to read (fancy-indexing into the dataset).
-            Only used when *out* is provided.
+        Args:
+            feature_dim: output width (embedding + extra columns). Columns past
+                the embedding are left untouched.
+            out: preallocated destination. With `row_indices`, row k of `out`
+                gets HDF row ``row_indices[k]``; otherwise all rows are read.
+            row_indices: HDF rows to read; used only with `out`.
 
-        Returns
-        -------
-        np.ndarray
-            The filled array — either *out* or a freshly allocated one.
+        Returns:
+            `out`, or a new float32 array.
         """
         with h5py.File(self.hdf_file_path, mode="r") as hdf_file:
             ds = hdf_file[group_key]["features"]
@@ -151,9 +121,7 @@ class ResultManager:
         data_dict: dict,
         chunk_size: int = 512,
     ) -> None:
-        """
-        Write search results to HDF5 file.
-        """
+        """Append each array to its dataset in `group_key`, creating it if needed."""
 
         with h5py.File(self.hdf_file_path, mode="a") as hdf_file:
 
@@ -162,13 +130,12 @@ class ResultManager:
             else:
                 result_group = hdf_file.create_group(group_key)
 
-            # Write main data arrays
             for key, data in data_dict.items():
-                # [NOTE] feature arrays are chunked by 1 row for quick random access during training
+                # one-row chunks give fast random access to features in training
                 chunk_row_size = 1 if key == "features" else chunk_size
                 if isinstance(data, np.ndarray):
                     self._write_data(result_group, key, data, chunk_row_size)
-                elif hasattr(data, "__array__"):  # Handle other array-like objects
+                elif hasattr(data, "__array__"):
                     self._write_data(
                         result_group, key, np.asarray(data), chunk_row_size
                     )
@@ -185,29 +152,20 @@ class ResultManager:
         chunk_row_size: int = 512,
         compression: str = "lzf",
     ) -> int:
-        """
-        Write data to HDF5 dataset with automatic resizing.
-
-        Args:
-            hdf: HDF5 file or group
-            dataset_name: Name of the dataset
-            data: Data to write
-            chunk_row_size: Number of rows per chunk
-            compression: Compression algorithm to use
+        """Append `data` to a dataset, creating a resizable one if missing.
 
         Returns:
-            Total number of samples in the dataset after writing
+            Number of rows in the dataset after writing.
         """
         n_additions = data.shape[0]
 
         if dataset_name not in hdf:
             chunk_shape = (chunk_row_size, *data.shape[1:])
-            # Disable compression for pathological tiny-chunk 1D case
+            # no compression for 1-D data in one-row chunks
             use_compression = compression
             if data.ndim == 1 and chunk_row_size == 1:
-                use_compression = None  # disables compression in h5py
+                use_compression = None
 
-            # Create new dataset with unlimited first dimension
             hdf.create_dataset(
                 dataset_name,
                 data=data,
@@ -217,7 +175,6 @@ class ResultManager:
             )
             n_samples = n_additions
         else:
-            # Append to existing dataset
             ds = hdf[dataset_name]
             n_existing = ds.shape[0]
             ds.resize((n_existing + n_additions), axis=0)
@@ -233,12 +190,13 @@ class ResultManager:
         global_fdr: bool = False,
         use_library_q_value: bool = False,
     ) -> pd.DataFrame:
-        """Count identified precursors/peptides/protein-groups at *q_value_cutoff*.
+        """Count target precursors, peptides and protein groups at `q_value_cutoff`.
 
-        ``use_library_q_value`` is set for the second pass of the two-pass
-        MBR search: the first-pass-derived ``library_*_q_value`` columns
-        (fixed per precursor, not run- or global-scope specific) are used
-        instead of ``global_fdr``'s ``global_``/run-specific column prefix.
+        `use_library_q_value` (second pass of the two-pass MBR search) uses the
+        first-pass ``library_*_q_value`` columns, fixed per precursor, instead
+        of the run-level (or, with `global_fdr`, ``global_``) columns. A count
+        is None when its columns are absent, e.g. the second MBR pass skips
+        protein grouping.
         """
 
         target_df = pmsm_df.filter(pl.col("is_decoy") == False)
@@ -263,9 +221,6 @@ class ResultManager:
                 ),
             }
 
-        # Columns may be absent (e.g. the second pass of the two-pass MBR
-        # search skips protein grouping/its q-value); report `None` for
-        # those metrics instead of raising.
         counts = {
             key: (
                 target_df.filter(pl.col(fdr_col) <= q_value_cutoff)[idx_col].n_unique()

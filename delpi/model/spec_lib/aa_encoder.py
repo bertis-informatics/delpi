@@ -69,13 +69,11 @@ def encode_batch_sequences(batch_sequences: List[str]) -> np.ndarray:
 
 @nb.njit(nogil=True, cache=True, fastmath=True)
 def parse_mod_string(s):
-    """Parse a MOD_SEPARATOR-joined string of (possibly negative) integers.
+    """Parse a MOD_SEPARATOR-joined string of possibly negative integers.
 
-    Modification sites use ``-1`` to mark the C-terminal residue (see
+    Sites use ``-1`` for the C-terminal residue (see
     ``ModificationHandler.generate_variable_mods``/``generate_static_mods``),
-    so ``-`` must be treated as a sign marker rather than a digit; otherwise
-    ``ord('-') - ord('0')`` silently produces a bogus value that later gets
-    used as an out-of-bounds array index.
+    so ``-`` is read as a sign, not a digit.
     """
     result = []
     current = 0
@@ -96,7 +94,7 @@ def parse_mod_string(s):
 
 @nb.njit(nogil=True, cache=True, fastmath=True)
 def encode_modification(mod_sites: str, mod_ids: str, out_arr: np.ndarray = None):
-    """parse modification strings and encode to a fixed-size array"""
+    """Encode modification strings as (site, unimod id) rows of a fixed-size array."""
 
     if out_arr is None:
         out_arr = np.full((MAX_MOD_COUNT, 2), -1, dtype=np.int16)

@@ -13,24 +13,15 @@ def maxlfq(
     min_peptides_per_protein: int = 2,
     min_ratio_count: int = 1,
 ) -> pl.DataFrame:
-    """
-    Vectorized MaxLFQ, functionally equivalent to `maxlfq()`.
+    """MaxLFQ protein abundance per run.
 
-    `maxlfq()` re-enters Polars/Python once per protein (group_by iteration
-    plus several per-protein `.to_list()`/`group_by().agg()` calls and Python
-    dict-based factorization), which dominates runtime as the number of
-    proteins/runs grows. Here, the entire per-protein loop - run/peptide
-    grouping, pairwise ratio construction, and a single weakly-anchored
-    linear solve over all of that protein's observed runs - runs inside a
-    single compiled `_nb_maxlfq_all_proteins` kernel, with only one Polars
-    pass to prepare inputs and one to assemble the output.
+    Rows with null or non-positive `intensity_col` are dropped. The whole
+    per-protein loop (pairwise run ratios, one weakly anchored solve over all
+    observed runs) runs in the compiled `_nb_maxlfq_all_proteins`. A run pair
+    needs `min_ratio_count` shared peptides for a ratio edge; proteins with
+    fewer than `min_peptides_per_protein` peptides are skipped.
 
-    `min_ratio_count=1` means a run pair only needs one shared precursor to
-    get a pairwise-ratio edge; combined with the weak per-run anchor in
-    `_nb_maxlfq_all_proteins`, this keeps sparse/disconnected proteins from
-    producing arbitrarily-scaled or singular systems.
-
-    See `maxlfq()` for parameter and return value semantics.
+    Returns a DataFrame with `protein_col`, `run_col` and Float32 `abundance`.
     """
     df = df.filter(pl.col(intensity_col).is_not_null() & (pl.col(intensity_col) > 0))
 
@@ -45,10 +36,8 @@ def maxlfq(
     if df.height == 0:
         return pl.DataFrame(schema=result_schema)
 
-    # Dense int32 codes (any orderable dtype works, protein/run/peptide counts
-    # always fit int32) sorted so each protein's rows are contiguous and
-    # peptide-ordered, as required by _nb_build_L_b. logI/intensity are kept
-    # float32 since they're the other arrays sized by the full row count.
+    # dense int32 codes, sorted so each protein's rows are contiguous and
+    # peptide-ordered (required by _nb_build_L_b); float32 logI/intensity
     df = df.with_columns(
         (pl.col(protein_col).rank(method="dense").cast(pl.Int32) - 1).alias(
             "__protein_idx"

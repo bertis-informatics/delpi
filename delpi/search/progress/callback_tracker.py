@@ -1,11 +1,7 @@
-"""
-Callback-based progress tracker with time estimation.
+"""Callback-based hierarchical progress tracker with time estimation.
 
-Core hierarchical progress logic: child trackers propagate proportionally
-to parents, and a user-supplied callback is fired on every update.
-
-``TqdmProgressTracker`` inherits from this class, adding only the tqdm
-display layer on top.
+Children propagate progress proportionally to their parents, and a callback is
+fired on every update. ``TqdmProgressTracker`` adds a tqdm display on top.
 """
 
 from __future__ import annotations
@@ -20,21 +16,18 @@ from delpi.search.progress.snapshot import ProgressSnapshot
 class CallbackProgressTracker(ProgressTracker):
     """Hierarchical progress tracker with an optional callback.
 
-    On every ``advance`` / ``complete`` / ``create_child`` event the root
-    tracker's callback (if set) is called with a :class:`ProgressSnapshot`
-    containing the overall percent, active subtask info, elapsed time, and
-    estimated remaining time.
+    On every ``advance``, ``complete`` or ``create_child``, the root's callback
+    (if set) receives a :class:`ProgressSnapshot`.
 
     Parameters
     ----------
     total : int
-        Number of logical steps for this tracker.
+        Number of steps for this tracker.
     description : str
-        Human-readable label.
+        Label.
     callback : callable, optional
-        ``callback(snapshot: ProgressSnapshot) -> None``.
-        Only the **root** tracker's callback is used; children forward
-        events upward until it fires.
+        ``callback(snapshot: ProgressSnapshot) -> None``. Only the root's
+        callback is used.
     """
 
     def __init__(
@@ -54,7 +47,7 @@ class CallbackProgressTracker(ProgressTracker):
         self._portion = _portion
         self._completed = False
 
-        # Root reference — every node can reach the root in O(1)
+        # every node keeps a direct reference to the root
         if _parent is None:
             self._root: CallbackProgressTracker = self
             self._callback = callback
@@ -71,7 +64,7 @@ class CallbackProgressTracker(ProgressTracker):
             self._callback = None
             self._start_time = None
 
-    # -- public read-only properties ----------------------------------------
+    # read-only properties
 
     @property
     def is_root(self) -> bool:
@@ -112,7 +105,7 @@ class CallbackProgressTracker(ProgressTracker):
             eta=self.eta,
         )
 
-    # -- ProgressTracker API ------------------------------------------------
+    # ProgressTracker API
 
     def advance(self, n: int = 1) -> None:
         if self._completed:
@@ -123,11 +116,9 @@ class CallbackProgressTracker(ProgressTracker):
         if self.is_root:
             root._overall_current = min(root._overall_current + n, root._overall_total)
         else:
-            # Update active subtask metadata on root
             root._active_description = self._description
             root._active_current = int(self._current)
             root._active_total = self._total
-            # Propagate proportionally to parent
             if self._total > 0:
                 parent_inc = (n / self._total) * self._portion
                 self._parent._advance_from_child(parent_inc)
@@ -144,7 +135,6 @@ class CallbackProgressTracker(ProgressTracker):
             _root=self._root,
             _portion=portion,
         )
-        # Register new subtask on root
         root = self._root
         root._active_description = description
         root._active_current = 0
@@ -161,7 +151,7 @@ class CallbackProgressTracker(ProgressTracker):
         if self.is_root:
             self._root._overall_current = self._root._overall_total
         elif self._parent is not None:
-            # Propagate remaining un-reported progress
+            # propagate unreported progress
             if self._total > 0:
                 already = (self._current / self._total) * self._portion
             else:
@@ -176,7 +166,7 @@ class CallbackProgressTracker(ProgressTracker):
     def close(self) -> None:
         pass
 
-    # -- internal propagation -----------------------------------------------
+    # internal propagation
 
     def _advance_from_child(self, amount: float) -> None:
         """Receive a proportional progress increment from a child."""
@@ -190,10 +180,10 @@ class CallbackProgressTracker(ProgressTracker):
                 parent_inc = (amount / self._total) * self._portion
                 self._parent._advance_from_child(parent_inc)
 
-    # -- hooks for subclasses (template method pattern) ---------------------
+    # hooks for subclasses
 
     def _on_update(self) -> None:
-        """Called after any state change.  Fires the root callback."""
+        """Called after any state change; fires the root callback."""
         root = self._root
         if root._callback is not None:
             root._callback(self.get_snapshot())
@@ -206,15 +196,13 @@ class CallbackProgressTracker(ProgressTracker):
         """Called when ``complete()`` is invoked on this tracker."""
         pass
 
-    # -- public forwarding ---------------------------------------------------
+    # public forwarding
 
     def forward_snapshot(self, snapshot: ProgressSnapshot) -> None:
-        """Forward an externally-produced snapshot to this tracker's callback.
+        """Pass an external snapshot to this tracker's callback.
 
-        This is used by the queue-based subprocess bridge: the parent
-        process reads :class:`ProgressSnapshot` objects from a
-        ``multiprocessing.Queue`` and hands them to this method so that
-        the user-supplied callback fires in the parent process.
+        Used by the subprocess bridge: the parent process reads snapshots from
+        a ``multiprocessing.Queue`` so that the callback fires in the parent.
         """
         if self._callback is not None:
             self._callback(snapshot)

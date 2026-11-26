@@ -17,7 +17,6 @@ from delpi.utils.down_sampler import DownsampleSampler
 
 logger = logging.getLogger(__name__)
 
-# Default training parameters
 DEFAULT_TRAINING_PARAMS = {
     "min_epochs": 10,
     "max_epochs": 40,
@@ -34,7 +33,6 @@ DEFAULT_TRAINING_PARAMS = {
     "early_stopping_min_delta": 1e-4,
 }
 
-# Default model parameters
 DEFAULT_MODEL_PARAMS = {
     # PmSM embedding followed by the rescoring features (tda/features.py)
     "input_size": FEATURE_DIM,
@@ -122,7 +120,7 @@ def _tensor_device(device: torch.device, tensors) -> torch.device:
 
 
 class TargetDecoyTrainer:
-    """Handles training of target-decoy classifiers."""
+    """Trains target-decoy classifiers."""
 
     def __init__(self, model_params: dict = None, training_params: dict = None):
         self.model_params = {**DEFAULT_MODEL_PARAMS, **(model_params or {})}
@@ -137,17 +135,10 @@ class TargetDecoyTrainer:
         output_dir: Path,
         device: torch.device,
     ):
-        """
-        Train a target-decoy classifier and score the test dataset.
+        """Train a classifier and set `best_model_path` (lowest val_loss).
 
-        Args:
-            train_dataset: Training dataset
-            val_dataset: Group-disjoint validation dataset
-            output_dir: Directory to save model logs
-            device: PyTorch device for training
-
-        Returns:
-            Array of scores for the test dataset
+        `val_dataset` should be group-disjoint from `train_dataset`. CSV logs
+        and the checkpoint go under `output_dir`, versioned by `model_version`.
         """
         batch_size = self._batch_size(model_version, len(train_dataset))
 
@@ -181,7 +172,6 @@ class TargetDecoyTrainer:
                 seed=self.training_params["random_seed"],
             )
 
-            # Create data loaders
             train_loader = DataLoader(
                 train_dataset,
                 batch_size=batch_size,
@@ -197,14 +187,11 @@ class TargetDecoyTrainer:
                 persistent_workers=(num_workers > 0),
             )
 
-        # Create model
         model = self._create_model()
 
-        # Setup callbacks
         callbacks = self._setup_callbacks()
         logger = CSVLogger(save_dir=output_dir, version=model_version)
 
-        # Train model
         trainer = Trainer(
             min_epochs=self.training_params["min_epochs"],
             max_epochs=self.training_params["max_epochs"],

@@ -29,12 +29,11 @@ class DIAWindow(BaseSpectra):
         max_frame_num = meta_df.item(-1, "frame_num")
         frame_num_to_index = np.full(max_frame_num + 1, -1, dtype=np.int32)
 
-        ## create frame_num_to_index mapping
-        # mapping MS2 frame_nums
+        # frame_num -> frame index in this window (-1 = not in the window)
         for frame_index, frame_num in enumerate(ms2_meta_df["frame_num"]):
             frame_num_to_index[frame_num] = frame_index
 
-        # mapping MS1 frame_nums
+        # MS1: the frame nearest in RT to each MS2 frame gets that frame's index
         ms1_rt_array = ms1_meta_df["time_in_seconds"].to_numpy()
         ms1_frame_indices = interp1d(
             ms1_rt_array,
