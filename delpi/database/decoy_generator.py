@@ -431,7 +431,10 @@ class DecoyGenerator:
 
         target_out = target_peptide_df.with_columns(
             is_decoy=False,
-            target_peptide_index=pl.lit(None, dtype=pl.List(pl.UInt32)),
+            # with_row_index uses UInt64 on rt64; keep its aggregated list dtype.
+            target_peptide_index=pl.lit(
+                None, dtype=decoy_peptide_df.schema["target_peptide_index"]
+            ),
             decoy_type=pl.lit(None, dtype=pl.String),
         ).select(out_cols)
         decoy_out = decoy_peptide_df.with_columns(is_decoy=True).select(out_cols)
