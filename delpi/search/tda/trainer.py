@@ -2,7 +2,6 @@ import logging
 import math
 from pathlib import Path
 
-import numpy as np
 import torch
 
 from lightning.pytorch.callbacks.early_stopping import EarlyStopping
@@ -137,7 +136,7 @@ class TargetDecoyTrainer:
         val_dataset: TensorDataset,
         output_dir: Path,
         device: torch.device,
-    ) -> np.ndarray:
+    ):
         """
         Train a target-decoy classifier and score the test dataset.
 

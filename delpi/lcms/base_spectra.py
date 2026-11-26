@@ -112,8 +112,7 @@ class BaseSpectra:
         Returns:
             DataFrame containing all peaks in the specified frame
         """
-        frame_idx = self.frame_num_to_index(frame_num)
-        return self.peak_df.filter(pl.col("frame_index") == frame_idx)
+        return self.peak_df.filter(pl.col("frame_num") == frame_num)
 
     def match(self, theoretical_peak_df, tolerance_in_ppm):
         """
