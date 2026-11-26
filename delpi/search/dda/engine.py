@@ -108,6 +108,8 @@ class DDASearchEngine(BaseSearchEngine):
                 rt_window_half,
                 isolation_lower_tol_in_da=ISOLATION_LOWER_TOL,
                 isolation_upper_tol_in_da=ISOLATION_UPPER_TOL,
+                ms1_mass_tol=ms1_tol,
+                ms2_mass_tol=ms2_tol,
                 topk=peak_group_topk,
                 min_search_fragments=search_config.min_search_fragments,
             )
@@ -277,6 +279,8 @@ class DDASearchEngine(BaseSearchEngine):
                             rt_window_half,
                             isolation_lower_tol_in_da=ISOLATION_LOWER_TOL,
                             isolation_upper_tol_in_da=ISOLATION_UPPER_TOL,
+                            ms1_mass_tol=search_config["ms1_mass_tol_in_ppm"],
+                            ms2_mass_tol=search_config["ms2_mass_tol_in_ppm"],
                             topk=TOPK_PER_PRECURSOR,
                             min_search_fragments=min_search_fragments,
                         )
